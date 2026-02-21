@@ -32,7 +32,7 @@ fn CommitParentsQueue(comptime hash_kind: hash.HashKind) type {
     );
 }
 
-fn getDescendent(
+pub fn getDescendent(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     allocator: std.mem.Allocator,
