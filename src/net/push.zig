@@ -79,13 +79,14 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
                         continue;
                     }
 
-                    if (mrg.commonAncestor(repo_kind, repo_opts, allocator, state, &spec.loid, &spec.roid)) |*ancestor_commit| {
-                        if (!std.mem.eql(u8, ancestor_commit, &spec.roid)) {
+                    if (mrg.getDescendent(repo_kind, repo_opts, allocator, state, &spec.loid, &spec.roid)) |descendent| {
+                        if (!std.mem.eql(u8, &descendent, &spec.loid)) {
+                            // remote is the descendent, meaning local is behind remote
                             return error.RemoteRefContainsCommitsNotFoundLocally;
                         }
                     } else |err| switch (err) {
                         error.ObjectNotFound => return error.RemoteRefContainsCommitsNotFoundLocally,
-                        error.NoCommonAncestor => return error.RemoteRefContainsIncompatibleHistory,
+                        error.DescendentNotFound => return error.RemoteRefContainsIncompatibleHistory,
                         else => |e| return e,
                     }
                 }
