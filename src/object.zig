@@ -1059,6 +1059,7 @@ pub const ObjectIteratorOptions = struct {
         all,
         commit,
     },
+    max_depth: ?usize = null,
 };
 
 pub fn ObjectIterator(
@@ -1073,10 +1074,12 @@ pub fn ObjectIterator(
         oid_queue: std.DoublyLinkedList,
         oid_excludes: std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void),
         object: Object(repo_kind, repo_opts, load_kind),
+        depth: usize,
         options: ObjectIteratorOptions,
 
         const OidAndNode = struct {
             oid: [hash.hexLen(repo_opts.hash)]u8,
+            depth: usize,
             node: std.DoublyLinkedList.Node,
         };
 
@@ -1092,6 +1095,7 @@ pub fn ObjectIterator(
                 .oid_queue = std.DoublyLinkedList{},
                 .oid_excludes = std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void).init(allocator),
                 .object = undefined,
+                .depth = 0,
                 .options = options,
             };
         }
@@ -1109,15 +1113,17 @@ pub fn ObjectIterator(
             while (self.oid_queue.popFirst()) |node| {
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
                 const next_oid = oid_and_node.oid;
+                const node_depth = oid_and_node.depth;
                 self.allocator.destroy(oid_and_node);
 
                 if (!self.oid_excludes.contains(next_oid)) {
                     try self.oid_excludes.put(next_oid, {});
+                    self.depth = node_depth;
                     switch (load_kind) {
                         .raw => {
                             var object = try Object(repo_kind, repo_opts, .full).init(self.allocator, state, &next_oid);
                             defer object.deinit();
-                            try self.includeContent(object.content);
+                            try self.includeContent(object.content, node_depth + 1);
 
                             switch (self.options.kind) {
                                 .all => {},
@@ -1132,7 +1138,7 @@ pub fn ObjectIterator(
                         .full => {
                             var object = try Object(repo_kind, repo_opts, .full).init(self.allocator, state, &next_oid);
                             errdefer object.deinit();
-                            try self.includeContent(object.content);
+                            try self.includeContent(object.content, node_depth + 1);
 
                             switch (self.options.kind) {
                                 .all => {},
@@ -1151,36 +1157,42 @@ pub fn ObjectIterator(
             return null;
         }
 
-        fn includeContent(self: *ObjectIterator(repo_kind, repo_opts, load_kind), content: ObjectContent(repo_opts.hash)) !void {
+        fn includeContent(self: *ObjectIterator(repo_kind, repo_opts, load_kind), content: ObjectContent(repo_opts.hash), child_depth: usize) !void {
             switch (content) {
                 .blob => {},
                 .tree => |tree_content| switch (self.options.kind) {
                     .all => for (tree_content.entries.values()) |entry| {
                         const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
-                        try self.include(&entry_oid);
+                        try self.includeAtDepth(&entry_oid, child_depth);
                     },
                     .commit => {},
                 },
                 .commit => |commit_content| {
                     if (commit_content.metadata.parent_oids) |parent_oids| {
                         for (parent_oids) |*parent_oid| {
-                            try self.include(parent_oid);
+                            try self.includeAtDepth(parent_oid, child_depth);
                         }
                     }
                     switch (self.options.kind) {
-                        .all => try self.include(&commit_content.tree),
+                        .all => try self.includeAtDepth(&commit_content.tree, child_depth),
                         .commit => {},
                     }
                 },
-                .tag => |tag| try self.include(&tag.target),
+                .tag => |tag| try self.includeAtDepth(&tag.target, child_depth),
             }
         }
 
         pub fn include(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
+            try self.includeAtDepth(oid, 0);
+        }
+
+        pub fn includeAtDepth(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize) !void {
+            if (self.options.max_depth) |max| if (item_depth > max) return;
             if (!self.oid_excludes.contains(oid.*)) {
                 var oid_and_node = try self.allocator.create(OidAndNode);
                 errdefer self.allocator.free(oid_and_node);
                 oid_and_node.oid = oid.*;
+                oid_and_node.depth = item_depth;
                 oid_and_node.node = .{};
                 self.oid_queue.append(&oid_and_node.node);
             }
