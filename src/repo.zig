@@ -1383,24 +1383,24 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 }
 
 /// auto-detects the hash used by an existing repo
-pub fn AnyRepo(comptime repo_kind: RepoKind, comptime repo_opts: AnyRepoOpts(repo_kind)) type {
+pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts(repo_kind)) type {
     return union(hash.HashKind) {
-        sha1: Repo(repo_kind, repo_opts.withHash(.sha1)),
-        sha256: Repo(repo_kind, repo_opts.withHash(.sha256)),
+        sha1: Repo(repo_kind, any_repo_opts.withHash(.sha1)),
+        sha256: Repo(repo_kind, any_repo_opts.withHash(.sha256)),
 
-        pub fn open(allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, repo_opts) {
+        pub fn open(allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, any_repo_opts) {
             const detected_hash: hash.HashKind = blk: {
                 switch (repo_kind) {
                     .git => break :blk .sha1,
                     .xit => {
                         const xitdb = @import("xitdb");
 
-                        const new_repo_opts = comptime ro_blk: {
-                            var ro = repo_opts.toRepoOpts();
+                        const repo_opts = comptime ro_blk: {
+                            var ro = any_repo_opts.toRepoOpts();
                             ro.extra.init_db = false;
                             break :ro_blk ro;
                         };
-                        var repo = try Repo(repo_kind, new_repo_opts).open(allocator, init_opts);
+                        var repo = try Repo(repo_kind, repo_opts).open(allocator, init_opts);
                         defer repo.deinit(allocator);
 
                         var buffer = [_]u8{0} ** @sizeOf(xitdb.DatabaseHeader);
@@ -1414,12 +1414,12 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime repo_opts: AnyRepoOpts(rep
                 }
             };
             return switch (detected_hash) {
-                .sha1 => .{ .sha1 = try Repo(repo_kind, repo_opts.withHash(.sha1)).open(allocator, init_opts) },
-                .sha256 => .{ .sha256 = try Repo(repo_kind, repo_opts.withHash(.sha256)).open(allocator, init_opts) },
+                .sha1 => .{ .sha1 = try Repo(repo_kind, any_repo_opts.withHash(.sha1)).open(allocator, init_opts) },
+                .sha256 => .{ .sha256 = try Repo(repo_kind, any_repo_opts.withHash(.sha256)).open(allocator, init_opts) },
             };
         }
 
-        pub fn deinit(self: *AnyRepo(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *AnyRepo(repo_kind, any_repo_opts), allocator: std.mem.Allocator) void {
             switch (self.*) {
                 inline else => |*case| case.deinit(allocator),
             }
