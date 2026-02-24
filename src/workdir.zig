@@ -846,14 +846,14 @@ pub fn restore(
     }
 }
 
-pub fn ResetInput(comptime hash_kind: ?hash.HashKind) type {
+pub fn ResetInput(comptime hash_kind: hash.HashKind) type {
     return struct {
         target: ?rf.RefOrOid(hash_kind),
         force: bool = false,
     };
 }
 
-pub fn SwitchInput(comptime hash_kind: ?hash.HashKind) type {
+pub fn SwitchInput(comptime hash_kind: hash.HashKind) type {
     return struct {
         kind: enum {
             @"switch",

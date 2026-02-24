@@ -510,7 +510,7 @@ pub const CommandArgs = struct {
 
 /// parses the args into a format that can be directly used by a repo.
 /// if any additional allocation needs to be done, the arena inside the cmd args will be used.
-pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: ?hash.HashKind) type {
+pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKind) type {
     return union(CommandKind) {
         init: struct {
             dir: []const u8,
@@ -859,7 +859,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: ?hash.HashKi
 
 /// parses the given args into a command if valid, and determines how it should be run
 /// (via the TUI or CLI).
-pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: ?hash.HashKind) type {
+pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKind) type {
     return union(enum) {
         invalid: union(enum) {
             command: []const u8,

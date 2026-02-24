@@ -10,7 +10,7 @@ const df = @import("./diff.zig");
 const tr = @import("./tree.zig");
 const cfg = @import("./config.zig");
 
-fn CommitParent(comptime hash_kind: ?hash.HashKind) type {
+fn CommitParent(comptime hash_kind: hash.HashKind) type {
     return struct {
         oid: [hash.hexLen(hash_kind)]u8,
         kind: enum { one, two, stale },
@@ -18,7 +18,7 @@ fn CommitParent(comptime hash_kind: ?hash.HashKind) type {
     };
 }
 
-fn CommitParentsQueue(comptime hash_kind: ?hash.HashKind) type {
+fn CommitParentsQueue(comptime hash_kind: hash.HashKind) type {
     const compareFn = struct {
         fn compareCommitParents(_: void, a: CommitParent(hash_kind), b: CommitParent(hash_kind)) std.math.Order {
             return std.math.order(b.timestamp, a.timestamp); // Pop latest first
@@ -211,14 +211,14 @@ pub fn commonAncestor(
     }
 }
 
-pub fn RenamedEntry(comptime hash_kind: ?hash.HashKind) type {
+pub fn RenamedEntry(comptime hash_kind: hash.HashKind) type {
     return struct {
         path: []const u8,
         tree_entry: tr.TreeEntry(hash_kind),
     };
 }
 
-pub fn MergeConflict(comptime hash_kind: ?hash.HashKind) type {
+pub fn MergeConflict(comptime hash_kind: hash.HashKind) type {
     return struct {
         base: ?tr.TreeEntry(hash_kind),
         target: ?tr.TreeEntry(hash_kind),
@@ -1181,7 +1181,7 @@ fn writeBlobWithPatches(
     return oid;
 }
 
-pub fn SamePathConflictResult(comptime hash_kind: ?hash.HashKind) type {
+pub fn SamePathConflictResult(comptime hash_kind: hash.HashKind) type {
     return struct {
         change: ?tr.Change(hash_kind),
         conflict: ?MergeConflict(hash_kind),
@@ -1436,7 +1436,7 @@ pub const MergeAlgorithm = enum {
     patch, // patch-based (xit only)
 };
 
-pub fn MergeAction(comptime hash_kind: ?hash.HashKind) type {
+pub fn MergeAction(comptime hash_kind: hash.HashKind) type {
     return union(enum) {
         new: struct {
             source: []const rf.RefOrOid(hash_kind),
@@ -1446,7 +1446,7 @@ pub fn MergeAction(comptime hash_kind: ?hash.HashKind) type {
     };
 }
 
-pub fn MergeInput(comptime hash_kind: ?hash.HashKind) type {
+pub fn MergeInput(comptime hash_kind: hash.HashKind) type {
     return struct {
         kind: MergeKind,
         action: MergeAction(hash_kind),

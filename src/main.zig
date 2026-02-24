@@ -73,7 +73,7 @@ const ProgressCtx = struct {
 /// think about it really often and eventually you'll dream about it.
 pub fn run(
     comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
     allocator: std.mem.Allocator,
     args: []const []const u8,
     cwd_path: []const u8,
@@ -82,7 +82,7 @@ pub fn run(
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
 
-    switch (try cmd.CommandDispatch(repo_kind, repo_opts.hash orelse .sha1).init(&cmd_args)) {
+    switch (try cmd.CommandDispatch(repo_kind, any_repo_opts.hash orelse .sha1).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
                 try writers.err.print("\"{s}\" is not a valid command\n\n", .{command});
@@ -96,28 +96,28 @@ pub fn run(
             },
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, writers.out),
-        .tui => |cmd_kind_maybe| if (repo_opts.hash == null) {
+        .tui => |cmd_kind_maybe| if (any_repo_opts.hash) |hash_kind| {
+            var repo = try rp.Repo(repo_kind, any_repo_opts.withHash(hash_kind)).open(allocator, .{ .path = cwd_path });
+            defer repo.deinit(allocator);
+            try ui.start(repo_kind, any_repo_opts.withHash(hash_kind), &repo, allocator, cmd_kind_maybe);
+        } else {
             // if no hash was specified, use AnyRepo to detect the hash being used
-            var any_repo = try rp.AnyRepo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
+            var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(allocator, .{ .path = cwd_path });
             defer any_repo.deinit(allocator);
             switch (any_repo) {
                 inline else => |*repo| try ui.start(repo.self_repo_kind, repo.self_repo_opts, repo, allocator, cmd_kind_maybe),
             }
-        } else {
-            var repo = try rp.Repo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
-            defer repo.deinit(allocator);
-            try ui.start(repo_kind, repo_opts, &repo, allocator, cmd_kind_maybe);
         },
         .cli => |cli_cmd| switch (cli_cmd) {
             .init => |init_cmd| {
-                const new_repo_opts = comptime if (repo_opts.hash == null)
-                    // if no hash was specified, just use the default hash
-                    repo_opts.withHash((rp.RepoOpts(repo_kind){}).hash)
+                const repo_opts = comptime if (any_repo_opts.hash) |hash_kind|
+                    any_repo_opts.withHash(hash_kind)
                 else
-                    repo_opts;
+                    // if no hash was specified, just use the default hash
+                    any_repo_opts.withHash((rp.RepoOpts(repo_kind){}).hash);
                 const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, init_cmd.dir });
                 defer allocator.free(work_path);
-                var repo = try rp.Repo(repo_kind, new_repo_opts).init(allocator, .{ .cwd_path = cwd_path, .path = work_path });
+                var repo = try rp.Repo(repo_kind, repo_opts).init(allocator, .{ .cwd_path = cwd_path, .path = work_path });
                 defer repo.deinit(allocator);
 
                 try writers.out.print(
@@ -134,12 +134,12 @@ pub fn run(
                 defer allocator.free(work_path);
                 var clear_line = false;
                 var progress_node: ?std.Progress.Node = null;
-                var repo = try rp.Repo(repo_kind, repo_opts).clone(
+                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).clone(
                     allocator,
                     clone_cmd.url,
                     cwd_path,
                     work_path,
-                    .{ .progress_ctx = if (repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node } },
+                    .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node } },
                 );
                 defer repo.deinit(allocator);
 
@@ -151,20 +151,20 @@ pub fn run(
                     , .{});
                 }
             },
-            else => if (repo_opts.hash == null) {
+            else => if (any_repo_opts.hash) |hash_kind| {
+                var repo = try rp.Repo(repo_kind, any_repo_opts.withHash(hash_kind)).open(allocator, .{ .path = cwd_path });
+                defer repo.deinit(allocator);
+                try runCommand(repo_kind, any_repo_opts.withHash(hash_kind), &repo, allocator, cli_cmd, writers);
+            } else {
                 // if no hash was specified, use AnyRepo to detect the hash being used
-                var any_repo = try rp.AnyRepo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
+                var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(allocator, .{ .path = cwd_path });
                 defer any_repo.deinit(allocator);
                 switch (any_repo) {
                     inline else => |*repo| {
-                        const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash orelse unreachable).initMaybe(&cmd_args);
+                        const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash).initMaybe(&cmd_args);
                         try runCommand(repo.self_repo_kind, repo.self_repo_opts, repo, allocator, cmd_maybe orelse return error.InvalidCommand, writers);
                     },
                 }
-            } else {
-                var repo = try rp.Repo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
-                defer repo.deinit(allocator);
-                try runCommand(repo_kind, repo_opts, &repo, allocator, cli_cmd, writers);
             },
         },
     }
@@ -173,13 +173,13 @@ pub fn run(
 /// like `run` except it prints user-friendly error messages
 pub fn runPrint(
     comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
     allocator: std.mem.Allocator,
     args: []const []const u8,
     cwd_path: []const u8,
     writers: Writers,
 ) !void {
-    run(repo_kind, repo_opts, allocator, args, cwd_path, writers) catch |err| switch (err) {
+    run(repo_kind, any_repo_opts, allocator, args, cwd_path, writers) catch |err| switch (err) {
         error.RepoNotFound => {
             try writers.err.print(
                 \\repo not found, dummy.

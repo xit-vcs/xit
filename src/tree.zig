@@ -5,7 +5,7 @@ const fs = @import("./fs.zig");
 const rp = @import("./repo.zig");
 const obj = @import("./object.zig");
 
-pub fn TreeEntry(comptime hash_kind: ?hash.HashKind) type {
+pub fn TreeEntry(comptime hash_kind: hash.HashKind) type {
     return struct {
         oid: [hash.byteLen(hash_kind)]u8,
         mode: fs.Mode,
@@ -20,7 +20,7 @@ pub fn TreeEntry(comptime hash_kind: ?hash.HashKind) type {
     };
 }
 
-pub fn Change(comptime hash_kind: ?hash.HashKind) type {
+pub fn Change(comptime hash_kind: hash.HashKind) type {
     return struct {
         old: ?TreeEntry(hash_kind),
         new: ?TreeEntry(hash_kind),

@@ -1401,7 +1401,7 @@ pub const DiffKind = enum {
     tree,
 };
 
-pub fn BasicDiffOptions(comptime hash_kind: ?hash.HashKind) type {
+pub fn BasicDiffOptions(comptime hash_kind: hash.HashKind) type {
     return union(DiffKind) {
         work_dir: struct {
             conflict_diff_kind: ConflictDiffKind,

@@ -16,7 +16,7 @@ fn bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) []u8 {
     };
 }
 
-pub fn UndoCommand(comptime hash_kind: ?hash.HashKind) type {
+pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
     return union(enum) {
         patch: enum {
             on,
