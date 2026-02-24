@@ -56,7 +56,7 @@ pub fn AnyRepoOpts(comptime repo_kind: RepoKind) type {
 
 pub fn RepoOptsHash(comptime repo_kind: RepoKind, comptime hash_kind_known: bool) type {
     return struct {
-        hash: HashKindType = .sha1,
+        hash: HashKindType = if (hash_kind_known) .sha1 else null,
         buffer_size: usize = 2048,
         read_size: usize = 2048,
         max_read_size: usize = 4096,
@@ -1389,7 +1389,7 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
         sha256: Repo(repo_kind, any_repo_opts.withHash(.sha256)),
 
         pub fn open(allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, any_repo_opts) {
-            const detected_hash: hash.HashKind = blk: {
+            const hash_kind: hash.HashKind = if (any_repo_opts.hash) |hash_kind| hash_kind else blk: {
                 switch (repo_kind) {
                     .git => break :blk .sha1,
                     .xit => {
@@ -1413,7 +1413,7 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
                     },
                 }
             };
-            return switch (detected_hash) {
+            return switch (hash_kind) {
                 .sha1 => .{ .sha1 = try Repo(repo_kind, any_repo_opts.withHash(.sha1)).open(allocator, init_opts) },
                 .sha256 => .{ .sha256 = try Repo(repo_kind, any_repo_opts.withHash(.sha256)).open(allocator, init_opts) },
             };

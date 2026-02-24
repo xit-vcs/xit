@@ -20,8 +20,8 @@ const c = @cImport({
 
 test "main" {
     // read and write objects in small increments to help uncover bugs
-    const last_hash_git = try testMain(.git, .{ .read_size = 1, .is_test = true });
-    const last_hash_xit = try testMain(.xit, .{ .read_size = 1, .is_test = true, .extra = .{
+    const last_hash_git = try testMain(.git, .{ .hash = .sha1, .read_size = 1, .is_test = true });
+    const last_hash_xit = try testMain(.xit, .{ .hash = .sha1, .read_size = 1, .is_test = true, .extra = .{
         .chunk_opts = .{ .min_size = 1, .avg_size = 2, .max_size = 4, .normalization = .level1 },
     } });
     try std.testing.expectEqualStrings(&last_hash_git, &last_hash_xit);
