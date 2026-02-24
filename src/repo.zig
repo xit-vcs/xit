@@ -83,31 +83,16 @@ pub fn RepoOptsHash(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
             },
         };
 
-        const Self = RepoOptsHash(repo_kind, hash_kind_known);
-
         pub fn withHash(self: RepoOptsHash(repo_kind, false), hash_kind: hash.HashKind) RepoOpts(repo_kind) {
             var repo_opts: RepoOpts(repo_kind) = .{};
             @setEvalBranchQuota(5000);
-            inline for (@typeInfo(Self).@"struct".fields) |field| {
+            inline for (@typeInfo(RepoOptsHash(repo_kind, hash_kind_known)).@"struct".fields) |field| {
                 if (std.mem.eql(u8, "hash", field.name)) {
                     continue;
                 }
                 @field(repo_opts, field.name) = @field(self, field.name);
             }
             repo_opts.hash = hash_kind;
-            return repo_opts;
-        }
-
-        pub fn withoutHash(self: RepoOptsHash(repo_kind, hash_kind_known)) AnyRepoOpts(repo_kind) {
-            var repo_opts: AnyRepoOpts(repo_kind) = .{};
-            @setEvalBranchQuota(5000);
-            inline for (@typeInfo(Self).@"struct".fields) |field| {
-                if (std.mem.eql(u8, "hash", field.name)) {
-                    continue;
-                }
-                @field(repo_opts, field.name) = @field(self, field.name);
-            }
-            repo_opts.hash = null;
             return repo_opts;
         }
 

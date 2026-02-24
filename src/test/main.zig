@@ -168,13 +168,18 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
 
         // make a commit
         // we're calling this one differently to test a few things:
-        // 1. setting the hash to `.none` causes it to autodetect the repo's hash.
+        // 1. setting the hash to null causes it to autodetect the repo's hash.
         // 2. the cwd is docs_path, to make sure we can run commands in any sub dir.
         // 3. we're using runPrint instead of run, which prints user-friendly errors
         //    (no difference in the tests but I just want to make sure it works)
         const docs_path = try std.fs.path.join(allocator, &.{ work_path, "docs" });
         defer allocator.free(docs_path);
-        try main.runPrint(repo_kind, any_repo_opts.withoutHash(), allocator, &.{ "commit", "-m", "first commit" }, docs_path, writers);
+        const repo_opts_no_hash = comptime ro_blk: {
+            var ro = any_repo_opts;
+            ro.hash = null;
+            break :ro_blk ro;
+        };
+        try main.runPrint(repo_kind, repo_opts_no_hash, allocator, &.{ "commit", "-m", "first commit" }, docs_path, writers);
 
         switch (repo_kind) {
             .git => {
