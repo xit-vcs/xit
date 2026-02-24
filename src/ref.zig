@@ -113,7 +113,7 @@ test "parse ref paths" {
     try std.testing.expectEqualDeep(Ref{ .kind = .{ .other = "for" }, .name = "experimental" }, Ref.initFromPath("refs/for/experimental", null));
 }
 
-pub fn isOid(comptime hash_kind: hash.HashKind, content: []const u8) bool {
+pub fn isOid(comptime hash_kind: ?hash.HashKind, content: []const u8) bool {
     if (content.len != hash.hexLen(hash_kind)) {
         return false;
     }
@@ -125,7 +125,7 @@ pub fn isOid(comptime hash_kind: hash.HashKind, content: []const u8) bool {
     return true;
 }
 
-pub fn RefOrOid(comptime hash_kind: hash.HashKind) type {
+pub fn RefOrOid(comptime hash_kind: ?hash.HashKind) type {
     return union(enum) {
         ref: Ref,
         oid: *const [hash.hexLen(hash_kind)]u8,

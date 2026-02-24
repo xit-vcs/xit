@@ -116,13 +116,12 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 const work_path = try std.fs.path.resolve(allocator, &.{ state.core.cwd_path, path });
                 defer allocator.free(work_path);
 
-                var any_repo = try rp.AnyRepo(.git, .{ .hash = .none, .ProgressCtx = repo_opts.ProgressCtx }).open(allocator, .{ .path = work_path });
+                var any_repo = try rp.AnyRepo(.git, .{ .hash = null, .ProgressCtx = repo_opts.ProgressCtx }).open(allocator, .{ .path = work_path });
                 defer any_repo.deinit(allocator);
 
                 const obj_iter: *obj.ObjectIterator(repo_kind, repo_opts, .raw) = &git_push.obj_iter;
 
                 switch (any_repo) {
-                    .none => return error.HashKindNotFound,
                     inline else => |*repo| try repo.copyObjects(repo_kind, repo_opts, obj_iter, self.opts.progress_ctx),
                 }
             }

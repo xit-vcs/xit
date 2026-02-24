@@ -174,7 +174,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         //    (no difference in the tests but I just want to make sure it works)
         const docs_path = try std.fs.path.join(allocator, &.{ work_path, "docs" });
         defer allocator.free(docs_path);
-        try main.runPrint(repo_kind, repo_opts.withHash(.none), allocator, &.{ "commit", "-m", "first commit" }, docs_path, writers);
+        try main.runPrint(repo_kind, repo_opts.withHash(null), allocator, &.{ "commit", "-m", "first commit" }, docs_path, writers);
 
         switch (repo_kind) {
             .git => {

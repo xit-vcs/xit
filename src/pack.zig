@@ -1225,7 +1225,7 @@ pub fn PackObjectWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
 // search pack index files
 
 fn findOid(
-    comptime hash_kind: hash.HashKind,
+    comptime hash_kind: ?hash.HashKind,
     idx_file: std.fs.File,
     oid_list_pos: u64,
     index: usize,
@@ -1238,7 +1238,7 @@ fn findOid(
 }
 
 fn findObjectIndex(
-    comptime hash_kind: hash.HashKind,
+    comptime hash_kind: ?hash.HashKind,
     idx_file: std.fs.File,
     fanout_table: [256]u32,
     oid_list_pos: u64,
@@ -1277,7 +1277,7 @@ fn findObjectIndex(
 }
 
 fn findOffset(
-    comptime hash_kind: hash.HashKind,
+    comptime hash_kind: ?hash.HashKind,
     idx_file: std.fs.File,
     fanout_table: [256]u32,
     oid_list_pos: u64,
@@ -1311,7 +1311,7 @@ fn findOffset(
 }
 
 fn searchPackIndex(
-    comptime hash_kind: hash.HashKind,
+    comptime hash_kind: ?hash.HashKind,
     idx_file: std.fs.File,
     oid_bytes: *const [hash.byteLen(hash_kind)]u8,
 ) !?u64 {
@@ -1337,7 +1337,7 @@ fn searchPackIndex(
     return null;
 }
 
-fn PackOffset(comptime hash_kind: hash.HashKind) type {
+fn PackOffset(comptime hash_kind: ?hash.HashKind) type {
     return struct {
         pack_id: [hash.hexLen(hash_kind)]u8,
         value: u64,
@@ -1345,7 +1345,7 @@ fn PackOffset(comptime hash_kind: hash.HashKind) type {
 }
 
 fn searchPackIndexes(
-    comptime hash_kind: hash.HashKind,
+    comptime hash_kind: ?hash.HashKind,
     pack_dir: std.fs.Dir,
     oid_hex: *const [hash.hexLen(hash_kind)]u8,
 ) !PackOffset(hash_kind) {

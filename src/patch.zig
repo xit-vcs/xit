@@ -10,7 +10,7 @@ const cfg = @import("./config.zig");
 // it's just the hash of the patch it came from,
 // and the number representing which line from
 // the patch it is. it's not that complicated.
-pub fn LineId(comptime hash_kind: hash.HashKind) type {
+pub fn LineId(comptime hash_kind: ?hash.HashKind) type {
     return packed struct {
         line: u64,
         patch_id: hash.HashInt(hash_kind),

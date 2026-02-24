@@ -82,7 +82,7 @@ pub fn run(
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
 
-    switch (try cmd.CommandDispatch(repo_kind, repo_opts.hash).init(&cmd_args)) {
+    switch (try cmd.CommandDispatch(repo_kind, repo_opts.hash orelse .sha1).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
                 try writers.err.print("\"{s}\" is not a valid command\n\n", .{command});
@@ -96,12 +96,11 @@ pub fn run(
             },
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, writers.out),
-        .tui => |cmd_kind_maybe| if (.none == repo_opts.hash) {
+        .tui => |cmd_kind_maybe| if (repo_opts.hash == null) {
             // if no hash was specified, use AnyRepo to detect the hash being used
             var any_repo = try rp.AnyRepo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
             defer any_repo.deinit(allocator);
             switch (any_repo) {
-                .none => return error.HashKindNotFound,
                 inline else => |*repo| try ui.start(repo.self_repo_kind, repo.self_repo_opts, repo, allocator, cmd_kind_maybe),
             }
         } else {
@@ -111,7 +110,7 @@ pub fn run(
         },
         .cli => |cli_cmd| switch (cli_cmd) {
             .init => |init_cmd| {
-                const new_repo_opts = comptime if (.none == repo_opts.hash)
+                const new_repo_opts = comptime if (repo_opts.hash == null)
                     // if no hash was specified, just use the default hash
                     repo_opts.withHash((rp.RepoOpts(repo_kind){}).hash)
                 else
@@ -152,14 +151,13 @@ pub fn run(
                     , .{});
                 }
             },
-            else => if (.none == repo_opts.hash) {
+            else => if (repo_opts.hash == null) {
                 // if no hash was specified, use AnyRepo to detect the hash being used
                 var any_repo = try rp.AnyRepo(repo_kind, repo_opts).open(allocator, .{ .path = cwd_path });
                 defer any_repo.deinit(allocator);
                 switch (any_repo) {
-                    .none => return error.HashKindNotFound,
                     inline else => |*repo| {
-                        const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash).initMaybe(&cmd_args);
+                        const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash orelse unreachable).initMaybe(&cmd_args);
                         try runCommand(repo.self_repo_kind, repo.self_repo_opts, repo, allocator, cmd_maybe orelse return error.InvalidCommand, writers);
                     },
                 }

@@ -46,7 +46,7 @@ pub const RepoKind = enum {
 
 pub fn RepoOpts(comptime repo_kind: RepoKind) type {
     return struct {
-        hash: hash.HashKind = .sha1,
+        hash: ?hash.HashKind = .sha1,
         buffer_size: usize = 2048,
         read_size: usize = 2048,
         max_read_size: usize = 4096,
@@ -70,7 +70,7 @@ pub fn RepoOpts(comptime repo_kind: RepoKind) type {
             },
         };
 
-        pub fn withHash(self: RepoOpts(repo_kind), hash_kind: hash.HashKind) RepoOpts(repo_kind) {
+        pub fn withHash(self: RepoOpts(repo_kind), hash_kind: ?hash.HashKind) RepoOpts(repo_kind) {
             var new_self = self;
             new_self.hash = hash_kind;
             return new_self;
@@ -125,10 +125,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
         pub const DB = switch (repo_kind) {
             .git => void,
-            .xit => switch (repo_opts.hash) {
-                .none => void,
-                else => @import("xitdb").Database(.buffered_file, hash.HashInt(repo_opts.hash)),
-            },
+            .xit => if (repo_opts.hash) |h|
+                @import("xitdb").Database(.buffered_file, hash.HashInt(h))
+            else
+                void,
         };
 
         pub const WriteMode = switch (repo_kind) {
@@ -347,24 +347,21 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .work_dir = work_dir,
                             .repo_dir = repo_dir,
                             .db_file = db_file,
-                            .db = switch (repo_opts.hash) {
-                                .none => {},
-                                else => blk: {
-                                    const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
-                                    errdefer allocator.destroy(buffer_ptr);
+                            .db = if (repo_opts.hash == null) {} else blk: {
+                                const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
+                                errdefer allocator.destroy(buffer_ptr);
 
-                                    buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
-                                    errdefer buffer_ptr.deinit();
+                                buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
+                                errdefer buffer_ptr.deinit();
 
-                                    const hash_id = hash.hashId(repo_opts.hash);
-                                    const db = try DB.init(.{
-                                        .file = db_file,
-                                        .buffer = buffer_ptr,
-                                        .hash_id = .{ .id = hash_id },
-                                    });
-                                    if (db.header.hash_id.id != hash_id) return error.UnexpectedHashKind;
-                                    break :blk db;
-                                },
+                                const hash_id = hash.hashId(repo_opts.hash);
+                                const db = try DB.init(.{
+                                    .file = db_file,
+                                    .buffer = buffer_ptr,
+                                    .hash_id = .{ .id = hash_id },
+                                });
+                                if (db.header.hash_id.id != hash_id) return error.UnexpectedHashKind;
+                                break :blk db;
                             },
                         },
                     };
@@ -392,26 +389,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         self.core.db.core.memory.buffer.deinit();
                         allocator.destroy(self.core.db.core.memory.buffer);
                     }
-                },
-            }
-        }
-
-        pub fn hashKind(self: *Repo(repo_kind, repo_opts)) !hash.HashKind {
-            switch (repo_kind) {
-                .git => return .sha1,
-                .xit => switch (repo_opts.hash) {
-                    .none => {
-                        const xitdb = @import("xitdb");
-
-                        var buffer = [_]u8{0} ** @sizeOf(xitdb.DatabaseHeader);
-                        var reader = self.core.db_file.reader(&buffer);
-                        try reader.seekTo(0);
-                        const header = try xitdb.DatabaseHeader.read(&reader.interface);
-                        try header.validate();
-
-                        return hash.hashKind(header.hash_id.id, header.hash_size) orelse error.InvalidHashKind;
-                    },
-                    else => return self.core.db.header.hash_id.id,
                 },
             }
         }
@@ -1288,7 +1265,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             work_path: []const u8,
             opts: net.Opts(repo_opts.ProgressCtx),
         ) !Repo(repo_kind, repo_opts) {
-            if (repo_opts.hash == .none) return error.UnsupportedHashKind;
+            if (repo_opts.hash == null) return error.UnsupportedHashKind;
             return net.clone(repo_kind, repo_opts, allocator, url, cwd_path, work_path, opts);
         }
 
@@ -1373,32 +1350,43 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 /// auto-detects the hash used by an existing repo
 pub fn AnyRepo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind)) type {
     return union(hash.HashKind) {
-        none,
         sha1: Repo(repo_kind, repo_opts.withHash(.sha1)),
         sha256: Repo(repo_kind, repo_opts.withHash(.sha256)),
 
         pub fn open(allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, repo_opts) {
-            switch (repo_opts.hash) {
-                .none => {
-                    const hash_kind = blk: {
-                        var repo = try Repo(repo_kind, repo_opts).open(allocator, init_opts);
-                        defer repo.deinit(allocator);
-                        break :blk try repo.hashKind();
-                    };
-                    return switch (hash_kind) {
-                        .none => .none,
-                        .sha1 => .{ .sha1 = try Repo(repo_kind, repo_opts.withHash(.sha1)).open(allocator, init_opts) },
-                        .sha256 => .{ .sha256 = try Repo(repo_kind, repo_opts.withHash(.sha256)).open(allocator, init_opts) },
-                    };
-                },
-                .sha1 => return .{ .sha1 = try Repo(repo_kind, repo_opts).open(allocator, init_opts) },
-                .sha256 => return .{ .sha256 = try Repo(repo_kind, repo_opts).open(allocator, init_opts) },
+            if (repo_opts.hash) |h| {
+                return switch (h) {
+                    .sha1 => .{ .sha1 = try Repo(repo_kind, repo_opts).open(allocator, init_opts) },
+                    .sha256 => .{ .sha256 = try Repo(repo_kind, repo_opts).open(allocator, init_opts) },
+                };
+            } else {
+                const detected_hash: hash.HashKind = blk: {
+                    switch (repo_kind) {
+                        .git => break :blk .sha1,
+                        .xit => {
+                            const xitdb = @import("xitdb");
+                            var repo = try Repo(repo_kind, repo_opts).open(allocator, init_opts);
+                            defer repo.deinit(allocator);
+
+                            var buffer = [_]u8{0} ** @sizeOf(xitdb.DatabaseHeader);
+                            var reader = repo.core.db_file.reader(&buffer);
+                            try reader.seekTo(0);
+                            const header = try xitdb.DatabaseHeader.read(&reader.interface);
+                            try header.validate();
+
+                            break :blk hash.hashKind(header.hash_id.id, header.hash_size) orelse return error.InvalidHashKind;
+                        },
+                    }
+                };
+                return switch (detected_hash) {
+                    .sha1 => .{ .sha1 = try Repo(repo_kind, repo_opts.withHash(.sha1)).open(allocator, init_opts) },
+                    .sha256 => .{ .sha256 = try Repo(repo_kind, repo_opts.withHash(.sha256)).open(allocator, init_opts) },
+                };
             }
         }
 
         pub fn deinit(self: *AnyRepo(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             switch (self.*) {
-                .none => {},
                 inline else => |*case| case.deinit(allocator),
             }
         }

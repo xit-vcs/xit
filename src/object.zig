@@ -325,7 +325,7 @@ fn sign(
     }
 }
 
-pub fn CommitMetadata(comptime hash_kind: hash.HashKind) type {
+pub fn CommitMetadata(comptime hash_kind: ?hash.HashKind) type {
     return struct {
         author: ?[]const u8 = null,
         committer: ?[]const u8 = null,
@@ -727,7 +727,7 @@ pub const ObjectHeader = struct {
     }
 };
 
-pub fn ObjectContent(comptime hash_kind: hash.HashKind) type {
+pub fn ObjectContent(comptime hash_kind: ?hash.HashKind) type {
     return union(ObjectKind) {
         blob,
         tree: struct {
