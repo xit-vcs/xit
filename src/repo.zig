@@ -46,15 +46,15 @@ pub const RepoKind = enum {
 
 // repo opts with a known hash kind
 pub fn RepoOpts(comptime repo_kind: RepoKind) type {
-    return RepoOptsHash(repo_kind, true);
+    return RepoOptsInternal(repo_kind, true);
 }
 
 // repo opts with an unknown hash kind (used when first opening a repo, before we known the hash kind)
 pub fn AnyRepoOpts(comptime repo_kind: RepoKind) type {
-    return RepoOptsHash(repo_kind, false);
+    return RepoOptsInternal(repo_kind, false);
 }
 
-pub fn RepoOptsHash(comptime repo_kind: RepoKind, comptime hash_kind_known: bool) type {
+fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool) type {
     return struct {
         hash: HashKindType = if (hash_kind_known) .sha1 else null,
         buffer_size: usize = 2048,
@@ -83,10 +83,10 @@ pub fn RepoOptsHash(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
             },
         };
 
-        pub fn withHash(self: RepoOptsHash(repo_kind, false), hash_kind: hash.HashKind) RepoOpts(repo_kind) {
+        pub fn toRepoOptsWithHash(self: RepoOptsInternal(repo_kind, false), hash_kind: hash.HashKind) RepoOpts(repo_kind) {
             var repo_opts: RepoOpts(repo_kind) = .{};
             @setEvalBranchQuota(5000);
-            inline for (@typeInfo(RepoOptsHash(repo_kind, hash_kind_known)).@"struct".fields) |field| {
+            inline for (@typeInfo(RepoOptsInternal(repo_kind, hash_kind_known)).@"struct".fields) |field| {
                 if (std.mem.eql(u8, "hash", field.name)) {
                     continue;
                 }
@@ -96,8 +96,8 @@ pub fn RepoOptsHash(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
             return repo_opts;
         }
 
-        pub fn toRepoOpts(self: RepoOptsHash(repo_kind, false)) RepoOpts(repo_kind) {
-            return self.withHash(self.hash orelse (RepoOpts(repo_kind){}).hash);
+        pub fn toRepoOpts(self: RepoOptsInternal(repo_kind, false)) RepoOpts(repo_kind) {
+            return self.toRepoOptsWithHash(self.hash orelse (RepoOpts(repo_kind){}).hash);
         }
     };
 }
@@ -1370,8 +1370,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 /// auto-detects the hash used by an existing repo
 pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts(repo_kind)) type {
     return union(hash.HashKind) {
-        sha1: Repo(repo_kind, any_repo_opts.withHash(.sha1)),
-        sha256: Repo(repo_kind, any_repo_opts.withHash(.sha256)),
+        sha1: Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha1)),
+        sha256: Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha256)),
 
         pub fn open(allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, any_repo_opts) {
             const hash_kind: hash.HashKind = if (any_repo_opts.hash) |hash_kind| hash_kind else blk: {
@@ -1399,8 +1399,8 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
                 }
             };
             return switch (hash_kind) {
-                .sha1 => .{ .sha1 = try Repo(repo_kind, any_repo_opts.withHash(.sha1)).open(allocator, init_opts) },
-                .sha256 => .{ .sha256 = try Repo(repo_kind, any_repo_opts.withHash(.sha256)).open(allocator, init_opts) },
+                .sha1 => .{ .sha1 = try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha1)).open(allocator, init_opts) },
+                .sha256 => .{ .sha256 = try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha256)).open(allocator, init_opts) },
             };
         }
 

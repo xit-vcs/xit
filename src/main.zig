@@ -82,7 +82,7 @@ pub fn run(
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
 
-    switch (try cmd.CommandDispatch(repo_kind, any_repo_opts.hash orelse .sha1).init(&cmd_args)) {
+    switch (try cmd.CommandDispatch(repo_kind, any_repo_opts.toRepoOpts().hash).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
                 try writers.err.print("\"{s}\" is not a valid command\n\n", .{command});
@@ -97,9 +97,9 @@ pub fn run(
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, writers.out),
         .tui => |cmd_kind_maybe| if (any_repo_opts.hash) |hash_kind| {
-            var repo = try rp.Repo(repo_kind, any_repo_opts.withHash(hash_kind)).open(allocator, .{ .path = cwd_path });
+            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(allocator, .{ .path = cwd_path });
             defer repo.deinit(allocator);
-            try ui.start(repo_kind, any_repo_opts.withHash(hash_kind), &repo, allocator, cmd_kind_maybe);
+            try ui.start(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, allocator, cmd_kind_maybe);
         } else {
             // if no hash was specified, use AnyRepo to detect the hash being used
             var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(allocator, .{ .path = cwd_path });
@@ -111,10 +111,10 @@ pub fn run(
         .cli => |cli_cmd| switch (cli_cmd) {
             .init => |init_cmd| {
                 const repo_opts = comptime if (any_repo_opts.hash) |hash_kind|
-                    any_repo_opts.withHash(hash_kind)
+                    any_repo_opts.toRepoOptsWithHash(hash_kind)
                 else
                     // if no hash was specified, just use the default hash
-                    any_repo_opts.withHash((rp.RepoOpts(repo_kind){}).hash);
+                    any_repo_opts.toRepoOpts();
                 const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, init_cmd.dir });
                 defer allocator.free(work_path);
                 var repo = try rp.Repo(repo_kind, repo_opts).init(allocator, .{ .cwd_path = cwd_path, .path = work_path });
@@ -152,9 +152,9 @@ pub fn run(
                 }
             },
             else => if (any_repo_opts.hash) |hash_kind| {
-                var repo = try rp.Repo(repo_kind, any_repo_opts.withHash(hash_kind)).open(allocator, .{ .path = cwd_path });
+                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(allocator, .{ .path = cwd_path });
                 defer repo.deinit(allocator);
-                try runCommand(repo_kind, any_repo_opts.withHash(hash_kind), &repo, allocator, cli_cmd, writers);
+                try runCommand(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, allocator, cli_cmd, writers);
             } else {
                 // if no hash was specified, use AnyRepo to detect the hash being used
                 var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(allocator, .{ .path = cwd_path });
