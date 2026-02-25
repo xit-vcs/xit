@@ -44,12 +44,12 @@ pub const RepoKind = enum {
     xit,
 };
 
-// repo opts with a known hash kind
+/// repo opts with a known hash kind
 pub fn RepoOpts(comptime repo_kind: RepoKind) type {
     return RepoOptsInternal(repo_kind, true);
 }
 
-// repo opts with an unknown hash kind (used when first opening a repo, before we known the hash kind)
+/// repo opts with an unknown hash kind (used when first opening a repo, before we know the hash kind)
 pub fn AnyRepoOpts(comptime repo_kind: RepoKind) type {
     return RepoOptsInternal(repo_kind, false);
 }
@@ -1399,8 +1399,7 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
                 }
             };
             return switch (hash_kind) {
-                .sha1 => .{ .sha1 = try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha1)).open(allocator, init_opts) },
-                .sha256 => .{ .sha256 = try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha256)).open(allocator, init_opts) },
+                inline else => |hk| @unionInit(AnyRepo(repo_kind, any_repo_opts), @tagName(hk), try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hk)).open(allocator, init_opts)),
             };
         }
 
