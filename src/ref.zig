@@ -47,6 +47,7 @@ pub const RefKind = union(enum) {
     tag,
     remote: []const u8,
     other: []const u8,
+    worktree: []const u8,
 };
 
 pub const Ref = struct {
@@ -57,6 +58,12 @@ pub const Ref = struct {
         var split_iter = std.mem.splitScalar(u8, ref_path, '/');
 
         const first_part = split_iter.next() orelse return null;
+        if (std.mem.eql(u8, "worktrees", first_part)) {
+            const worktree_name = split_iter.next() orelse return null;
+            const ref_name_offset = first_part.len + 1 + worktree_name.len + 1;
+            const ref_name = if (ref_name_offset >= ref_path.len) return null else ref_path[ref_name_offset..];
+            return .{ .kind = .{ .worktree = worktree_name }, .name = ref_name };
+        }
         if (!std.mem.eql(u8, "refs", first_part)) {
             const unqualified_refs = std.StaticStringMap(void).initComptime(.{
                 .{"HEAD"},
@@ -99,6 +106,7 @@ pub const Ref = struct {
             .tag => try std.fmt.bufPrint(buffer, "refs/tags/{s}", .{self.name}),
             .remote => |remote| try std.fmt.bufPrint(buffer, "refs/remotes/{s}/{s}", .{ remote, self.name }),
             .other => |other| try std.fmt.bufPrint(buffer, "refs/{s}/{s}", .{ other, self.name }),
+            .worktree => |wt| try std.fmt.bufPrint(buffer, "worktrees/{s}/{s}", .{ wt, self.name }),
         };
     }
 };
@@ -111,6 +119,7 @@ test "parse ref paths" {
     try std.testing.expectEqualDeep(Ref{ .kind = .tag, .name = "1.0.0" }, Ref.initFromPath("refs/tags/1.0.0", null));
     try std.testing.expectEqualDeep(Ref{ .kind = .{ .remote = "origin" }, .name = "master" }, Ref.initFromPath("refs/remotes/origin/master", null));
     try std.testing.expectEqualDeep(Ref{ .kind = .{ .other = "for" }, .name = "experimental" }, Ref.initFromPath("refs/for/experimental", null));
+    try std.testing.expectEqualDeep(Ref{ .kind = .{ .worktree = "foo" }, .name = "HEAD" }, Ref.initFromPath("worktrees/foo/HEAD", null));
 }
 
 pub fn isOid(comptime hash_kind: hash.HashKind, content: []const u8) bool {
@@ -190,6 +199,7 @@ pub const RefList = struct {
             .tag => "tags",
             .remote => return error.NotImplemented,
             .other => |other_name| other_name,
+            .worktree => return error.NotImplemented,
         };
 
         switch (repo_kind) {
@@ -378,6 +388,7 @@ pub fn read(
                     const other_cursor = (try refs.getCursor(hash.hashInt(repo_opts.hash, other_name))) orelse return error.RefNotFound;
                     map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(other_cursor);
                 },
+                .worktree => return error.NotImplemented,
             }
 
             // if the ref's key hasn't been set, it doesn't exist
@@ -479,6 +490,7 @@ pub fn write(
                     const other_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, other_name));
                     map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(other_cursor);
                 },
+                .worktree => return error.NotImplemented,
             }
 
             const ref_name_hash = hash.hashInt(repo_opts.hash, ref.name);
@@ -562,6 +574,7 @@ pub fn remove(
                     const other_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, other_name));
                     map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(other_cursor);
                 },
+                .worktree => return error.NotImplemented,
             }
 
             const ref_name_hash = hash.hashInt(repo_opts.hash, ref.name);
