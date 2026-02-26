@@ -177,7 +177,7 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                 const StackEntry = struct {
                     dir: std.fs.Dir,
                     iter: std.fs.Dir.Iterator,
-                    name: []const u8,
+                    name: ?[]const u8,
                 };
 
                 fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -229,7 +229,7 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                     try stack.append(allocator, .{
                         .dir = ref_kind_dir,
                         .iter = ref_kind_dir.iterate(),
-                        .name = "",
+                        .name = null,
                     });
                     break :blk .{ .stack = stack };
                 },
@@ -265,8 +265,8 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                                     var parts = std.ArrayList([]const u8){};
                                     defer parts.deinit(self.allocator);
                                     for (self.iter_state.stack.items) |stack_entry| {
-                                        if (stack_entry.name.len > 0) {
-                                            try parts.append(self.allocator, stack_entry.name);
+                                        if (stack_entry.name) |name| {
+                                            try parts.append(self.allocator, name);
                                         }
                                     }
                                     try parts.append(self.allocator, entry.name);
