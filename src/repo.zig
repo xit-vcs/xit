@@ -445,10 +445,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
         }
 
-        pub fn listTags(self: *Repo(repo_kind, repo_opts), allocator: std.mem.Allocator) !rf.RefList {
+        pub fn listTags(self: *Repo(repo_kind, repo_opts), allocator: std.mem.Allocator) !rf.RefIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            return try rf.RefList.init(repo_kind, repo_opts, state, allocator, .tag);
+            return try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .tag);
         }
 
         pub fn addTag(self: *Repo(repo_kind, repo_opts), allocator: std.mem.Allocator, input: tg.AddTagInput) ![hash.hexLen(repo_opts.hash)]u8 {
@@ -723,10 +723,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = ref });
         }
 
-        pub fn listBranches(self: *Repo(repo_kind, repo_opts), allocator: std.mem.Allocator) !rf.RefList {
+        pub fn listBranches(self: *Repo(repo_kind, repo_opts), allocator: std.mem.Allocator) !rf.RefIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            return try rf.RefList.init(repo_kind, repo_opts, state, allocator, .head);
+            return try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .head);
         }
 
         pub fn addBranch(self: *Repo(repo_kind, repo_opts), input: bch.AddBranchInput) !void {
@@ -1098,10 +1098,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                     // add heads
                     {
-                        var ref_list = try rf.RefList.init(repo_kind, repo_opts, state.readOnly(), ctx.allocator, .head);
-                        defer ref_list.deinit();
+                        var ref_iter = try rf.RefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.allocator, .head);
+                        defer ref_iter.deinit();
 
-                        for (ref_list.refs.values()) |ref| {
+                        while (try ref_iter.next()) |ref| {
                             if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), .{ .ref = ref })) |oid| {
                                 try obj_iter.include(&oid);
                             }
@@ -1110,10 +1110,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                     // add tags
                     {
-                        var ref_list = try rf.RefList.init(repo_kind, repo_opts, state.readOnly(), ctx.allocator, .tag);
-                        defer ref_list.deinit();
+                        var ref_iter = try rf.RefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.allocator, .tag);
+                        defer ref_iter.deinit();
 
-                        for (ref_list.refs.values()) |ref| {
+                        while (try ref_iter.next()) |ref| {
                             if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), .{ .ref = ref })) |oid| {
                                 try obj_iter.include(&oid);
                             }

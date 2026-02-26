@@ -172,103 +172,156 @@ pub fn RefOrOid(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const RefList = struct {
-    refs: std.StringArrayHashMap(Ref),
-    arena: *std.heap.ArenaAllocator,
-    allocator: std.mem.Allocator,
-
-    pub fn init(
-        comptime repo_kind: rp.RepoKind,
-        comptime repo_opts: rp.RepoOpts(repo_kind),
-        state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-        allocator: std.mem.Allocator,
+pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+    return struct {
+        iter_state: IterState,
         ref_kind: RefKind,
-    ) !RefList {
-        const arena = try allocator.create(std.heap.ArenaAllocator);
-        arena.* = std.heap.ArenaAllocator.init(allocator);
-        var ref_list = RefList{
-            .refs = std.StringArrayHashMap(Ref).init(allocator),
-            .arena = arena,
-            .allocator = allocator,
-        };
-        errdefer ref_list.deinit();
+        arena: *std.heap.ArenaAllocator,
+        allocator: std.mem.Allocator,
 
-        const dir_name = switch (ref_kind) {
-            .none => return error.NotImplemented,
-            .head => "heads",
-            .tag => "tags",
-            .remote => return error.NotImplemented,
-            .other => |other_name| other_name,
-            .worktree => return error.NotImplemented,
-        };
+        const IterState = switch (repo_kind) {
+            .git => struct {
+                stack: std.ArrayList(StackEntry),
 
-        switch (repo_kind) {
-            .git => {
-                var refs_dir = try state.core.repo_dir.openDir("refs", .{});
-                defer refs_dir.close();
-                var ref_kind_dir = refs_dir.openDir(dir_name, .{ .iterate = true }) catch |err| switch (err) {
-                    error.FileNotFound => return ref_list,
-                    else => |e| return e,
+                const StackEntry = struct {
+                    dir: std.fs.Dir,
+                    iter: std.fs.Dir.Iterator,
+                    name: []const u8,
                 };
-                defer ref_kind_dir.close();
 
-                var path = std.ArrayList([]const u8){};
-                defer path.deinit(allocator);
-                try ref_list.addRefs(repo_opts, state, ref_kind, ref_kind_dir, allocator, &path);
-            },
-            .xit => {
-                if (try state.extra.moment.cursor.readPath(void, &.{
-                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "refs") } },
-                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, dir_name) } },
-                })) |heads_cursor| {
-                    var iter = try heads_cursor.iterator();
-                    while (try iter.next()) |*next_cursor| {
-                        const kv_pair = try next_cursor.readKeyValuePair();
-                        const name = try kv_pair.key_cursor.readBytesAlloc(ref_list.arena.allocator(), MAX_REF_CONTENT_SIZE);
-                        try ref_list.refs.put(name, .{ .kind = ref_kind, .name = name });
-                    }
+                fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+                    for (self.stack.items) |*entry| entry.dir.close();
+                    self.stack.deinit(allocator);
                 }
             },
-        }
+            .xit => struct {
+                iter: ?rp.Repo(repo_kind, repo_opts).DB.Cursor(.read_only).Iter,
 
-        return ref_list;
-    }
+                fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+            },
+        };
 
-    pub fn deinit(self: *RefList) void {
-        self.refs.deinit();
-        self.arena.deinit();
-        self.allocator.destroy(self.arena);
-    }
-
-    fn addRefs(
-        self: *RefList,
-        comptime repo_opts: rp.RepoOpts(.git),
-        state: rp.Repo(.git, repo_opts).State(.read_only),
-        ref_kind: RefKind,
-        dir: std.fs.Dir,
-        allocator: std.mem.Allocator,
-        path: *std.ArrayList([]const u8),
-    ) !void {
-        var iter = dir.iterate();
-        while (try iter.next()) |entry| {
-            var next_path = try path.clone(allocator);
-            defer next_path.deinit(allocator);
-            try next_path.append(allocator, entry.name);
-            switch (entry.kind) {
-                .file => {
-                    const name = try fs.joinPath(self.arena.allocator(), next_path.items);
-                    try self.refs.put(name, .{ .kind = ref_kind, .name = name });
-                },
-                .directory => {
-                    var next_dir = try dir.openDir(entry.name, .{ .iterate = true });
-                    defer next_dir.close();
-                    try self.addRefs(repo_opts, state, ref_kind, next_dir, allocator, &next_path);
-                },
-                else => {},
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            allocator: std.mem.Allocator,
+            ref_kind: RefKind,
+        ) !RefIterator(repo_kind, repo_opts) {
+            const arena = try allocator.create(std.heap.ArenaAllocator);
+            arena.* = std.heap.ArenaAllocator.init(allocator);
+            errdefer {
+                arena.deinit();
+                allocator.destroy(arena);
             }
+
+            const dir_name = switch (ref_kind) {
+                .none => return error.NotImplemented,
+                .head => "heads",
+                .tag => "tags",
+                .remote => return error.NotImplemented,
+                .other => |other_name| other_name,
+                .worktree => return error.NotImplemented,
+            };
+
+            const iter_state: IterState = switch (repo_kind) {
+                .git => blk: {
+                    var stack = std.ArrayList(IterState.StackEntry){};
+                    errdefer {
+                        for (stack.items) |*entry| entry.dir.close();
+                        stack.deinit(allocator);
+                    }
+                    var refs_dir = try state.core.repo_dir.openDir("refs", .{});
+                    defer refs_dir.close();
+                    var ref_kind_dir = refs_dir.openDir(dir_name, .{ .iterate = true }) catch |err| switch (err) {
+                        error.FileNotFound => break :blk .{ .stack = stack },
+                        else => |e| return e,
+                    };
+                    errdefer ref_kind_dir.close();
+                    try stack.append(allocator, .{
+                        .dir = ref_kind_dir,
+                        .iter = ref_kind_dir.iterate(),
+                        .name = "",
+                    });
+                    break :blk .{ .stack = stack };
+                },
+                .xit => blk: {
+                    if (try state.extra.moment.cursor.readPath(void, &.{
+                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "refs") } },
+                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, dir_name) } },
+                    })) |heads_cursor| {
+                        break :blk .{ .iter = try heads_cursor.iterator() };
+                    } else {
+                        break :blk .{ .iter = null };
+                    }
+                },
+            };
+
+            return .{
+                .iter_state = iter_state,
+                .ref_kind = ref_kind,
+                .arena = arena,
+                .allocator = allocator,
+            };
         }
-    }
-};
+
+        pub fn next(self: *RefIterator(repo_kind, repo_opts)) !?Ref {
+            return switch (repo_kind) {
+                .git => {
+                    while (self.iter_state.stack.items.len > 0) {
+                        const top = &self.iter_state.stack.items[self.iter_state.stack.items.len - 1];
+                        if (try top.iter.next()) |entry| {
+                            switch (entry.kind) {
+                                .file => {
+                                    // build path from stack names + entry name, skipping empty root
+                                    var parts = std.ArrayList([]const u8){};
+                                    defer parts.deinit(self.allocator);
+                                    for (self.iter_state.stack.items) |stack_entry| {
+                                        if (stack_entry.name.len > 0) {
+                                            try parts.append(self.allocator, stack_entry.name);
+                                        }
+                                    }
+                                    try parts.append(self.allocator, entry.name);
+                                    const name = try fs.joinPath(self.arena.allocator(), parts.items);
+                                    return .{ .kind = self.ref_kind, .name = name };
+                                },
+                                .directory => {
+                                    const duped_name = try self.arena.allocator().dupe(u8, entry.name);
+                                    var sub_dir = try top.dir.openDir(entry.name, .{ .iterate = true });
+                                    errdefer sub_dir.close();
+                                    try self.iter_state.stack.append(self.allocator, .{
+                                        .dir = sub_dir,
+                                        .iter = sub_dir.iterate(),
+                                        .name = duped_name,
+                                    });
+                                },
+                                else => {},
+                            }
+                        } else {
+                            // iterator exhausted, pop and close
+                            top.dir.close();
+                            self.iter_state.stack.items.len -= 1;
+                        }
+                    }
+                    return null;
+                },
+                .xit => {
+                    const iter = &(self.iter_state.iter orelse return null);
+                    if (try iter.next()) |*next_cursor| {
+                        const kv_pair = try next_cursor.readKeyValuePair();
+                        const name = try kv_pair.key_cursor.readBytesAlloc(self.arena.allocator(), MAX_REF_CONTENT_SIZE);
+                        return .{ .kind = self.ref_kind, .name = name };
+                    }
+                    return null;
+                },
+            };
+        }
+
+        pub fn deinit(self: *RefIterator(repo_kind, repo_opts)) void {
+            self.iter_state.deinit(self.allocator);
+            self.arena.deinit();
+            self.allocator.destroy(self.arena);
+        }
+    };
+}
 
 pub fn readRecur(
     comptime repo_kind: rp.RepoKind,

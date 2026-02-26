@@ -1206,9 +1206,11 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(allocator, .{ .path = work_path });
         defer repo.deinit(allocator);
-        var ref_list = try repo.listBranches(allocator);
-        defer ref_list.deinit();
-        try std.testing.expectEqual(2, ref_list.refs.count());
+        var ref_iter = try repo.listBranches(allocator);
+        defer ref_iter.deinit();
+        var count: usize = 0;
+        while (try ref_iter.next()) |_| count += 1;
+        try std.testing.expectEqual(2, count);
     }
 
     // get the current branch
@@ -1287,12 +1289,15 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(allocator, .{ .path = work_path });
         defer repo.deinit(allocator);
-        var ref_list = try repo.listBranches(allocator);
-        defer ref_list.deinit();
-        try std.testing.expectEqual(3, ref_list.refs.count());
-        try std.testing.expect(ref_list.refs.contains("a/b/c"));
-        try std.testing.expect(ref_list.refs.contains("stuff"));
-        try std.testing.expect(ref_list.refs.contains("master"));
+        var ref_iter = try repo.listBranches(allocator);
+        defer ref_iter.deinit();
+        var names = std.StringArrayHashMap(void).init(allocator);
+        defer names.deinit();
+        while (try ref_iter.next()) |ref| try names.put(ref.name, {});
+        try std.testing.expectEqual(3, names.count());
+        try std.testing.expect(names.contains("a/b/c"));
+        try std.testing.expect(names.contains("stuff"));
+        try std.testing.expect(names.contains("master"));
     }
 
     // remove the branch

@@ -392,19 +392,19 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             defer obj_iter.deinit();
 
             {
-                var tags = try rf.RefList.init(repo_kind, repo_opts, state, allocator, .tag);
+                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .tag);
                 defer tags.deinit();
 
-                for (tags.refs.values()) |ref| {
+                while (try tags.next()) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = ref })) |*oid| {
                         try obj_iter.include(oid);
                     }
                 }
 
-                var heads = try rf.RefList.init(repo_kind, repo_opts, state, allocator, .head);
+                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .head);
                 defer heads.deinit();
 
-                for (heads.refs.values()) |ref| {
+                while (try heads.next()) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = ref })) |*oid| {
                         try obj_iter.include(oid);
                     }

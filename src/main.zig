@@ -301,10 +301,10 @@ fn runCommand(
         .commit => |commit_cmd| _ = try repo.commit(allocator, commit_cmd),
         .tag => |tag_cmd| switch (tag_cmd) {
             .list => {
-                var ref_list = try repo.listTags(allocator);
-                defer ref_list.deinit();
+                var ref_iter = try repo.listTags(allocator);
+                defer ref_iter.deinit();
 
-                for (ref_list.refs.values()) |ref| {
+                while (try ref_iter.next()) |ref| {
                     try writers.out.print("{s}\n", .{ref.name});
                 }
             },
@@ -464,10 +464,10 @@ fn runCommand(
                         .oid => "",
                     };
 
-                    var ref_list = try repo.listBranches(allocator);
-                    defer ref_list.deinit();
+                    var ref_iter = try repo.listBranches(allocator);
+                    defer ref_iter.deinit();
 
-                    for (ref_list.refs.values()) |ref| {
+                    while (try ref_iter.next()) |ref| {
                         const prefix = if (std.mem.eql(u8, current_branch_name, ref.name)) "*" else " ";
                         try writers.out.print("{s} {s}\n", .{ prefix, ref.name });
                     }
