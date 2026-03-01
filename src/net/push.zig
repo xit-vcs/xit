@@ -20,9 +20,10 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             remote: *net.Remote(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !Push(repo_kind, repo_opts) {
-            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(allocator, state, .{ .kind = .all });
+            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
             errdefer obj_iter.deinit();
 
             return Push(repo_kind, repo_opts){
@@ -48,10 +49,11 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         pub fn addRefSpec(
             self: *Push(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             refspec: []const u8,
         ) !void {
-            var spec = try PushSpec(repo_kind, repo_opts).init(state, allocator, refspec);
+            var spec = try PushSpec(repo_kind, repo_opts).init(state, io, allocator, refspec);
             errdefer spec.deinit(allocator);
             try self.specs.append(allocator, spec);
         }
@@ -59,6 +61,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         fn initObjectIterator(
             self: *Push(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
             var obj_iter = &self.obj_iter;
@@ -79,7 +82,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
                         continue;
                     }
 
-                    if (mrg.getDescendent(repo_kind, repo_opts, allocator, state, &spec.loid, &spec.roid)) |descendent| {
+                    if (mrg.getDescendent(repo_kind, repo_opts, state, io, allocator, &spec.loid, &spec.roid)) |descendent| {
                         if (!std.mem.eql(u8, &descendent, &spec.loid)) {
                             // remote is the descendent, meaning local is behind remote
                             return error.RemoteRefContainsCommitsNotFoundLocally;
@@ -107,11 +110,12 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         fn initSpecs(
             self: *Push(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
             for (self.specs.items) |*spec| {
                 if (spec.refspec.src.len > 0) {
-                    spec.loid = try net.resolveRefPath(repo_kind, repo_opts, state, allocator, spec.refspec.src) orelse return error.ObjectNotFound;
+                    spec.loid = try net.resolveRefPath(repo_kind, repo_opts, state, io, allocator, spec.refspec.src) orelse return error.ObjectNotFound;
                 }
 
                 for (self.remote.heads.values()) |*head| {
@@ -126,6 +130,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         pub fn complete(
             self: *Push(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
             if (!self.remote.connected()) {
@@ -142,9 +147,9 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
 
             const transport = if (self.remote.transport) |*transport| transport else return error.NotConnected;
 
-            try self.initSpecs(state, allocator);
-            try self.initObjectIterator(state, allocator);
-            try transport.push(state, allocator, self);
+            try self.initSpecs(state, io, allocator);
+            try self.initObjectIterator(state, io, allocator);
+            try transport.push(state, io, allocator, self);
 
             if (!self.unpack_ok) {
                 return error.RemoteFailedToUnpack;
@@ -161,6 +166,7 @@ pub fn PushSpec(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
 
         fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             str: []const u8,
         ) !PushSpec(repo_kind, repo_opts) {
@@ -174,7 +180,7 @@ pub fn PushSpec(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             errdefer self.refspec.deinit(allocator);
 
             if (self.refspec.src.len > 0) {
-                _ = try net.resolveRefPath(repo_kind, repo_opts, state, allocator, self.refspec.src) orelse return error.ObjectNotFound;
+                _ = try net.resolveRefPath(repo_kind, repo_opts, state, io, allocator, self.refspec.src) orelse return error.ObjectNotFound;
             }
 
             if (!std.mem.startsWith(u8, self.refspec.dst, "refs/")) {

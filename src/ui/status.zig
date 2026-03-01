@@ -334,11 +334,12 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         filtered_statuses: std.ArrayList(StatusItem),
         repo: *rp.Repo(repo_kind, repo_opts),
         status: *work.Status(repo_kind, repo_opts),
+        io: std.Io,
         allocator: std.mem.Allocator,
 
         const FocusKind = enum { status_list, diff };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), status: *work.Status(repo_kind, repo_opts), selected: work.IndexStatusKind) !StatusContent(Widget, repo_kind, repo_opts) {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), status: *work.Status(repo_kind, repo_opts), selected: work.IndexStatusKind) !StatusContent(Widget, repo_kind, repo_opts) {
             var filtered_statuses = std.ArrayList(StatusItem){};
             errdefer filtered_statuses.deinit(allocator);
 
@@ -400,6 +401,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 .filtered_statuses = filtered_statuses,
                 .repo = repo,
                 .status = status,
+                .io = io,
                 .allocator = allocator,
             };
             status_content.getFocus().child_id = box.children.keys()[0];
@@ -514,7 +516,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 var diff = &self.box.children.values()[1].widget.ui_diff;
                 try diff.clearDiffs();
 
-                const line_iter_pair = self.repo.filePair(diff.iter_arena.allocator(), status_item.path, status_item.kind, self.status) catch |err| switch (err) {
+                const line_iter_pair = self.repo.filePair(self.io, diff.iter_arena.allocator(), status_item.path, status_item.kind, self.status) catch |err| switch (err) {
                     error.IsDir => return,
                     else => |e| return e,
                 };
@@ -539,8 +541,8 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
         const FocusKind = enum { status_tabs, status_content };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Status(Widget, repo_kind, repo_opts) {
-            var status = try repo.status(allocator);
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Status(Widget, repo_kind, repo_opts) {
+            var status = try repo.status(io, allocator);
             errdefer status.deinit(allocator);
 
             // put Status object on the heap so the pointer is stable
@@ -566,7 +568,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
                         inline for (@typeInfo(work.IndexStatusKind).@"enum".fields) |index_kind_field| {
                             const index_kind: work.IndexStatusKind = @enumFromInt(index_kind_field.value);
-                            var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(allocator, repo, status_ptr, index_kind);
+                            var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(io, allocator, repo, status_ptr, index_kind);
                             errdefer status_content.deinit();
                             try stack.children.put(status_content.getFocus().id, .{ .ui_status_content = status_content });
                         }

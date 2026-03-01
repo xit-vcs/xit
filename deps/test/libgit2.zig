@@ -11,8 +11,8 @@ pub const Library = struct {
     step: *std.Build.Step.Compile,
 
     pub fn link(self: Library, other: *std.Build.Step.Compile) void {
-        other.addIncludePath(.{ .cwd_relative = include_dir });
-        other.linkLibrary(self.step);
+        other.root_module.addIncludePath(.{ .cwd_relative = include_dir });
+        other.root_module.linkLibrary(self.step);
     }
 };
 
@@ -21,7 +21,7 @@ pub fn create(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) !Library {
-    const ret = b.addLibrary(.{
+    var ret = b.addLibrary(.{
         .name = "git2",
         .root_module = b.createModule(.{
             .target = target,
@@ -59,7 +59,7 @@ pub fn create(
         try flags.append(b.allocator, "-DGIT_ARCH_64=1");
     }
 
-    ret.addCSourceFiles(.{
+    ret.root_module.addCSourceFiles(.{
         .root = .{ .cwd_relative = root() },
         .files = srcs,
         .flags = flags.items,
@@ -70,26 +70,26 @@ pub fn create(
             "-DGIT_WIN32",
             "-DGIT_WINHTTP",
         });
-        ret.addCSourceFiles(.{
+        ret.root_module.addCSourceFiles(.{
             .root = .{ .cwd_relative = root() },
             .files = win32_srcs,
             .flags = flags.items,
         });
-        ret.linkSystemLibrary("secur32");
+        ret.root_module.linkSystemLibrary("secur32", .{});
     } else {
-        ret.addCSourceFiles(.{
+        ret.root_module.addCSourceFiles(.{
             .root = .{ .cwd_relative = root() },
             .files = posix_srcs,
             .flags = flags.items,
         });
-        ret.addCSourceFiles(.{
+        ret.root_module.addCSourceFiles(.{
             .root = .{ .cwd_relative = root() },
             .files = unix_srcs,
             .flags = flags.items,
         });
     }
 
-    ret.addCSourceFiles(.{
+    ret.root_module.addCSourceFiles(.{
         .root = .{ .cwd_relative = root() },
         .files = pcre_srcs,
         .flags = &.{
@@ -104,15 +104,15 @@ pub fn create(
         },
     });
 
-    ret.addIncludePath(.{ .cwd_relative = include_dir });
-    ret.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/src/libgit2" });
-    ret.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/src/util" });
-    ret.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/pcre" });
-    ret.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/xdiff" });
-    ret.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/llhttp" });
-    ret.linkLibC();
+    ret.root_module.addIncludePath(.{ .cwd_relative = include_dir });
+    ret.root_module.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/src/libgit2" });
+    ret.root_module.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/src/util" });
+    ret.root_module.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/pcre" });
+    ret.root_module.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/xdiff" });
+    ret.root_module.addIncludePath(.{ .cwd_relative = root_path ++ "libgit2/deps/llhttp" });
+    ret.root_module.link_libc = true;
 
-    return Library{ .step = ret };
+    return .{ .step = ret };
 }
 
 const srcs = &.{

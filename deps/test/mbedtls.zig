@@ -4,8 +4,8 @@ pub const Library = struct {
     step: *std.Build.Step.Compile,
 
     pub fn link(self: Library, other: *std.Build.Step.Compile) void {
-        other.addIncludePath(.{ .cwd_relative = include_dir });
-        other.linkLibrary(self.step);
+        other.root_module.addIncludePath(.{ .cwd_relative = include_dir });
+        other.root_module.linkLibrary(self.step);
     }
 };
 
@@ -18,32 +18,32 @@ pub const include_dir = root_path ++ "mbedtls/include";
 const library_include = root_path ++ "mbedtls/library";
 
 pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Library {
-    const ret = b.addLibrary(.{
+    var ret = b.addLibrary(.{
         .name = "mbedtls",
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
         }),
     });
-    ret.addIncludePath(.{ .cwd_relative = include_dir });
-    ret.addIncludePath(.{ .cwd_relative = library_include });
+    ret.root_module.addIncludePath(.{ .cwd_relative = include_dir });
+    ret.root_module.addIncludePath(.{ .cwd_relative = library_include });
 
     // not sure why, but mbedtls has runtime issues when it's not built as
     // release-small or with the -Os flag, definitely need to figure out what's
     // going on there
-    ret.addCSourceFiles(.{
+    ret.root_module.addCSourceFiles(.{
         .root = .{ .cwd_relative = root() },
         .files = srcs,
         .flags = &.{"-Os"},
     });
-    ret.linkLibC();
+    ret.root_module.link_libc = true;
 
     if (target.result.os.tag == .windows) {
-        ret.linkSystemLibrary("ws2_32");
-        ret.linkSystemLibrary("bcrypt");
+        ret.root_module.linkSystemLibrary("ws2_32", .{});
+        ret.root_module.linkSystemLibrary("bcrypt", .{});
     }
 
-    return Library{ .step = ret };
+    return .{ .step = ret };
 }
 
 const srcs = &.{

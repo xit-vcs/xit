@@ -10,6 +10,7 @@ pub const Opts = struct {
 };
 
 pub const SshState = struct {
+    io: std.Io,
     opts: Opts,
     process: ?std.process.Child,
     allocator: std.mem.Allocator,
@@ -20,6 +21,7 @@ pub const SshState = struct {
         comptime repo_kind: rp.RepoKind,
         comptime repo_opts: rp.RepoOpts(repo_kind),
         state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+        io: std.Io,
         allocator: std.mem.Allocator,
         opts: Opts,
     ) !SshState {
@@ -30,27 +32,18 @@ pub const SshState = struct {
         const command = if (opts.command) |cmd|
             try arena_ptr.allocator().dupe(u8, cmd)
         else blk: {
-            const env_var_maybe = std.process.getEnvVarOwned(allocator, "XIT_SSH_COMMAND") catch |err| switch (err) {
-                error.EnvironmentVariableNotFound => null,
-                else => |e| return e,
-            };
-            if (env_var_maybe) |env_var| {
-                defer allocator.free(env_var);
-                break :blk try arena_ptr.allocator().dupe(u8, env_var);
-            }
-
-            var config = try cfg.Config(repo_kind, repo_opts).init(state, allocator);
+            var config = try cfg.Config(repo_kind, repo_opts).init(state, io, allocator);
             defer config.deinit();
             const core_section = config.sections.get("core") orelse break :blk null;
             const ssh_cmd = core_section.get("sshcommand") orelse break :blk null;
             if (ssh_cmd.len > 0) {
                 break :blk try arena_ptr.allocator().dupe(u8, ssh_cmd);
             }
-
             break :blk null;
         };
 
         return .{
+            .io = io,
             .opts = opts,
             .process = null,
             .allocator = allocator,
@@ -64,9 +57,9 @@ pub const SshState = struct {
         self.allocator.destroy(self.arena);
     }
 
-    pub fn close(self: *SshState) !void {
+    pub fn close(self: *SshState, io: std.Io) !void {
         if (self.process) |*process| {
-            _ = try process.kill();
+            _ = process.kill(io);
             self.process = null;
         }
     }
@@ -98,7 +91,7 @@ pub const SshStream = struct {
     ) !usize {
         const process = &(self.wire_state.process orelse return error.ProcessNotFound);
         const stdout = process.stdout orelse return error.StdoutNotFound;
-        return try stdout.read(buffer[0..buf_size]);
+        return try stdout.readStreaming(self.wire_state.io, &.{buffer[0..buf_size]});
     }
 
     pub fn write(
@@ -108,7 +101,7 @@ pub const SshStream = struct {
     ) !void {
         const process = &(self.wire_state.process orelse return error.ProcessNotFound);
         const stdin = process.stdin orelse return error.StdinNotFound;
-        try stdin.writeAll(buffer[0..len]);
+        try stdin.writeStreamingAll(self.wire_state.io, buffer[0..len]);
     }
 };
 
@@ -144,7 +137,7 @@ fn spawnSsh(
     const command = if (command_maybe) |cmd| cmd else "ssh";
 
     // TODO: fix paths that have spaces
-    var arg_iter = try std.process.ArgIteratorGeneral(.{ .single_quotes = true }).init(wire_state.allocator, command);
+    var arg_iter = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(wire_state.allocator, command);
     defer arg_iter.deinit();
     while (arg_iter.next()) |arg| {
         try args.append(wire_state.arena.allocator(), arg);
@@ -194,12 +187,10 @@ fn spawnSsh(
 
     const ssh_cmdline = try args.toOwnedSlice(wire_state.arena.allocator());
 
-    var process = std.process.Child.init(ssh_cmdline, wire_state.allocator);
-    process.stdin_behavior = .Pipe;
-    process.stdout_behavior = .Pipe;
-    process.stderr_behavior = .Ignore;
-
-    try process.spawn();
-
-    wire_state.process = process;
+    wire_state.process = try std.process.spawn(wire_state.io, .{
+        .argv = ssh_cmdline,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
 }

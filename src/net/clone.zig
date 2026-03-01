@@ -53,6 +53,7 @@ fn checkoutBranch(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     remote: *net.Remote(repo_kind, repo_opts),
 ) !void {
@@ -65,11 +66,17 @@ fn checkoutBranch(
     const default_branch_ref = rf.Ref.initFromPath(default_branch.items, .head) orelse return error.InvalidRef;
     const remote_branch_name = default_branch_ref.name;
 
-    try rf.replaceHead(repo_kind, repo_opts, state, .{ .ref = .{ .kind = .head, .name = remote_branch_name } });
+    try rf.replaceHead(repo_kind, repo_opts, state, io, .{ .ref = .{ .kind = .head, .name = remote_branch_name } });
 
-    const target_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), .{ .ref = .{ .kind = .{ .remote = remote_name }, .name = remote_branch_name } }) orelse return error.InvalidRef;
+    const target_oid = try rf.readRecur(
+        repo_kind,
+        repo_opts,
+        state.readOnly(),
+        io,
+        .{ .ref = .{ .kind = .{ .remote = remote_name }, .name = remote_branch_name } },
+    ) orelse return error.InvalidRef;
 
-    var switch_result = try work.Switch(repo_kind, repo_opts).init(state, allocator, .{
+    var switch_result = try work.Switch(repo_kind, repo_opts).init(state, io, allocator, .{
         .kind = .reset,
         .target = .{ .oid = &target_oid },
     });
@@ -83,37 +90,39 @@ pub fn cloneFile(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     remote: *net.Remote(repo_kind, repo_opts),
     transport_opts: net_transport.Opts(repo_opts.ProgressCtx),
 ) !void {
-    if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), allocator, "HEAD")) |_| {
+    if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), io, allocator, "HEAD")) |_| {
         return error.RepoIsNotEmpty;
     }
 
-    try net.fetch(repo_kind, repo_opts, state, allocator, remote, transport_opts);
+    try net.fetch(repo_kind, repo_opts, state, io, allocator, remote, transport_opts);
 
-    try checkoutBranch(repo_kind, repo_opts, state, allocator, remote);
+    try checkoutBranch(repo_kind, repo_opts, state, io, allocator, remote);
 }
 
 pub fn cloneWire(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     remote: *net.Remote(repo_kind, repo_opts),
     transport_opts: net_transport.Opts(repo_opts.ProgressCtx),
 ) !void {
-    if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), allocator, "HEAD")) |_| {
+    if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), io, allocator, "HEAD")) |_| {
         return error.RepoIsNotEmpty;
     }
 
     var remote_copy = try remote.dupe(allocator);
-    defer remote_copy.deinit(allocator);
+    defer remote_copy.deinit(io, allocator);
 
-    try net.connect(repo_kind, repo_opts, state.readOnly(), allocator, &remote_copy, .fetch, transport_opts);
+    try net.connect(repo_kind, repo_opts, state.readOnly(), io, allocator, &remote_copy, .fetch, transport_opts);
 
-    try net.fetch(repo_kind, repo_opts, state, allocator, &remote_copy, transport_opts);
+    try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote_copy, transport_opts);
 
-    try checkoutBranch(repo_kind, repo_opts, state, allocator, &remote_copy);
+    try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote_copy);
 }

@@ -19,7 +19,7 @@ pub fn build(b: *std.Build) !void {
         exe.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
         exe.root_module.addImport("xitui", b.dependency("xitui", .{}).module("xitui"));
         if (.windows == builtin.os.tag) {
-            exe.linkLibC();
+            exe.root_module.link_libc = true;
         }
         exe.use_llvm = true;
         b.installArtifact(exe);
@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) !void {
         });
         exe.root_module.addImport("xit", xit);
         if (.windows == builtin.os.tag) {
-            exe.linkLibC();
+            exe.root_module.link_libc = true;
         }
         exe.use_llvm = true;
         b.installArtifact(exe);
@@ -91,9 +91,9 @@ pub fn build(b: *std.Build) !void {
             .filters = test_filters,
         });
         unit_tests.root_module.addImport("xit", xit);
-        unit_tests.linkLibC();
-        unit_tests.addIncludePath(b.path("deps/test/libgit2/include"));
-        unit_tests.linkLibrary(git2.step);
+        unit_tests.root_module.link_libc = true;
+        unit_tests.root_module.addIncludePath(b.path("deps/test/libgit2/include"));
+        unit_tests.root_module.linkLibrary(git2.step);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) !void {
         });
         unit_tests.root_module.addImport("xit", xit);
         if (.windows == builtin.os.tag) {
-            unit_tests.linkLibC();
+            unit_tests.root_module.link_libc = true;
         }
 
         const run_unit_tests = b.addRunArtifact(unit_tests);

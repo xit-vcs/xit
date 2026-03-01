@@ -3,12 +3,12 @@
     .version = "0.0.0",
     .dependencies = .{
         .xitdb = .{
-            .url = "git+https://github.com/xit-vcs/xitdb#47044c9a23a2ff530e9459c7d56591093f4a6f0f",
-            .hash = "xitdb-0.0.0-EEFkxso3BABLtFTPqhT3OyMnJ-RVrHzonxS775Ue2e_G",
+            .url = "git+https://github.com/xit-vcs/xitdb.git#6781eeccecf6ae6f5b3febac8d36d1dafe7a8a0e",
+            .hash = "xitdb-0.0.0-EEFkxhvJBAAGOzcH_psHd7qB96giQZJ-cnS0UMQWGoFz",
         },
         .xitui = .{
-            .url = "git+https://github.com/xit-vcs/xitui#8205b9e12cd95fe4d08cc67b70c49a39d622ae25",
-            .hash = "xitui-0.0.0--YPVyIYxAQDzqZAN63kAqYTXheNJwyrPCgXDdu7oJUww",
+            .url = "git+https://github.com/xit-vcs/xitui#3a883545c1548ba76f4ecbe7ee552445e9b2a059",
+            .hash = "xitui-0.0.0--YPVyNVAAQBmSeI2MbVq_dlrJS17UpSYSuw-433Owfdc",
         },
     },
     .paths = .{

@@ -116,7 +116,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         const FocusKind = enum { tabs, stack };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, null, .vert);
             errdefer box.deinit();
 
@@ -133,19 +133,19 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         errdefer stack.deinit();
 
                         {
-                            var log = Widget{ .ui_log = try ui_log.Log(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var log = Widget{ .ui_log = try ui_log.Log(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer log.deinit();
                             try stack.children.put(log.getFocus().id, log);
                         }
 
                         {
-                            var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer status.deinit();
                             try stack.children.put(status.getFocus().id, status);
                         }
 
                         {
-                            var config = Widget{ .ui_config_list = try ui_config.ConfigList(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var config = Widget{ .ui_config_list = try ui_config.ConfigList(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer config.deinit();
                             try stack.children.put(config.getFocus().id, config);
                         }

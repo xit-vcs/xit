@@ -15,6 +15,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         dir_to_paths: std.StringArrayHashMap(std.StringArrayHashMap(void)),
         dir_to_children: std.StringArrayHashMap(std.StringArrayHashMap(void)),
         root_children: std.StringArrayHashMap(void),
+        io: std.Io,
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
 
@@ -52,7 +53,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             path: []const u8,
         };
 
-        pub fn init(allocator: std.mem.Allocator, state: rp.Repo(repo_kind, repo_opts).State(.read_only)) !Index(repo_kind, repo_opts) {
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+        ) !Index(repo_kind, repo_opts) {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             var self = Index(repo_kind, repo_opts){
@@ -61,6 +66,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 .dir_to_paths = std.StringArrayHashMap(std.StringArrayHashMap(void)).init(allocator),
                 .dir_to_children = std.StringArrayHashMap(std.StringArrayHashMap(void)).init(allocator),
                 .root_children = std.StringArrayHashMap(void).init(allocator),
+                .io = io,
                 .allocator = allocator,
                 .arena = arena,
             };
@@ -69,14 +75,14 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             switch (repo_kind) {
                 .git => {
                     // open index
-                    const index_file = state.core.repo_dir.openFile("index", .{ .mode = .read_only }) catch |err| switch (err) {
+                    const index_file = state.core.repo_dir.openFile(io, "index", .{ .mode = .read_only }) catch |err| switch (err) {
                         error.FileNotFound => return self,
                         else => |e| return e,
                     };
-                    defer index_file.close();
+                    defer index_file.close(io);
 
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = index_file.reader(&reader_buffer);
+                    var reader = index_file.reader(io, &reader_buffer);
 
                     const signature = try reader.interface.takeArray(4);
                     if (!std.mem.eql(u8, "DIRC", signature)) {
@@ -202,6 +208,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         pub fn addPath(
             self: *Index(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
             path: []const u8,
             // this param is only ever used on windows.
             // its purpose is to make the index entry have the same mode as the one in the tree,
@@ -219,23 +226,23 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 parent_path_maybe = std.fs.path.dirname(parent_path);
             }
 
-            const meta = try fs.Metadata.init(state.core.work_dir, path);
+            const meta = try fs.Metadata.init(io, state.core.work_dir, path);
             switch (meta.kind) {
                 .file => {
                     // remove entries that are children of this path (file replaces directory)
                     try self.removeChildren(path, null);
 
                     // open file
-                    const file = try state.core.work_dir.openFile(path, .{ .mode = .read_only });
-                    defer file.close();
+                    const file = try state.core.work_dir.openFile(io, path, .{ .mode = .read_only });
+                    defer file.close(io);
 
                     // make reader
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = file.reader(&reader_buffer);
+                    var reader = file.reader(self.io, &reader_buffer);
 
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try obj.writeObject(repo_kind, repo_opts, state, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
+                    try obj.writeObject(repo_kind, repo_opts, state, self.io, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     // get the mode
                     // on windows, if a tree entry was supplied to this fn and its hash
@@ -291,10 +298,10 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     try self.addEntry(entry);
                 },
                 .directory => {
-                    var dir = try state.core.work_dir.openDir(path, .{ .iterate = true });
-                    defer dir.close();
+                    var dir = try state.core.work_dir.openDir(io, path, .{ .iterate = true });
+                    defer dir.close(io);
                     var iter = dir.iterate();
-                    while (try iter.next()) |entry| {
+                    while (try iter.next(io)) |entry| {
                         // ignore repo dir
                         const repo_dir_name = switch (repo_kind) {
                             .git => ".git",
@@ -305,7 +312,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         }
 
                         const subpath = try fs.joinPath(self.arena.allocator(), &.{ path, entry.name });
-                        try self.addPath(state, subpath, null);
+                        try self.addPath(state, io, subpath, null);
                     }
                 },
                 .sym_link => {
@@ -314,25 +321,13 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // get the target path
                     var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
-                    const target_path = try state.core.work_dir.readLink(path, &target_path_buffer);
-
-                    // make reader
-                    const Stream = struct {
-                        interface: std.Io.Reader,
-
-                        pub fn seekTo(stream_self: *@This(), offset: u64) !void {
-                            if (offset == 0) {
-                                stream_self.interface.seek = 0;
-                            } else {
-                                return error.InvalidOffset;
-                            }
-                        }
-                    };
-                    var stream = Stream{ .interface = std.Io.Reader.fixed(target_path) };
+                    const target_path_size = try state.core.work_dir.readLink(io, path, &target_path_buffer);
+                    const target_path = target_path_buffer[0..target_path_size];
 
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try obj.writeObject(repo_kind, repo_opts, state, &stream, .{ .kind = .blob, .size = meta.size }, &oid);
+                    var reader = std.Io.Reader.fixed(target_path);
+                    try obj.writeObject(repo_kind, repo_opts, state, self.io, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     const entry = Entry{
                         .ctime_secs = meta.times.ctime_secs,
@@ -429,12 +424,13 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         pub fn addTreeEntry(
             self: *Index(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             tree_entry: *const tr.TreeEntry(repo_opts.hash),
             path_parts: []const []const u8,
         ) !void {
             const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
-            var object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state, &oid_hex);
+            var object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &oid_hex);
             defer object.deinit();
 
             switch (object.content) {
@@ -445,7 +441,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         defer child_path.deinit(allocator);
                         try child_path.appendSlice(allocator, path_parts);
                         try child_path.append(allocator, path_part);
-                        try self.addTreeEntry(state, allocator, child_tree_entry, child_path.items);
+                        try self.addTreeEntry(state, io, allocator, child_tree_entry, child_path.items);
                     }
                 },
                 else => return error.InvalidObjectKind,
@@ -547,6 +543,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         pub fn addOrRemovePath(
             self: *Index(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
             path_parts: []const []const u8,
             action: enum { add, rm },
             removed_paths_maybe: ?*std.StringArrayHashMap(void),
@@ -554,11 +551,10 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             const path = try fs.joinPath(self.arena.allocator(), path_parts);
 
             // if the path doesn't exist, remove it, regardless of what the `action` is
-            if (state.core.work_dir.openFile(path, .{ .mode = .read_only })) |file| {
-                file.close();
+            if (state.core.work_dir.openFile(io, path, .{ .mode = .read_only })) |file| {
+                file.close(io);
             } else |err| {
                 switch (err) {
-                    error.IsDir => {}, // only happens on windows
                     error.FileNotFound => {
                         if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
                             return switch (action) {
@@ -576,7 +572,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
             // add or remove based on the `action`
             switch (action) {
-                .add => try self.addPath(state, path, null),
+                .add => try self.addPath(state, io, path, null),
                 .rm => {
                     if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
                         return error.RemoveIndexPathNotFound;
@@ -587,7 +583,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             }
         }
 
-        pub fn write(self: *Index(repo_kind, repo_opts), allocator: std.mem.Allocator, state: rp.Repo(repo_kind, repo_opts).State(.read_write)) !void {
+        pub fn write(
+            self: *Index(repo_kind, repo_opts),
+            allocator: std.mem.Allocator,
+            state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
+        ) !void {
             switch (repo_kind) {
                 .git => {
                     // sort the entries
@@ -613,8 +614,8 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     const lock_file = state.extra.lock_file_maybe orelse return error.NoLockFile;
-                    try lock_file.seekTo(0);
-                    try lock_file.setEndPos(0); // truncate file in case this method is called multiple times
+                    try io.vtable.fileSeekTo(io.userdata, lock_file, 0);
+                    try lock_file.setLength(io, 0); // truncate file in case this method is called multiple times
 
                     // write the header
                     const version: u32 = 2;
@@ -623,7 +624,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         std.mem.asBytes(&std.mem.nativeToBig(u32, entry_count)),
                     });
                     defer allocator.free(header);
-                    try lock_file.writeAll(header);
+                    try lock_file.writeStreamingAll(io, header);
                     hasher.update(header);
 
                     // write the entries
@@ -651,7 +652,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                                 for (0..entry_zeroes) |_| {
                                     try entry_buffer_writer.writer.writeByte(0);
                                 }
-                                try lock_file.writeAll(entry_buffer_writer.written());
+                                try lock_file.writeStreamingAll(io, entry_buffer_writer.written());
                                 hasher.update(entry_buffer_writer.written());
                             }
                         }
@@ -660,7 +661,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // write the checksum
                     var overall_sha1_buffer = [_]u8{0} ** hash.byteLen(.sha1);
                     hasher.final(&overall_sha1_buffer);
-                    try lock_file.writeAll(&overall_sha1_buffer);
+                    try lock_file.writeStreamingAll(io, &overall_sha1_buffer);
                 },
                 .xit => {
                     const index_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "index"));

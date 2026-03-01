@@ -20,7 +20,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         commit_iter: obj.ObjectIterator(repo_kind, repo_opts, .full),
         commits: std.ArrayList(obj.Object(repo_kind, repo_opts, .full)),
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !LogCommitList(Widget, repo_kind, repo_opts) {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !LogCommitList(Widget, repo_kind, repo_opts) {
             var self = blk: {
                 // init commits
                 var commits = std.ArrayList(obj.Object(repo_kind, repo_opts, .full)){};
@@ -32,7 +32,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 }
 
                 // walk the commits
-                var commit_iter = try repo.log(allocator, null);
+                var commit_iter = try repo.log(io, allocator, null);
                 errdefer commit_iter.deinit();
 
                 var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
@@ -196,15 +196,16 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
     return struct {
         box: wgt.Box(Widget),
         repo: *rp.Repo(repo_kind, repo_opts),
+        io: std.Io,
         allocator: std.mem.Allocator,
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, null, .horiz);
             errdefer box.deinit();
 
             // add commit list
             {
-                var commit_list = try LogCommitList(Widget, repo_kind, repo_opts).init(allocator, repo);
+                var commit_list = try LogCommitList(Widget, repo_kind, repo_opts).init(io, allocator, repo);
                 errdefer commit_list.deinit();
                 try box.children.put(commit_list.getFocus().id, .{ .widget = .{ .ui_log_commit_list = commit_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
             }
@@ -220,6 +221,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
             var git_log = Log(Widget, repo_kind, repo_opts){
                 .box = box,
                 .repo = repo,
+                .io = io,
                 .allocator = allocator,
             };
             git_log.getFocus().child_id = box.children.keys()[0];
@@ -333,9 +335,9 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                 try diff.clearDiffs();
 
                 const tree_diff = try diff.iter_arena.allocator().create(tr.TreeDiff(repo_kind, repo_opts));
-                tree_diff.* = try self.repo.treeDiff(diff.iter_arena.allocator(), parent_oid_maybe, commit_oid);
+                tree_diff.* = try self.repo.treeDiff(self.io, diff.iter_arena.allocator(), parent_oid_maybe, commit_oid);
 
-                diff.file_iter = try self.repo.filePairs(diff.iter_arena.allocator(), .{ .tree = .{ .tree_diff = tree_diff } });
+                diff.file_iter = try self.repo.filePairs(self.io, diff.iter_arena.allocator(), .{ .tree = .{ .tree_diff = tree_diff } });
             }
         }
     };

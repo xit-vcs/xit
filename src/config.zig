@@ -25,7 +25,11 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
         const Variables = std.StringArrayHashMap([]const u8);
 
-        pub fn init(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator) !Config(repo_kind, repo_opts) {
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+        ) !Config(repo_kind, repo_opts) {
             var arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer {
@@ -122,11 +126,11 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         }
                     };
 
-                    var config_file = try state.core.repo_dir.createFile("config", .{ .read = true, .truncate = false });
-                    defer config_file.close();
+                    var config_file = try state.core.repo_dir.createFile(io, "config", .{ .read = true, .truncate = false });
+                    defer config_file.close(io);
 
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = config_file.reader(&reader_buffer);
+                    var reader = config_file.reader(io, &reader_buffer);
 
                     // for each line...
                     while (reader.interface.peekByte()) |_| {
@@ -274,7 +278,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             self.allocator.destroy(self.arena);
         }
 
-        pub fn add(self: *Config(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_write), input: AddConfigInput) !void {
+        pub fn add(
+            self: *Config(repo_kind, repo_opts),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
+            input: AddConfigInput,
+        ) !void {
             const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             // extract the parts of the config name
@@ -316,7 +325,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
 
             switch (repo_kind) {
-                .git => try self.write(state),
+                .git => try self.write(state, io),
                 .xit => {
                     const config_name_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config-name-set"));
                     const config_name_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(config_name_set_cursor);
@@ -347,7 +356,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        pub fn remove(self: *Config(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_write), input: RemoveConfigInput) !void {
+        pub fn remove(
+            self: *Config(repo_kind, repo_opts),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
+            input: RemoveConfigInput,
+        ) !void {
             const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             const section_name = try self.arena.allocator().dupe(u8, input.name[0..last_dot_index]);
@@ -362,7 +376,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
 
             switch (repo_kind) {
-                .git => try self.write(state),
+                .git => try self.write(state, io),
                 .xit => {
                     const config_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config"));
                     const config = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(config_cursor);
@@ -377,10 +391,10 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        fn write(self: *Config(.git, repo_opts), state: rp.Repo(.git, repo_opts).State(.read_write)) !void {
+        fn write(self: *Config(.git, repo_opts), state: rp.Repo(.git, repo_opts).State(.read_write), io: std.Io) !void {
             const lock_file = state.extra.lock_file_maybe orelse return error.NoLockFile;
-            try lock_file.seekTo(0);
-            try lock_file.setEndPos(0); // truncate file in case this method is called multiple times
+            try io.vtable.fileSeekTo(io.userdata, lock_file, 0);
+            try lock_file.setLength(io, 0); // truncate file in case this method is called multiple times
 
             for (self.sections.keys(), self.sections.values()) |section_name, variables| {
                 // if the section name has periods, put everything after the first period in quotes
@@ -390,12 +404,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     break :blk try std.fmt.allocPrint(self.allocator, "[{s} \"{s}\"]\n", .{ section_name[0..index], subsection_name });
                 } else try std.fmt.allocPrint(self.allocator, "[{s}]\n", .{section_name});
                 defer self.allocator.free(section_line);
-                try lock_file.writeAll(section_line);
+                try lock_file.writeStreamingAll(io, section_line);
 
                 for (variables.keys(), variables.values()) |name, value| {
                     const var_line = try std.fmt.allocPrint(self.allocator, "\t{s} = {s}\n", .{ name, value });
                     defer self.allocator.free(var_line);
-                    try lock_file.writeAll(var_line);
+                    try lock_file.writeStreamingAll(io, var_line);
                 }
             }
         }

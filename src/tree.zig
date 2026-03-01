@@ -47,6 +47,7 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
         pub fn compare(
             self: *TreeDiff(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             old_oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
             new_oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
             path_list_maybe: ?*std.ArrayList([]const u8),
@@ -54,8 +55,8 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             if (old_oid_maybe == null and new_oid_maybe == null) {
                 return;
             }
-            const old_entries = try self.loadTree(state, old_oid_maybe);
-            const new_entries = try self.loadTree(state, new_oid_maybe);
+            const old_entries = try self.loadTree(state, io, old_oid_maybe);
+            const new_entries = try self.loadTree(state, io, new_oid_maybe);
             // deletions and edits
             {
                 var iter = old_entries.iterator();
@@ -69,14 +70,20 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
                         if (!old_value.eql(new_value)) {
                             const old_value_tree = old_value.isTree();
                             const new_value_tree = new_value.isTree();
-                            try self.compare(state, if (old_value_tree) &std.fmt.bytesToHex(&old_value.oid, .lower) else null, if (new_value_tree) &std.fmt.bytesToHex(&new_value.oid, .lower) else null, &path_list);
+                            try self.compare(
+                                state,
+                                io,
+                                if (old_value_tree) &std.fmt.bytesToHex(&old_value.oid, .lower) else null,
+                                if (new_value_tree) &std.fmt.bytesToHex(&new_value.oid, .lower) else null,
+                                &path_list,
+                            );
                             if (!old_value_tree or !new_value_tree) {
                                 try self.changes.put(path, Change(repo_opts.hash){ .old = if (old_value_tree) null else old_value, .new = if (new_value_tree) null else new_value });
                             }
                         }
                     } else {
                         if (old_value.isTree()) {
-                            try self.compare(state, &std.fmt.bytesToHex(&old_value.oid, .lower), null, &path_list);
+                            try self.compare(state, io, &std.fmt.bytesToHex(&old_value.oid, .lower), null, &path_list);
                         } else {
                             try self.changes.put(path, Change(repo_opts.hash){ .old = old_value, .new = null });
                         }
@@ -95,7 +102,7 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
                     if (old_entries.get(new_key)) |_| {
                         continue;
                     } else if (new_value.isTree()) {
-                        try self.compare(state, null, &std.fmt.bytesToHex(&new_value.oid, .lower), &path_list);
+                        try self.compare(state, io, null, &std.fmt.bytesToHex(&new_value.oid, .lower), &path_list);
                     } else {
                         try self.changes.put(path, Change(repo_opts.hash){ .old = null, .new = new_value });
                     }
@@ -106,14 +113,15 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
         fn loadTree(
             self: *TreeDiff(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
         ) !std.StringArrayHashMap(TreeEntry(repo_opts.hash)) {
             if (oid_maybe) |oid| {
-                const object = try obj.Object(repo_kind, repo_opts, .full).init(self.arena.allocator(), state, oid);
+                const object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, self.arena.allocator(), oid);
                 return switch (object.content) {
                     .blob, .tag => std.StringArrayHashMap(TreeEntry(repo_opts.hash)).init(self.arena.allocator()),
                     .tree => |tree| tree.entries,
-                    .commit => |commit| self.loadTree(state, &commit.tree),
+                    .commit => |commit| self.loadTree(state, io, &commit.tree),
                 };
             } else {
                 return std.StringArrayHashMap(TreeEntry(repo_opts.hash)).init(self.arena.allocator());
@@ -126,6 +134,7 @@ fn pathToTreeEntry(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     allocator: std.mem.Allocator,
     parent: obj.Object(repo_kind, repo_opts, .full),
     path_parts: []const []const u8,
@@ -138,12 +147,12 @@ fn pathToTreeEntry(
     }
 
     const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
-    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state, &oid_hex);
+    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &oid_hex);
     defer tree_object.deinit();
 
     switch (tree_object.content) {
         .blob, .tag => return null,
-        .tree => return pathToTreeEntry(repo_kind, repo_opts, state, allocator, tree_object, path_parts[1..]),
+        .tree => return pathToTreeEntry(repo_kind, repo_opts, state, io, allocator, tree_object, path_parts[1..]),
         .commit => return error.ObjectInvalid,
     }
 }
@@ -152,31 +161,34 @@ pub fn headTreeEntry(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     allocator: std.mem.Allocator,
     path_parts: []const []const u8,
 ) !?TreeEntry(repo_opts.hash) {
     // get the current commit
-    const current_oid = try rf.readHeadRecur(repo_kind, repo_opts, state);
-    var commit_object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state, &current_oid);
+    const current_oid = try rf.readHeadRecur(repo_kind, repo_opts, state, io);
+    var commit_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &current_oid);
     defer commit_object.deinit();
 
     // get the tree of the current commit
-    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state, &commit_object.content.commit.tree);
+    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &commit_object.content.commit.tree);
     defer tree_object.deinit();
 
     // get the entry for the given path
-    return try pathToTreeEntry(repo_kind, repo_opts, state, allocator, tree_object, path_parts);
+    return try pathToTreeEntry(repo_kind, repo_opts, state, io, allocator, tree_object, path_parts);
 }
 
 pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         entries: std.StringArrayHashMap(TreeEntry(repo_opts.hash)),
         arena: *std.heap.ArenaAllocator,
+        io: std.Io,
         allocator: std.mem.Allocator,
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
         ) !Tree(repo_kind, repo_opts) {
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -184,13 +196,14 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             var tree = Tree(repo_kind, repo_opts){
                 .entries = std.StringArrayHashMap(TreeEntry(repo_opts.hash)).init(allocator),
                 .arena = arena,
+                .io = io,
                 .allocator = allocator,
             };
             errdefer tree.deinit();
 
-            const oid = oid_maybe orelse &(try rf.readHeadRecurMaybe(repo_kind, repo_opts, state) orelse return tree);
+            const oid = oid_maybe orelse &(try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io) orelse return tree);
 
-            var commit_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(allocator, state, oid);
+            var commit_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, allocator, oid);
             defer commit_object.deinit();
             try tree.read(state, "", &commit_object.content.commit.tree);
 
@@ -204,7 +217,7 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         }
 
         fn read(self: *Tree(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_only), prefix: []const u8, oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
-            var object = try obj.Object(repo_kind, repo_opts, .full).init(self.allocator, state, oid);
+            var object = try obj.Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, oid);
             defer object.deinit();
 
             switch (object.content) {

@@ -35,8 +35,9 @@ fn CommitParentsQueue(comptime hash_kind: hash.HashKind) type {
 pub fn getDescendent(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
     oid1: *const [hash.hexLen(repo_opts.hash)]u8,
     oid2: *const [hash.hexLen(repo_opts.hash)]u8,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
@@ -47,29 +48,29 @@ pub fn getDescendent(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var queue = CommitParentsQueue(repo_opts.hash).init(arena.allocator(), {});
+    var queue: CommitParentsQueue(repo_opts.hash) = .empty;
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, oid1);
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid1);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &parent_oid);
-                try queue.add(.{ .oid = parent_oid, .kind = .one, .timestamp = parent_object.content.commit.metadata.timestamp });
+                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .one, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
     }
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, oid2);
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid2);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &parent_oid);
-                try queue.add(.{ .oid = parent_oid, .kind = .two, .timestamp = parent_object.content.commit.metadata.timestamp });
+                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .two, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
     }
 
-    while (queue.removeOrNull()) |node| {
+    while (queue.pop()) |node| {
         switch (node.kind) {
             .one => {
                 if (std.mem.eql(u8, oid2, &node.oid)) {
@@ -88,11 +89,11 @@ pub fn getDescendent(
             .stale => unreachable,
         }
 
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &node.oid);
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &node.oid);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &parent_oid);
-                try queue.add(.{ .oid = parent_oid, .kind = node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
+                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
     }
@@ -103,8 +104,9 @@ pub fn getDescendent(
 pub fn commonAncestor(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
     oid1: *const [hash.hexLen(repo_opts.hash)]u8,
     oid2: *const [hash.hexLen(repo_opts.hash)]u8,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
@@ -115,16 +117,16 @@ pub fn commonAncestor(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var queue = CommitParentsQueue(repo_opts.hash).init(arena.allocator(), {});
+    var queue: CommitParentsQueue(repo_opts.hash) = .empty;
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, oid1);
-        try queue.add(.{ .oid = oid1.*, .kind = .one, .timestamp = object.content.commit.metadata.timestamp });
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid1);
+        try queue.push(arena.allocator(), .{ .oid = oid1.*, .kind = .one, .timestamp = object.content.commit.metadata.timestamp });
     }
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, oid2);
-        try queue.add(.{ .oid = oid2.*, .kind = .two, .timestamp = object.content.commit.metadata.timestamp });
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid2);
+        try queue.push(arena.allocator(), .{ .oid = oid2.*, .kind = .two, .timestamp = object.content.commit.metadata.timestamp });
     }
 
     var parents_of_1 = std.StringHashMap(void).init(arena.allocator());
@@ -132,7 +134,7 @@ pub fn commonAncestor(
     var parents_of_both = std.StringArrayHashMap(void).init(arena.allocator());
     var stale_oids = std.StringHashMap(void).init(arena.allocator());
 
-    while (queue.removeOrNull()) |node| {
+    while (queue.pop()) |node| {
         switch (node.kind) {
             .one => {
                 if (std.mem.eql(u8, &node.oid, oid2)) {
@@ -163,7 +165,7 @@ pub fn commonAncestor(
 
         const is_base_ancestor = parents_of_both.contains(&node.oid);
 
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &node.oid);
+        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &node.oid);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             parents: for (parent_oids) |parent_oid| {
                 const is_stale = is_base_ancestor or stale_oids.contains(&parent_oid);
@@ -178,8 +180,8 @@ pub fn commonAncestor(
                         }
                     }
                 }
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(arena.allocator(), state, &parent_oid);
-                try queue.add(.{ .oid = parent_oid, .kind = if (is_stale) .stale else node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
+                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = if (is_stale) .stale else node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
 
@@ -201,7 +203,7 @@ pub fn commonAncestor(
     if (base_ancestor_count > 1) {
         var oid = parents_of_both.keys()[0][0..comptime hash.hexLen(repo_opts.hash)].*;
         for (parents_of_both.keys()[1..]) |next_oid| {
-            oid = try getDescendent(repo_kind, repo_opts, allocator, state, oid[0..comptime hash.hexLen(repo_opts.hash)], next_oid[0..comptime hash.hexLen(repo_opts.hash)]);
+            oid = try getDescendent(repo_kind, repo_opts, state, io, allocator, oid[0..comptime hash.hexLen(repo_opts.hash)], next_oid[0..comptime hash.hexLen(repo_opts.hash)]);
         }
         return oid;
     } else if (base_ancestor_count == 1) {
@@ -231,6 +233,7 @@ fn writeBlobWithDiff3(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_file_oid_maybe: ?*const [hash.byteLen(repo_opts.hash)]u8,
     target_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
@@ -241,15 +244,15 @@ fn writeBlobWithDiff3(
     has_conflict: *bool,
 ) ![hash.byteLen(repo_opts.hash)]u8 {
     var base_iter = if (base_file_oid_maybe) |base_file_oid|
-        try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), allocator, "", base_file_oid, null)
+        try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, "", base_file_oid, null)
     else
-        try df.LineIterator(repo_kind, repo_opts).initFromNothing(allocator, "");
+        try df.LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, "");
     defer base_iter.deinit();
 
-    var target_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), allocator, "", target_file_oid, null);
+    var target_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, "", target_file_oid, null);
     defer target_iter.deinit();
 
-    var source_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), allocator, "", source_file_oid, null);
+    var source_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, "", source_file_oid, null);
     defer source_iter.deinit();
 
     // if any file is binary, just return the source oid because there is no point in trying to merge them
@@ -567,7 +570,7 @@ fn writeBlobWithDiff3(
     try stream.seekTo(0);
 
     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try obj.writeObject(repo_kind, repo_opts, state, &stream, header, &oid);
+    try obj.writeObject(repo_kind, repo_opts, state, io, &stream.interface, header, &oid);
     return oid;
 }
 
@@ -575,6 +578,7 @@ fn writeBlobWithPatches(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     source_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
     base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
@@ -610,7 +614,7 @@ fn writeBlobWithPatches(
 
     // get all the patch ids from source
     {
-        var iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(allocator, state.readOnly(), .{ .kind = .commit });
+        var iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
         defer iter.deinit();
         try iter.include(source_oid);
 
@@ -693,6 +697,7 @@ fn writeBlobWithPatches(
     const readLine = struct {
         fn readLine(
             inner_state: rp.Repo(.xit, repo_opts).State(.read_only),
+            inner_io: std.Io,
             inner_allocator: std.mem.Allocator,
             offset_list_cursor: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
             line_id: patch.LineId(repo_opts.hash),
@@ -708,7 +713,7 @@ fn writeBlobWithPatches(
             try offset_list_reader.seekTo(hash_size + line_id.line * offset_size);
             const change_offset = try offset_list_reader.interface.takeInt(u64, .big);
 
-            var obj_rdr = try obj.ObjectReader(.xit, repo_opts).init(inner_allocator, inner_state, &oid_hex);
+            var obj_rdr = try obj.ObjectReader(.xit, repo_opts).init(inner_state, inner_io, inner_allocator, &oid_hex);
             defer obj_rdr.deinit();
             try obj_rdr.seekTo(change_offset);
 
@@ -736,6 +741,7 @@ fn writeBlobWithPatches(
 
         fn init(
             inner_state: rp.Repo(.xit, repo_opts).State(.read_only),
+            inner_io: std.Io,
             inner_allocator: std.mem.Allocator,
             patch_id_to_offset_list_ptr: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
             line_ids: []patch.LineId(repo_opts.hash),
@@ -749,7 +755,7 @@ fn writeBlobWithPatches(
             }
             for (line_ids) |line_id| {
                 var offset_list_cursor = (try patch_id_to_offset_list_ptr.getCursor(line_id.patch_id)) orelse return error.KeyNotFound;
-                const line = try readLine(inner_state, inner_allocator, &offset_list_cursor, line_id);
+                const line = try readLine(inner_state, inner_io, inner_allocator, &offset_list_cursor, line_id);
                 errdefer inner_allocator.free(line);
                 try lines.append(inner_allocator, line);
             }
@@ -780,6 +786,7 @@ fn writeBlobWithPatches(
 
     const Stream = struct {
         state: rp.Repo(.xit, repo_opts).State(.read_only),
+        io: std.Io,
         allocator: std.mem.Allocator,
         target_marker: []u8,
         base_marker: []u8,
@@ -1010,11 +1017,11 @@ fn writeBlobWithPatches(
                             self.parent.current_line_id_hash = null;
                         }
 
-                        var base_lines = try LineRange.init(self.parent.state, self.parent.allocator, self.parent.patch_id_to_offset_list, base_line_ids.items);
+                        var base_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, base_line_ids.items);
                         defer base_lines.deinit(self.parent.allocator);
-                        var target_lines = try LineRange.init(self.parent.state, self.parent.allocator, self.parent.patch_id_to_offset_list, target_line_ids.items);
+                        var target_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, target_line_ids.items);
                         defer target_lines.deinit(self.parent.allocator);
-                        var source_lines = try LineRange.init(self.parent.state, self.parent.allocator, self.parent.patch_id_to_offset_list, source_line_ids.items);
+                        var source_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, source_line_ids.items);
                         defer source_lines.deinit(self.parent.allocator);
 
                         // if base == target or target == source, return source to autoresolve conflict
@@ -1072,7 +1079,7 @@ fn writeBlobWithPatches(
                         self.parent.has_conflict = true;
                     } else {
                         var offset_list_cursor = (try self.parent.patch_id_to_offset_list.getCursor(first_line_id.patch_id)) orelse return error.KeyNotFound;
-                        const line = try readLine(self.parent.state, self.parent.allocator, &offset_list_cursor, first_line_id);
+                        const line = try readLine(self.parent.state, self.parent.io, self.parent.allocator, &offset_list_cursor, first_line_id);
                         errdefer self.parent.allocator.free(line);
                         try self.parent.line_buffer.append(self.parent.allocator, line);
                         self.parent.current_line = self.parent.line_buffer.items[0];
@@ -1150,6 +1157,7 @@ fn writeBlobWithPatches(
     var stream_buffer = [_]u8{0} ** repo_opts.buffer_size;
     var stream = Stream{
         .state = state.readOnly(),
+        .io = io,
         .allocator = allocator,
         .target_marker = target_marker,
         .base_marker = base_marker,
@@ -1177,7 +1185,7 @@ fn writeBlobWithPatches(
     try stream.seekTo(0);
 
     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try obj.writeObject(.xit, repo_opts, state, &stream, header, &oid);
+    try obj.writeObject(.xit, repo_opts, state, io, &stream.interface, header, &oid);
     return oid;
 }
 
@@ -1192,6 +1200,7 @@ fn samePathConflict(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
@@ -1246,8 +1255,8 @@ fn samePathConflict(
 
                 const base_file_oid_maybe = if (base_entry_maybe) |base_entry| &base_entry.oid else null;
                 const oid = oid_maybe orelse switch (merge_algo) {
-                    .diff3 => try writeBlobWithDiff3(repo_kind, repo_opts, state, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_conflict),
-                    .patch => try writeBlobWithPatches(repo_kind, repo_opts, state, allocator, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_conflict, path),
+                    .diff3 => try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_conflict),
+                    .patch => try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_conflict, path),
                 };
                 const mode = mode_maybe orelse target_entry.mode;
 
@@ -1367,9 +1376,10 @@ pub fn checkForUnfinishedMerge(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
 ) !void {
     for (merge_head_names) |head_name| {
-        if (null != try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = .{ .kind = .none, .name = head_name } })) {
+        if (null != try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = .{ .kind = .none, .name = head_name } })) {
             return error.UnfinishedMergeInProgress;
         }
     }
@@ -1379,13 +1389,14 @@ pub fn checkForOtherMerge(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     merge_head_name: []const u8,
 ) !void {
     for (merge_head_names) |head_name| {
         if (std.mem.eql(u8, merge_head_name, head_name)) {
             continue;
         }
-        if (null != try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = .{ .kind = .none, .name = head_name } })) {
+        if (null != try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = .{ .kind = .none, .name = head_name } })) {
             return error.OtherMergeInProgress;
         }
     }
@@ -1395,9 +1406,10 @@ pub fn readAnyMergeHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
 ) !?[hash.hexLen(repo_opts.hash)]u8 {
     for (merge_head_names) |head_name| {
-        if (try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = .{ .kind = .none, .name = head_name } })) |source_oid| {
+        if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = .{ .kind = .none, .name = head_name } })) |source_oid| {
             return source_oid;
         }
     }
@@ -1408,15 +1420,16 @@ pub fn removeMergeState(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
 ) !void {
     for (merge_head_names) |merge_head_name| {
-        rf.remove(repo_kind, repo_opts, state, merge_head_name) catch |err| switch (err) {
+        rf.remove(repo_kind, repo_opts, state, io, merge_head_name) catch |err| switch (err) {
             error.RefNotFound => {},
             else => |e| return e,
         };
     }
 
-    state.core.repo_dir.deleteFile(merge_msg_name) catch |err| switch (err) {
+    state.core.repo_dir.deleteFile(io, merge_msg_name) catch |err| switch (err) {
         error.FileNotFound => {},
         else => |e| return e,
     };
@@ -1476,6 +1489,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
             allocator: std.mem.Allocator,
             merge_input: MergeInput(repo_opts.hash),
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
@@ -1491,12 +1505,12 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
             // get the current branch name and oid
             const target_buffer = try arena.allocator().alloc(u8, rf.MAX_REF_CONTENT_SIZE);
-            const target_ref_or_oid = try rf.readHead(repo_kind, repo_opts, state.readOnly(), target_buffer) orelse return error.TargetNotFound;
+            const target_ref_or_oid = try rf.readHead(repo_kind, repo_opts, state.readOnly(), io, target_buffer) orelse return error.TargetNotFound;
             const target_name = switch (target_ref_or_oid) {
                 .ref => |ref| ref.name,
                 .oid => |oid| oid,
             };
-            const target_oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), target_ref_or_oid);
+            const target_oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, target_ref_or_oid);
 
             // init the diff that we will use for the migration and the conflicts maps.
             // they're using the arena because they'll be included in the result.
@@ -1518,12 +1532,12 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     };
 
                     // make sure there is no unfinished merge in progress
-                    try checkForUnfinishedMerge(repo_kind, repo_opts, state.readOnly());
+                    try checkForUnfinishedMerge(repo_kind, repo_opts, state.readOnly(), io);
 
                     const merge_algo: MergeAlgorithm = action.algo orelse switch (repo_kind) {
                         .git => .diff3,
                         .xit => blk: {
-                            var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), allocator);
+                            var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                             defer config.deinit();
 
                             if (config.sections.get("merge")) |merge_section| {
@@ -1550,20 +1564,20 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     });
 
                     // get the source and target oid
-                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), source_ref_or_oid) orelse return error.InvalidMergeSource;
+                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
                     const target_oid = target_oid_maybe orelse {
                         // the target branch is completely empty, so just set it to the source oid
-                        try rf.writeRecur(repo_kind, repo_opts, state, "HEAD", &source_oid);
+                        try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &source_oid);
 
                         // make a TreeDiff that adds all files from source
-                        try clean_diff.compare(state.readOnly(), null, &source_oid, null);
+                        try clean_diff.compare(state.readOnly(), io, null, &source_oid, null);
 
                         // read index
-                        var index = try idx.Index(repo_kind, repo_opts).init(allocator, state.readOnly());
+                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                         defer index.deinit();
 
                         // update the work dir
-                        try work.migrate(repo_kind, repo_opts, state, allocator, clean_diff, &index, true, null);
+                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
 
                         return .{
                             .arena = arena,
@@ -1580,9 +1594,9 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // get the base oid
                     var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
                     switch (merge_input.kind) {
-                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, allocator, state.readOnly(), &target_oid, &source_oid),
+                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
                         .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state.readOnly(), &source_oid);
+                            var object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
                             const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
                             switch (object.content) {
@@ -1608,20 +1622,20 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // Lazy patch generation
                     if (repo_kind == .xit and merge_algo == .patch) {
-                        try writePossiblePatches(repo_opts, state, allocator, &target_oid, &source_oid, progress_ctx_maybe);
+                        try writePossiblePatches(repo_opts, state, io, allocator, &target_oid, &source_oid, progress_ctx_maybe);
                     }
 
                     // diff the base ancestor with the target oid
                     var target_diff = tr.TreeDiff(repo_kind, repo_opts).init(arena.allocator());
-                    try target_diff.compare(state.readOnly(), &base_oid, &target_oid, null);
+                    try target_diff.compare(state.readOnly(), io, &base_oid, &target_oid, null);
 
                     // diff the base ancestor with the source oid
                     var source_diff = tr.TreeDiff(repo_kind, repo_opts).init(arena.allocator());
-                    try source_diff.compare(state.readOnly(), &base_oid, &source_oid, null);
+                    try source_diff.compare(state.readOnly(), io, &base_oid, &source_oid, null);
 
                     // look for same path conflicts while populating the clean diff
                     for (source_diff.changes.keys(), source_diff.changes.values()) |path, source_change| {
-                        const same_path_result = try samePathConflict(repo_kind, repo_opts, state, allocator, &base_oid, &target_oid, &source_oid, target_name, source_name, target_diff.changes.get(path), source_change, path, merge_algo);
+                        const same_path_result = try samePathConflict(repo_kind, repo_opts, state, io, allocator, &base_oid, &target_oid, &source_oid, target_name, source_name, target_diff.changes.get(path), source_change, path, merge_algo);
                         if (same_path_result.change) |change| {
                             try clean_diff.changes.put(path, change);
                         }
@@ -1650,7 +1664,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name}),
                         },
                         .pick => blk: {
-                            const object = try obj.Object(repo_kind, repo_opts, .full).init(arena.allocator(), state.readOnly(), &source_oid);
+                            const object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, arena.allocator(), &source_oid);
                             switch (object.content) {
                                 .commit => break :blk object.content.commit.metadata,
                                 else => return error.CommitObjectNotFound,
@@ -1661,38 +1675,38 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     switch (repo_kind) {
                         .git => {
                             // create lock file
-                            var lock = try fs.LockFile.init(state.core.repo_dir, "index");
-                            defer lock.deinit();
+                            var lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
+                            defer lock.deinit(io);
 
                             // read index
-                            var index = try idx.Index(repo_kind, repo_opts).init(allocator, state.readOnly());
+                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                             defer index.deinit();
 
                             // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, allocator, clean_diff, &index, true, null);
+                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
 
                             for (conflicts.keys(), conflicts.values()) |path, conflict| {
                                 // add conflict to index
                                 try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
                                 // write renamed file if necessary
                                 if (conflict.renamed) |renamed| {
-                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), allocator, renamed.path, renamed.tree_entry);
+                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
                                 }
                             }
 
                             // update the index
-                            try index.write(allocator, .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } });
+                            try index.write(allocator, .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } }, io);
 
                             // finish lock
                             lock.success = true;
 
                             // exit early if there were conflicts
                             if (conflicts.count() > 0) {
-                                try rf.write(repo_kind, repo_opts, state, merge_head_name, .{ .oid = &source_oid });
+                                try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
 
-                                const merge_msg = try state.core.repo_dir.createFile(merge_msg_name, .{ .truncate = true, .lock = .exclusive });
-                                defer merge_msg.close();
-                                try merge_msg.writeAll(commit_metadata.message orelse "");
+                                const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
+                                defer merge_msg.close(io);
+                                try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
 
                                 return .{
                                     .arena = arena,
@@ -1708,18 +1722,18 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         },
                         .xit => {
                             // read index
-                            var index = try idx.Index(repo_kind, repo_opts).init(allocator, state.readOnly());
+                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                             defer index.deinit();
 
                             // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, allocator, clean_diff, &index, true, null);
+                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
 
                             for (conflicts.keys(), conflicts.values()) |path, conflict| {
                                 // add conflict to index
                                 try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
                                 // write renamed file if necessary
                                 if (conflict.renamed) |renamed| {
-                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), allocator, renamed.path, renamed.tree_entry);
+                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
                                 }
                             }
 
@@ -1729,15 +1743,15 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             }
 
                             // update the index
-                            try index.write(allocator, state);
+                            try index.write(allocator, state, io);
 
                             // exit early if there were conflicts
                             if (conflicts.count() > 0) {
-                                try rf.write(repo_kind, repo_opts, state, merge_head_name, .{ .oid = &source_oid });
+                                try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
 
-                                const merge_msg = try state.core.repo_dir.createFile(merge_msg_name, .{ .truncate = true, .lock = .exclusive });
-                                defer merge_msg.close();
-                                try merge_msg.writeAll(commit_metadata.message orelse "");
+                                const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
+                                defer merge_msg.close(io);
+                                try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
 
                                 return .{
                                     .arena = arena,
@@ -1751,14 +1765,14 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                                 };
                             } else {
                                 // if any file conflicts were auto-resolved, there will be temporary state that must be cleaned up
-                                try removeMergeState(repo_kind, repo_opts, state);
+                                try removeMergeState(repo_kind, repo_opts, state, io);
                             }
                         },
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
                         // the base ancestor is the target oid, so just update HEAD
-                        try rf.writeRecur(repo_kind, repo_opts, state, "HEAD", &source_oid);
+                        try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &source_oid);
                         return .{
                             .arena = arena,
                             .allocator = allocator,
@@ -1776,7 +1790,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, allocator, commit_metadata);
+                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
                     return .{
                         .arena = arena,
@@ -1792,7 +1806,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 .cont => {
                     // ensure there are no conflict entries in the index
                     {
-                        var index = try idx.Index(repo_kind, repo_opts).init(allocator, state.readOnly());
+                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                         defer index.deinit();
 
                         for (index.entries.values()) |*entries_for_path| {
@@ -1803,13 +1817,13 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // make sure there isn't another kind of merge in progress
-                    try checkForOtherMerge(repo_kind, repo_opts, state.readOnly(), merge_head_name);
+                    try checkForOtherMerge(repo_kind, repo_opts, state.readOnly(), io, merge_head_name);
 
-                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), .{ .ref = .{ .kind = .none, .name = merge_head_name } }) orelse return error.MergeHeadNotFound;
+                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .none, .name = merge_head_name } }) orelse return error.MergeHeadNotFound;
 
                     // read the merge message
                     var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
-                    commit_metadata.message = state.core.repo_dir.readFileAlloc(arena.allocator(), merge_msg_name, repo_opts.max_read_size) catch |err| switch (err) {
+                    commit_metadata.message = state.core.repo_dir.readFileAlloc(io, merge_msg_name, arena.allocator(), .limited(repo_opts.max_read_size)) catch |err| switch (err) {
                         error.FileNotFound => return error.MergeMessageNotFound,
                         else => |e| return e,
                     };
@@ -1822,9 +1836,9 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
                     const target_oid = target_oid_maybe orelse return error.TargetOidNotFound;
                     switch (merge_input.kind) {
-                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, allocator, state.readOnly(), &target_oid, &source_oid),
+                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
                         .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts, .full).init(allocator, state.readOnly(), &source_oid);
+                            var object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
                             const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
                             switch (object.content) {
@@ -1835,14 +1849,14 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // clean up the stored merge state
-                    try removeMergeState(repo_kind, repo_opts, state);
+                    try removeMergeState(repo_kind, repo_opts, state, io);
 
                     // commit the change
                     commit_metadata.parent_oids = switch (merge_input.kind) {
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, allocator, commit_metadata);
+                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
                     return .{
                         .arena = arena,
@@ -1868,6 +1882,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 fn writePossiblePatches(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
@@ -1875,28 +1890,28 @@ fn writePossiblePatches(
 ) !void {
     const patch = @import("./patch.zig");
 
-    var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), allocator);
-    defer patch_writer.deinit(allocator);
+    var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
+    defer patch_writer.deinit(io, allocator);
 
-    var source_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(allocator, state.readOnly(), .{ .kind = .commit });
+    var source_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer source_iter.deinit();
     try source_iter.include(source_oid);
     while (try source_iter.next()) |commit_object| {
         defer commit_object.deinit();
 
         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
-        try patch_writer.add(state.readOnly(), allocator, &oid);
+        try patch_writer.add(state.readOnly(), io, allocator, &oid);
     }
 
-    var target_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(allocator, state.readOnly(), .{ .kind = .commit });
+    var target_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer target_iter.deinit();
     try target_iter.include(target_oid);
     while (try target_iter.next()) |commit_object| {
         defer commit_object.deinit();
 
         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
-        try patch_writer.add(state.readOnly(), allocator, &oid);
+        try patch_writer.add(state.readOnly(), io, allocator, &oid);
     }
 
-    try patch_writer.write(state, allocator, progress_ctx_maybe);
+    try patch_writer.write(state, io, allocator, progress_ctx_maybe);
 }

@@ -16,6 +16,7 @@ pub fn negotiate(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     allocator: std.mem.Allocator,
     remote: *net.Remote(repo_kind, repo_opts),
 ) !void {
@@ -66,7 +67,7 @@ pub fn negotiate(
             try remote.heads.put(allocator, oid_head.name, oid_head);
         }
 
-        try remote.setLocalHeads(state, allocator);
+        try remote.setLocalHeads(state, io, allocator);
     }
 
     if (!remote.requires_fetch) {
@@ -76,13 +77,14 @@ pub fn negotiate(
     remote.nego.refs = remote.heads.values();
 
     const t = if (remote.transport) |*transport| transport else return error.NotConnected;
-    try t.negotiateFetch(state, allocator, &remote.nego);
+    try t.negotiateFetch(state, io, allocator, &remote.nego);
 }
 
 pub fn downloadPack(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     remote: *net.Remote(repo_kind, repo_opts),
 ) !void {
@@ -91,7 +93,7 @@ pub fn downloadPack(
     }
 
     if (remote.transport) |*transport| {
-        try transport.downloadPack(state, allocator);
+        try transport.downloadPack(state, io, allocator);
     } else {
         return error.TransportNotFound;
     }

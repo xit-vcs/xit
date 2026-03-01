@@ -3,8 +3,6 @@ const hash = @import("./hash.zig");
 const rp = @import("./repo.zig");
 const fs = @import("./fs.zig");
 const obj = @import("./object.zig");
-const zlib = @import("./std/zlib.zig");
-const flate = @import("./std/flate.zig");
 
 // reordering is a breaking change
 const CompressKind = enum(u8) {
@@ -171,7 +169,7 @@ test "fastcdc sekien 16k chunks" {
         .max_size = 65535,
         .normalization = .level1,
     };
-    const buffer = @embedFile("test/embed/SekienAkashita.jpg");
+    const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
     var chunk_buffer = [_]u8{0} ** opts.max_size;
@@ -196,7 +194,7 @@ test "fastcdc sekien 32k chunks" {
         .max_size = 131072,
         .normalization = .level1,
     };
-    const buffer = @embedFile("test/embed/SekienAkashita.jpg");
+    const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
     var chunk_buffer = [_]u8{0} ** opts.max_size;
@@ -218,7 +216,7 @@ test "fastcdc sekien 64k chunks" {
         .max_size = 262144,
         .normalization = .level1,
     };
-    const buffer = @embedFile("test/embed/SekienAkashita.jpg");
+    const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
     var chunk_buffer = [_]u8{0} ** opts.max_size;
@@ -301,61 +299,58 @@ test "trimTruncatedCodepoints" {
 pub fn writeChunks(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    reader: *std.Io.Reader,
-    object_hash: hash.HashInt(repo_opts.hash),
+    io: std.Io,
+    hashed: anytype,
     object_len: usize,
     object_kind_name: []const u8,
+    object_hash_bytes: *[hash.byteLen(repo_opts.hash)]u8,
 ) !void {
-    // exit early if the chunks for this object already exist
-    const blob_id_to_chunk_info_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
-    const blob_id_to_chunk_info = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(blob_id_to_chunk_info_cursor);
-    if (null != try blob_id_to_chunk_info.getCursor(object_hash)) return;
-
-    // write object kind in the key slot
-    try blob_id_to_chunk_info.putKey(object_hash, .{ .bytes = object_kind_name });
-
     // get a writer to the value slot
-    var chunk_info_cursor = try blob_id_to_chunk_info.putCursor(object_hash);
+    var temp_chunk_info_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object.temp"));
     var write_buffer: [repo_opts.buffer_size]u8 = undefined;
-    var writer = try chunk_info_cursor.writer(&write_buffer);
+    var writer = try temp_chunk_info_cursor.writer(&write_buffer);
 
     // make the .xit/chunks dir
-    var chunks_dir = try state.core.repo_dir.makeOpenPath("chunks", .{});
-    defer chunks_dir.close();
+    var chunks_dir = try state.core.repo_dir.createDirPathOpen(io, "chunks", .{});
+    defer chunks_dir.close(io);
 
     var chunk_buffer = [_]u8{0} ** repo_opts.extra.chunk_opts.max_size;
     var iter = FastCdc(repo_opts.extra.chunk_opts).init(object_len);
     var offset: u64 = 0;
-    while (try iter.next(reader, &chunk_buffer)) |chunk| {
+    while (try iter.next(&hashed.reader, &chunk_buffer)) |chunk| {
         // hash the chunk
         var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
         try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
 
         // write chunk unless it already exists
         const chunk_hash_hex = std.fmt.bytesToHex(chunk_hash_bytes, .lower);
-        if (chunks_dir.openFile(&chunk_hash_hex, .{})) |chunk_file| {
-            chunk_file.close();
+        if (chunks_dir.openFile(io, &chunk_hash_hex, .{ .allow_directory = false })) |chunk_file| {
+            chunk_file.close(io);
         } else |err| switch (err) {
             error.FileNotFound => {
-                var lock = try fs.LockFile.init(chunks_dir, &chunk_hash_hex);
-                defer lock.deinit();
+                var lock = try fs.LockFile.init(io, chunks_dir, &chunk_hash_hex);
+                defer lock.deinit(io);
 
                 // if it's utf8 text, try compressing it
                 // since the beginning and end could have truncated unicode codepoints,
                 // we must first trim them. if we don't do this, non-English text will
                 // sometimes fail to validate as utf8 and thus won't get compressed.
                 if (repo_opts.extra.compress_chunks and std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(chunk))) {
-                    try lock.lock_file.deprecatedWriter().writeByte(@intFromEnum(CompressKind.zlib));
-                    var zlib_stream = try zlib.compressor(lock.lock_file.deprecatedWriter(), .{ .level = .default });
-                    try zlib_stream.writer().writeAll(chunk);
-                    try zlib_stream.finish();
+                    var wbuf = [_]u8{0} ** repo_opts.buffer_size;
+                    var file_writer = lock.lock_file.writer(io, &wbuf);
+                    try file_writer.interface.writeByte(@intFromEnum(CompressKind.zlib));
+                    var dbuf = [_]u8{0} ** std.compress.flate.max_window_len;
+                    var zlib_stream = try std.compress.flate.Compress.init(&file_writer.interface, &dbuf, .zlib, .default);
+                    try zlib_stream.writer.writeAll(chunk);
+                    try zlib_stream.writer.flush();
+                    try file_writer.interface.flush();
 
                     // abort compression if it didn't make it smaller
                     const compress_kind_size = @sizeOf(CompressKind);
                     const checksum_size = @sizeOf(u32);
-                    if (try lock.lock_file.getPos() >= compress_kind_size + checksum_size + chunk.len) {
-                        try lock.lock_file.seekTo(0);
-                        try lock.lock_file.setEndPos(0);
+                    if (try lock.lock_file.length(io) >= compress_kind_size + checksum_size + chunk.len) {
+                        try io.vtable.fileSeekTo(io.userdata, lock.lock_file, 0);
+                        try lock.lock_file.setLength(io, 0);
                     } else {
                         lock.success = true;
                     }
@@ -363,9 +358,10 @@ pub fn writeChunks(
 
                 // write the chunk uncompressed
                 if (!lock.success) {
-                    try lock.lock_file.deprecatedWriter().writeByte(@intFromEnum(CompressKind.none));
-                    try lock.lock_file.deprecatedWriter().writeInt(u32, std.hash.Adler32.hash(chunk), .big);
-                    try lock.lock_file.writeAll(chunk);
+                    var file_writer = lock.lock_file.writer(io, &.{});
+                    try file_writer.interface.writeByte(@intFromEnum(CompressKind.none));
+                    try file_writer.interface.writeInt(u32, std.hash.Adler32.hash(chunk), .big);
+                    try file_writer.interface.writeAll(chunk);
                     lock.success = true;
                 }
             },
@@ -383,6 +379,19 @@ pub fn writeChunks(
 
     // finish writing to db
     try writer.finish();
+
+    hashed.hasher.final(object_hash_bytes);
+
+    // write slot to the map
+    const blob_id_to_chunk_info_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
+    const blob_id_to_chunk_info = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(blob_id_to_chunk_info_cursor);
+
+    const object_hash = hash.bytesToInt(repo_opts.hash, object_hash_bytes);
+    try blob_id_to_chunk_info.putKey(object_hash, .{ .bytes = object_kind_name });
+    try blob_id_to_chunk_info.put(object_hash, .{ .slot = temp_chunk_info_cursor.slot() });
+
+    // remove temp object
+    _ = try state.extra.moment.remove(hash.hashInt(repo_opts.hash, "object.temp"));
 }
 
 fn findChunkIndex(
@@ -440,8 +449,9 @@ fn findChunkIndex(
 
 pub fn readChunk(
     comptime repo_opts: rp.RepoOpts(.xit),
-    repo_dir: std.fs.Dir,
     chunk_info_reader: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only).Reader,
+    io: std.Io,
+    repo_dir: std.Io.Dir,
     object_position: u64,
     buf: []u8,
 ) !usize {
@@ -467,17 +477,17 @@ pub fn readChunk(
     const chunk_hash_hex = std.fmt.bytesToHex(chunk_hash_bytes, .lower);
 
     // open the chunk file
-    var chunks_dir = try repo_dir.openDir("chunks", .{});
-    defer chunks_dir.close();
-    const chunk_file = try chunks_dir.openFile(&chunk_hash_hex, .{});
-    defer chunk_file.close();
+    var chunks_dir = try repo_dir.openDir(io, "chunks", .{});
+    defer chunks_dir.close(io);
+    const chunk_file = try chunks_dir.openFile(io, &chunk_hash_hex, .{});
+    defer chunk_file.close(io);
 
     // make reader
     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-    var chunk_reader = chunk_file.reader(&reader_buffer);
+    var chunk_reader = chunk_file.reader(io, &reader_buffer);
 
     // read chunk, decompressing if necessary
-    const compress_kind = try std.meta.intToEnum(CompressKind, try chunk_reader.interface.takeByte());
+    const compress_kind = std.enums.fromInt(CompressKind, try chunk_reader.interface.takeByte()) orelse return error.InvalidEnumTag;
     switch (compress_kind) {
         .none => {
             const expected_checksum = try chunk_reader.interface.takeInt(u32, .big);
@@ -497,30 +507,30 @@ pub fn readChunk(
             return read_size;
         },
         .zlib => {
-            var zlib_stream = zlib.decompressor(chunk_reader.interface.adaptToOldInterface());
-            try zlib_stream.reader().skipBytes(chunk_offset, .{});
-            return zlib_stream.reader().read(buf) catch |err| switch (err) {
-                error.WrongZlibChecksum => error.WrongChunkChecksum,
-                else => |e| e,
-            };
+            var zlib_stream_buffer = [_]u8{0} ** std.compress.flate.max_window_len;
+            var zlib_stream: std.compress.flate.Decompress = .init(&chunk_reader.interface, .zlib, &zlib_stream_buffer);
+            _ = try zlib_stream.reader.take(chunk_offset);
+            return try zlib_stream.reader.readSliceShort(buf);
         },
     }
 }
 
-const ZlibStream = flate.inflate.Decompressor(.zlib, std.fs.File.DeprecatedReader);
-
 pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
-        repo_dir: std.fs.Dir,
+        io: std.Io,
+        repo_dir: std.Io.Dir,
         cursor: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
         chunk_info_reader: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only).Reader,
         read_buffer: []u8,
         position: u64,
         header: obj.ObjectHeader,
 
-        pub const Error = ZlibStream.Reader.Error || std.fs.File.OpenError || std.Io.AnyReader.Error || error{ InvalidOffset, InvalidEnumTag, WrongChunkChecksum };
-
-        pub fn init(allocator: std.mem.Allocator, state: rp.Repo(.xit, repo_opts).State(.read_only), oid: *const [hash.hexLen(repo_opts.hash)]u8) !ChunkObjectReader(repo_opts) {
+        pub fn init(
+            state: rp.Repo(.xit, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            oid: *const [hash.hexLen(repo_opts.hash)]u8,
+        ) !ChunkObjectReader(repo_opts) {
             // chunk info map
             const object_id_to_chunk_info_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) orelse return error.ObjectNotFound;
             const object_id_to_chunk_info = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(object_id_to_chunk_info_cursor);
@@ -552,6 +562,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             chunk_info_ptr.* = chunk_info_kv_pair.value_cursor;
 
             return .{
+                .io = io,
                 .repo_dir = state.core.repo_dir,
                 .cursor = chunk_info_ptr,
                 .chunk_info_reader = try chunk_info_ptr.reader(read_buffer),
@@ -564,7 +575,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             };
         }
 
-        pub fn deinit(self: *ChunkObjectReader(repo_opts), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *ChunkObjectReader(repo_opts), _: std.Io, allocator: std.mem.Allocator) void {
             allocator.destroy(self.cursor);
             allocator.free(self.read_buffer);
         }
@@ -583,7 +594,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
         }
 
         fn readStep(self: *ChunkObjectReader(repo_opts), buf: []u8) !usize {
-            return try readChunk(repo_opts, self.repo_dir, &self.chunk_info_reader, self.position, buf);
+            return try readChunk(repo_opts, &self.chunk_info_reader, self.io, self.repo_dir, self.position, buf);
         }
 
         pub fn reset(self: *ChunkObjectReader(repo_opts)) !void {

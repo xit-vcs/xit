@@ -80,10 +80,11 @@ pub fn rootWidget(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
     allocator: std.mem.Allocator,
     cmd_kind_maybe: ?cmd.CommandKind,
 ) !Widget(repo_kind, repo_opts) {
-    var root = Widget(repo_kind, repo_opts){ .ui_root = try ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts).init(allocator, repo) };
+    var root = Widget(repo_kind, repo_opts){ .ui_root = try ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts).init(io, allocator, repo) };
     errdefer root.deinit();
 
     // set initial focus for root widget
@@ -146,16 +147,17 @@ pub fn start(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
     allocator: std.mem.Allocator,
     cmd_kind_maybe: ?cmd.CommandKind,
 ) !void {
     // init root widget
-    var root = try rootWidget(repo_kind, repo_opts, repo, allocator, cmd_kind_maybe);
+    var root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
     defer root.deinit();
 
     // init term
-    var terminal = try term.Terminal.init(allocator);
-    defer terminal.deinit();
+    var terminal = try term.Terminal.init(io, allocator);
+    defer terminal.deinit(io);
 
     var last_size = layout.Size{ .width = 0, .height = 0 };
     var last_grid = try Grid.init(allocator, last_size);
@@ -166,7 +168,7 @@ pub fn start(
         try terminal.render(&root, &last_grid, &last_size);
 
         // process any inputs
-        while (try terminal.readKey()) |key| {
+        while (try terminal.readKey(io)) |key| {
             switch (key) {
                 .codepoint => |cp| if (cp == 'q') return,
                 else => {},
@@ -181,6 +183,6 @@ pub fn start(
         }, root.getFocus());
 
         // TODO: do variable sleep with target frame rate
-        std.Thread.sleep(5000000);
+        try std.Io.sleep(io, .fromMilliseconds(5), .real);
     }
 }

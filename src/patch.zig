@@ -31,11 +31,12 @@ const ChangeKind = enum(u8) {
 pub fn writeAndApplyPatches(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
     const parent_commit_oid_maybe = blk: {
-        var commit_object = try obj.Object(.xit, repo_opts, .full).init(allocator, state.readOnly(), commit_oid);
+        var commit_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, commit_oid);
         defer commit_object.deinit();
 
         if (commit_object.content.commit.metadata.firstParent()) |oid| {
@@ -68,8 +69,19 @@ pub fn writeAndApplyPatches(
     // init file iterator
     var tree_diff = tr.TreeDiff(.xit, repo_opts).init(allocator);
     defer tree_diff.deinit();
-    try tree_diff.compare(state.readOnly(), if (parent_commit_oid_maybe) |parent_commit_oid| &parent_commit_oid else null, commit_oid, null);
-    var file_iter = try df.FileIterator(.xit, repo_opts).init(allocator, state.readOnly(), .{ .tree = .{ .tree_diff = &tree_diff } });
+    try tree_diff.compare(
+        state.readOnly(),
+        io,
+        if (parent_commit_oid_maybe) |parent_commit_oid| &parent_commit_oid else null,
+        commit_oid,
+        null,
+    );
+    var file_iter = try df.FileIterator(.xit, repo_opts).init(
+        state.readOnly(),
+        io,
+        allocator,
+        .{ .tree = .{ .tree_diff = &tree_diff } },
+    );
 
     // iterate over each modified file and create/apply the patch
     while (try file_iter.next()) |*line_iter_pair_ptr| {
@@ -118,18 +130,18 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         const DB = rp.Repo(.xit, repo_opts).DB;
         const db_name = "temp.db";
 
-        repo_dir: std.fs.Dir,
-        db_file: std.fs.File,
+        repo_dir: std.Io.Dir,
+        db_file: std.Io.File,
         db: *DB,
         parent_to_children: DB.HashMap(.read_write),
         oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
-        pub fn init(state: rp.Repo(.xit, repo_opts).State(.read_only), allocator: std.mem.Allocator) !PatchWriter(repo_opts) {
-            const db_file = try state.core.repo_dir.createFile(db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
+        pub fn init(state: rp.Repo(.xit, repo_opts).State(.read_only), io: std.Io, allocator: std.mem.Allocator) !PatchWriter(repo_opts) {
+            const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
             errdefer {
-                db_file.close();
-                state.core.repo_dir.deleteFile(db_name) catch {};
+                db_file.close(io);
+                state.core.repo_dir.deleteFile(io, db_name) catch {};
             }
 
             const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
@@ -140,7 +152,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
             const db_ptr = try allocator.create(DB);
             errdefer allocator.destroy(db_ptr);
-            db_ptr.* = try DB.init(.{ .file = db_file, .buffer = buffer_ptr });
+            db_ptr.* = try DB.init(.{ .io = io, .file = db_file, .buffer = buffer_ptr });
 
             const map = try DB.HashMap(.read_write).init(db_ptr.rootCursor());
 
@@ -157,11 +169,11 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             };
         }
 
-        pub fn deinit(self: *PatchWriter(repo_opts), allocator: std.mem.Allocator) void {
-            self.db_file.close();
+        pub fn deinit(self: *PatchWriter(repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
+            self.db_file.close(io);
             self.db.core.memory.buffer.deinit();
             allocator.destroy(self.db.core.memory.buffer);
-            self.repo_dir.deleteFile(db_name) catch {};
+            self.repo_dir.deleteFile(io, db_name) catch {};
             allocator.destroy(self.db);
             self.oid_queue.deinit(allocator);
         }
@@ -169,6 +181,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         pub fn add(
             self: *PatchWriter(repo_opts),
             state: rp.Repo(.xit, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             oid: *const [hash.byteLen(repo_opts.hash)]u8,
         ) !void {
@@ -179,7 +192,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const oid_hex = std.fmt.bytesToHex(oid, .lower);
             const commit_id_int = try hash.hexToInt(repo_opts.hash, &oid_hex);
 
-            var object = try obj.Object(.xit, repo_opts, .full).init(allocator, state, &oid_hex);
+            var object = try obj.Object(.xit, repo_opts, .full).init(state, io, allocator, &oid_hex);
             defer object.deinit();
 
             var is_base_oid = false;
@@ -219,12 +232,13 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         pub fn write(
             self: *PatchWriter(repo_opts),
             state: rp.Repo(.xit, repo_opts).State(.read_write),
+            io: std.Io,
             allocator: std.mem.Allocator,
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !void {
             if (repo_opts.ProgressCtx != void) {
                 if (progress_ctx_maybe) |progress_ctx| {
-                    try progress_ctx.run(.{ .start = .{
+                    try progress_ctx.run(io, .{ .start = .{
                         .kind = .writing_patch,
                         .estimated_total_items = self.commit_count,
                     } });
@@ -232,18 +246,18 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             }
 
             var showed_perf_warning = false;
-            const start_time = std.time.timestamp();
+            const start_time = std.Io.Timestamp.now(io, .real).toSeconds();
 
             while (self.oid_queue.count() > 0) {
                 const oid = self.oid_queue.keys()[0];
                 const oid_hex = std.fmt.bytesToHex(&oid, .lower);
 
-                try writeAndApplyPatches(repo_opts, state, allocator, &oid_hex);
+                try writeAndApplyPatches(repo_opts, state, io, allocator, &oid_hex);
                 self.oid_queue.swapRemoveAt(0);
 
                 if (repo_opts.ProgressCtx != void) {
                     if (progress_ctx_maybe) |progress_ctx| {
-                        try progress_ctx.run(.{ .complete_one = .writing_patch });
+                        try progress_ctx.run(io, .{ .complete_one = .writing_patch });
                     }
                 }
 
@@ -261,10 +275,13 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
                 if (repo_opts.ProgressCtx != void) {
                     if (progress_ctx_maybe) |progress_ctx| {
-                        if (!showed_perf_warning and std.time.timestamp() - start_time >= 5) {
-                            showed_perf_warning = true;
-                            try progress_ctx.run(.{ .child_text = "making patches can take a while." });
-                            try progress_ctx.run(.{ .child_text = "run `xit patch off` to disable it." });
+                        if (!showed_perf_warning) {
+                            const current_time = std.Io.Timestamp.now(io, .real).toSeconds();
+                            if (current_time - start_time >= 5) {
+                                showed_perf_warning = true;
+                                try progress_ctx.run(io, .{ .child_text = "making patches can take a while." });
+                                try progress_ctx.run(io, .{ .child_text = "run `xit patch off` to disable it." });
+                            }
                         }
                     }
                 }
@@ -272,7 +289,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
             if (repo_opts.ProgressCtx != void) {
                 if (progress_ctx_maybe) |progress_ctx| {
-                    try progress_ctx.run(.{ .end = .writing_patch });
+                    try progress_ctx.run(io, .{ .end = .writing_patch });
                 }
             }
         }
@@ -357,7 +374,7 @@ pub fn applyPatch(
             else => |e| return e,
         };
 
-        switch (try std.meta.intToEnum(ChangeKind, change_kind)) {
+        switch (std.enums.fromInt(ChangeKind, change_kind) orelse return error.InvalidEnumTag) {
             .new_edge => {
                 var line_id_int = try change_list_reader.interface.takeInt(LineId(repo_opts.hash).Int, .big);
                 var parent_line_id_int = try change_list_reader.interface.takeInt(LineId(repo_opts.hash).Int, .big);

@@ -170,33 +170,36 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
         arena: *std.heap.ArenaAllocator,
         allocator: std.mem.Allocator,
 
+        const Self = @This();
+
         const IterState = switch (repo_kind) {
             .git => struct {
                 stack: std.ArrayList(StackEntry),
 
                 const StackEntry = struct {
-                    dir: std.fs.Dir,
-                    iter: std.fs.Dir.Iterator,
+                    dir: std.Io.Dir,
+                    iter: std.Io.Dir.Iterator,
                     name: ?[]const u8,
                 };
 
-                fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-                    for (self.stack.items) |*entry| entry.dir.close();
+                fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
+                    for (self.stack.items) |*entry| entry.dir.close(io);
                     self.stack.deinit(allocator);
                 }
             },
             .xit => struct {
                 iter: ?rp.Repo(repo_kind, repo_opts).DB.Cursor(.read_only).Iter,
 
-                fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+                fn deinit(_: *@This(), _: std.Io, _: std.mem.Allocator) void {}
             },
         };
 
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             ref_kind: RefKind,
-        ) !RefIterator(repo_kind, repo_opts) {
+        ) !Self {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer {
@@ -216,16 +219,16 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                 .git => blk: {
                     var stack = std.ArrayList(IterState.StackEntry){};
                     errdefer {
-                        for (stack.items) |*entry| entry.dir.close();
+                        for (stack.items) |*entry| entry.dir.close(io);
                         stack.deinit(allocator);
                     }
-                    var refs_dir = try state.core.repo_dir.openDir("refs", .{});
-                    defer refs_dir.close();
-                    var ref_kind_dir = refs_dir.openDir(dir_name, .{ .iterate = true }) catch |err| switch (err) {
+                    var refs_dir = try state.core.repo_dir.openDir(io, "refs", .{});
+                    defer refs_dir.close(io);
+                    var ref_kind_dir = refs_dir.openDir(io, dir_name, .{ .iterate = true }) catch |err| switch (err) {
                         error.FileNotFound => break :blk .{ .stack = stack },
                         else => |e| return e,
                     };
-                    errdefer ref_kind_dir.close();
+                    errdefer ref_kind_dir.close(io);
                     try stack.append(allocator, .{
                         .dir = ref_kind_dir,
                         .iter = ref_kind_dir.iterate(),
@@ -253,12 +256,12 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
             };
         }
 
-        pub fn next(self: *RefIterator(repo_kind, repo_opts)) !?Ref {
+        pub fn next(self: *Self, io: std.Io) !?Ref {
             return switch (repo_kind) {
                 .git => {
                     while (self.iter_state.stack.items.len > 0) {
                         const top = &self.iter_state.stack.items[self.iter_state.stack.items.len - 1];
-                        if (try top.iter.next()) |entry| {
+                        if (try top.iter.next(io)) |entry| {
                             switch (entry.kind) {
                                 .file => {
                                     // build path from stack names + entry name, skipping empty root
@@ -275,8 +278,8 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                                 },
                                 .directory => {
                                     const duped_name = try self.arena.allocator().dupe(u8, entry.name);
-                                    var sub_dir = try top.dir.openDir(entry.name, .{ .iterate = true });
-                                    errdefer sub_dir.close();
+                                    var sub_dir = try top.dir.openDir(io, entry.name, .{ .iterate = true });
+                                    errdefer sub_dir.close(io);
                                     try self.iter_state.stack.append(self.allocator, .{
                                         .dir = sub_dir,
                                         .iter = sub_dir.iterate(),
@@ -287,7 +290,7 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                             }
                         } else {
                             // iterator exhausted, pop and close
-                            top.dir.close();
+                            top.dir.close(io);
                             self.iter_state.stack.items.len -= 1;
                         }
                     }
@@ -305,8 +308,8 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
             };
         }
 
-        pub fn deinit(self: *RefIterator(repo_kind, repo_opts)) void {
-            self.iter_state.deinit(self.allocator);
+        pub fn deinit(self: *Self, io: std.Io) void {
+            self.iter_state.deinit(io, self.allocator);
             self.arena.deinit();
             self.allocator.destroy(self.arena);
         }
@@ -317,6 +320,7 @@ pub fn readRecur(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     input: RefOrOid(repo_opts.hash),
 ) !?[hash.hexLen(repo_opts.hash)]u8 {
     switch (input) {
@@ -325,13 +329,13 @@ pub fn readRecur(
             const ref_path = try ref.toPath(&ref_path_buffer);
 
             var read_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
-            const ref_or_oid_maybe = read(repo_kind, repo_opts, state, ref_path, &read_buffer) catch |err| switch (err) {
+            const ref_or_oid_maybe = read(repo_kind, repo_opts, state, io, ref_path, &read_buffer) catch |err| switch (err) {
                 error.RefNotFound => return null,
                 else => |e| return e,
             };
 
             if (ref_or_oid_maybe) |next_input| {
-                return try readRecur(repo_kind, repo_opts, state, next_input);
+                return try readRecur(repo_kind, repo_opts, state, io, next_input);
             } else {
                 return null;
             }
@@ -344,15 +348,16 @@ pub fn read(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     ref_path: []const u8,
     buffer: []u8,
 ) !?RefOrOid(repo_opts.hash) {
     switch (repo_kind) {
         .git => {
             // look for loose ref
-            if (state.core.repo_dir.openFile(ref_path, .{ .mode = .read_only })) |ref_file| {
-                defer ref_file.close();
-                var reader = ref_file.reader(&.{});
+            if (state.core.repo_dir.openFile(io, ref_path, .{ .mode = .read_only })) |ref_file| {
+                defer ref_file.close(io);
+                var reader = ref_file.reader(io, &.{});
                 var writer = std.Io.Writer.fixed(buffer);
                 const size = try reader.interface.streamRemaining(&writer);
                 const ref_content = std.mem.sliceTo(buffer[0..size], '\n');
@@ -363,11 +368,11 @@ pub fn read(
             }
 
             // look for packed ref
-            if (state.core.repo_dir.openFile("packed-refs", .{ .mode = .read_only })) |packed_refs_file| {
-                defer packed_refs_file.close();
+            if (state.core.repo_dir.openFile(io, "packed-refs", .{ .mode = .read_only })) |packed_refs_file| {
+                defer packed_refs_file.close(io);
 
                 var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                var reader = packed_refs_file.reader(&reader_buffer);
+                var reader = packed_refs_file.reader(io, &reader_buffer);
 
                 // for each line...
                 while (reader.interface.peekByte()) |_| {
@@ -448,10 +453,11 @@ pub fn readHeadRecurMaybe(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
 ) !?[hash.hexLen(repo_opts.hash)]u8 {
     var buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
-    if (try read(repo_kind, repo_opts, state, "HEAD", &buffer)) |ref_or_oid| {
-        return try readRecur(repo_kind, repo_opts, state, ref_or_oid);
+    if (try read(repo_kind, repo_opts, state, io, "HEAD", &buffer)) |ref_or_oid| {
+        return try readRecur(repo_kind, repo_opts, state, io, ref_or_oid);
     } else {
         return null;
     }
@@ -461,8 +467,9 @@ pub fn readHeadRecur(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    if (try readHeadRecurMaybe(repo_kind, repo_opts, state)) |buffer| {
+    if (try readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |buffer| {
         return buffer;
     } else {
         return error.RefInvalidHash;
@@ -473,15 +480,17 @@ pub fn readHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     buffer: []u8,
 ) !?RefOrOid(repo_opts.hash) {
-    return try read(repo_kind, repo_opts, state, "HEAD", buffer);
+    return try read(repo_kind, repo_opts, state, io, "HEAD", buffer);
 }
 
 pub fn write(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     ref_path: []const u8,
     ref_or_oid: RefOrOid(repo_opts.hash),
 ) !void {
@@ -498,12 +507,12 @@ pub fn write(
     switch (repo_kind) {
         .git => {
             if (std.fs.path.dirname(ref_path)) |ref_parent_path| {
-                try state.core.repo_dir.makePath(ref_parent_path);
+                try state.core.repo_dir.createDirPath(io, ref_parent_path);
             }
-            var lock = try fs.LockFile.init(state.core.repo_dir, ref_path);
-            defer lock.deinit();
-            try lock.lock_file.writeAll(content);
-            try lock.lock_file.writeAll("\n");
+            var lock = try fs.LockFile.init(io, state.core.repo_dir, ref_path);
+            defer lock.deinit(io);
+            try lock.lock_file.writeStreamingAll(io, content);
+            try lock.lock_file.writeStreamingAll(io, "\n");
             lock.success = true;
         },
         .xit => {
@@ -553,13 +562,14 @@ pub fn writeRecur(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     ref_path: []const u8,
     oid_hex: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
     var buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
-    const ref_or_oid_maybe = read(repo_kind, repo_opts, state.readOnly(), ref_path, &buffer) catch |err| switch (err) {
+    const ref_or_oid_maybe = read(repo_kind, repo_opts, state.readOnly(), io, ref_path, &buffer) catch |err| switch (err) {
         error.RefNotFound => {
-            try write(repo_kind, repo_opts, state, ref_path, .{ .oid = oid_hex });
+            try write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = oid_hex });
             return;
         },
         else => |e| return e,
@@ -568,11 +578,11 @@ pub fn writeRecur(
         .ref => |ref| {
             var ref_path_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
             const next_ref_path = try ref.toPath(&ref_path_buffer);
-            try writeRecur(repo_kind, repo_opts, state, next_ref_path, oid_hex);
+            try writeRecur(repo_kind, repo_opts, state, io, next_ref_path, oid_hex);
         },
-        .oid => try write(repo_kind, repo_opts, state, ref_path, .{ .oid = oid_hex }),
+        .oid => try write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = oid_hex }),
     } else {
-        try write(repo_kind, repo_opts, state, ref_path, .{ .oid = oid_hex });
+        try write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = oid_hex });
     }
 }
 
@@ -580,11 +590,12 @@ pub fn remove(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     ref_path: []const u8,
 ) !void {
     switch (repo_kind) {
         .git => {
-            state.core.repo_dir.deleteFile(ref_path) catch |err| switch (err) {
+            state.core.repo_dir.deleteFile(io, ref_path) catch |err| switch (err) {
                 error.FileNotFound => return error.RefNotFound,
                 else => |e| return e,
             };
@@ -629,31 +640,34 @@ pub fn replaceHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     ref_or_oid: RefOrOid(repo_opts.hash),
 ) !void {
-    try write(repo_kind, repo_opts, state, "HEAD", ref_or_oid);
+    try write(repo_kind, repo_opts, state, io, "HEAD", ref_or_oid);
 }
 
 pub fn updateHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
-    try writeRecur(repo_kind, repo_opts, state, "HEAD", oid);
+    try writeRecur(repo_kind, repo_opts, state, io, "HEAD", oid);
 }
 
 pub fn exists(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     ref: Ref,
 ) !bool {
     var ref_path_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
     const ref_path = try ref.toPath(&ref_path_buffer);
 
     var read_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
-    _ = read(repo_kind, repo_opts, state, ref_path, &read_buffer) catch |err| switch (err) {
+    _ = read(repo_kind, repo_opts, state, io, ref_path, &read_buffer) catch |err| switch (err) {
         error.RefNotFound => return false,
         else => |e| return e,
     };

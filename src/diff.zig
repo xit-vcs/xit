@@ -9,6 +9,7 @@ const tr = @import("./tree.zig");
 
 pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
+        io: std.Io,
         allocator: std.mem.Allocator,
         path: []const u8,
         oid: [hash.byteLen(repo_opts.hash)]u8,
@@ -24,7 +25,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 eof: bool,
             },
             work_dir: struct {
-                file: std.fs.File,
+                file: std.Io.File,
+                pos: u64,
                 eof: bool,
             },
             buffer: struct {
@@ -34,10 +36,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             nothing,
             binary,
 
-            fn deinit(self: *Source, allocator: std.mem.Allocator) void {
+            fn deinit(self: *Source, io: std.Io, allocator: std.mem.Allocator) void {
                 switch (self.*) {
                     .object => |*object| object.object_reader.deinit(),
-                    .work_dir => |*work_dir| work_dir.file.close(),
+                    .work_dir => |*work_dir| work_dir.file.close(io),
                     .buffer => |*buffer| {
                         buffer.arena.deinit();
                         allocator.destroy(buffer.arena);
@@ -50,11 +52,17 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
 
         const in_memory = true;
 
-        pub fn initFromIndex(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator, entry: idx.Index(repo_kind, repo_opts).Entry) !LineIterator(repo_kind, repo_opts) {
+        pub fn initFromIndex(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            entry: idx.Index(repo_kind, repo_opts).Entry,
+        ) !LineIterator(repo_kind, repo_opts) {
             const oid_hex = std.fmt.bytesToHex(&entry.oid, .lower);
-            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(allocator, state, &oid_hex);
+            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             errdefer object_reader.deinit();
             var iter = LineIterator(repo_kind, repo_opts){
+                .io = io,
                 .allocator = allocator,
                 .path = entry.path,
                 .oid = entry.oid,
@@ -79,26 +87,32 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             return iter;
         }
 
-        pub fn initFromWorkDir(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator, path: []const u8, mode: fs.Mode) !LineIterator(repo_kind, repo_opts) {
+        pub fn initFromWorkDir(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            mode: fs.Mode,
+        ) !LineIterator(repo_kind, repo_opts) {
             switch (mode.content.object_type) {
                 .regular_file => {
-                    var file = try state.core.work_dir.openFile(path, .{ .mode = .read_only });
-                    errdefer file.close();
-                    const file_size = (try file.stat()).size;
+                    var file = try state.core.work_dir.openFile(io, path, .{ .mode = .read_only, .allow_directory = false });
+                    errdefer file.close(io);
+                    const file_size = try file.length(io);
                     const header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{file_size});
                     defer allocator.free(header);
 
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = file.reader(&reader_buffer);
+                    var reader = file.reader(io, &reader_buffer);
 
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
                     hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader.interface, header, &oid) catch |err| switch (err) {
                         error.ReadFailed => |e| return reader.err orelse e,
                         else => |e| return e,
                     };
-                    try file.seekTo(0);
 
                     var iter = LineIterator(repo_kind, repo_opts){
+                        .io = io,
                         .allocator = allocator,
                         .path = path,
                         .oid = oid,
@@ -109,6 +123,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         .source = .{
                             .work_dir = .{
                                 .file = file,
+                                .pos = 0,
                                 .eof = false,
                             },
                         },
@@ -124,7 +139,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 },
                 .symbolic_link => {
                     var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
-                    const target_path = try state.core.work_dir.readLink(path, &target_path_buffer);
+                    const target_path_size = try state.core.work_dir.readLink(io, path, &target_path_buffer);
+                    const target_path = target_path_buffer[0..target_path_size];
 
                     // make reader
                     var reader = std.Io.Reader.fixed(target_path);
@@ -136,14 +152,15 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
                     try hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader, header, &oid);
 
-                    return try initFromBuffer(allocator, path, &oid, mode, target_path);
+                    return try initFromBuffer(io, allocator, path, &oid, mode, target_path);
                 },
                 else => return error.UnexpectedFileKind,
             }
         }
 
-        pub fn initFromNothing(allocator: std.mem.Allocator, path: []const u8) !LineIterator(repo_kind, repo_opts) {
+        pub fn initFromNothing(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !LineIterator(repo_kind, repo_opts) {
             var iter = LineIterator(repo_kind, repo_opts){
+                .io = io,
                 .allocator = allocator,
                 .path = path,
                 .oid = [_]u8{0} ** hash.byteLen(repo_opts.hash),
@@ -157,7 +174,13 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             return iter;
         }
 
-        pub fn initFromTree(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator, path: []const u8, entry: tr.TreeEntry(repo_opts.hash)) !LineIterator(repo_kind, repo_opts) {
+        pub fn initFromTree(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            entry: tr.TreeEntry(repo_opts.hash),
+        ) !LineIterator(repo_kind, repo_opts) {
             const oid_hex = std.fmt.bytesToHex(&entry.oid, .lower);
 
             // treat submodules as binary files so they are ignored in diffs and patches
@@ -165,6 +188,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 var offsets = std.ArrayList(usize){};
                 errdefer offsets.deinit(allocator);
                 return .{
+                    .io = io,
                     .allocator = allocator,
                     .path = path,
                     .oid = entry.oid,
@@ -176,9 +200,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 };
             }
 
-            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(allocator, state, &oid_hex);
+            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             errdefer object_reader.deinit();
             var iter = LineIterator(repo_kind, repo_opts){
+                .io = io,
                 .allocator = allocator,
                 .path = path,
                 .oid = entry.oid,
@@ -203,7 +228,14 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             return iter;
         }
 
-        pub fn initFromOid(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator, path: []const u8, oid: *const [hash.byteLen(repo_opts.hash)]u8, mode_maybe: ?fs.Mode) !LineIterator(repo_kind, repo_opts) {
+        pub fn initFromOid(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            oid: *const [hash.byteLen(repo_opts.hash)]u8,
+            mode_maybe: ?fs.Mode,
+        ) !LineIterator(repo_kind, repo_opts) {
             const oid_hex = std.fmt.bytesToHex(oid, .lower);
 
             // treat submodules as binary files so they are ignored in diffs and patches
@@ -212,6 +244,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     var offsets = std.ArrayList(usize){};
                     errdefer offsets.deinit(allocator);
                     return .{
+                        .io = io,
                         .allocator = allocator,
                         .path = path,
                         .oid = oid.*,
@@ -224,9 +257,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 }
             }
 
-            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(allocator, state, &oid_hex);
+            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             errdefer object_reader.deinit();
             var iter = LineIterator(repo_kind, repo_opts){
+                .io = io,
                 .allocator = allocator,
                 .path = path,
                 .oid = oid.*,
@@ -252,6 +286,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn initFromBuffer(
+            io: std.Io,
             allocator: std.mem.Allocator,
             path: []const u8,
             oid: *const [hash.byteLen(repo_opts.hash)]u8,
@@ -287,6 +322,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             }
 
             var iter = LineIterator(repo_kind, repo_opts){
+                .io = io,
                 .allocator = allocator,
                 .path = path,
                 .oid = oid.*,
@@ -308,10 +344,11 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn initFromTestBuffer(
+            io: std.Io,
             allocator: std.mem.Allocator,
             buffer: []const u8,
         ) !LineIterator(repo_kind, repo_opts) {
-            return try initFromBuffer(allocator, "", &[_]u8{0} ** hash.byteLen(repo_opts.hash), null, buffer);
+            return try initFromBuffer(io, allocator, "", &[_]u8{0} ** hash.byteLen(repo_opts.hash), null, buffer);
         }
 
         pub fn convertToBuffer(self: *LineIterator(repo_kind, repo_opts)) !void {
@@ -333,7 +370,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 try lines.append(arena.allocator(), dupe);
             }
 
-            self.source.deinit(self.allocator);
+            self.source.deinit(self.io, self.allocator);
             self.source = .{
                 .buffer = .{
                     .arena = arena,
@@ -380,8 +417,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     errdefer line_writer.deinit();
 
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = work_dir.file.reader(&reader_buffer);
-                    try reader.seekTo(try work_dir.file.getPos());
+                    var reader = work_dir.file.reader(self.io, &reader_buffer);
+                    try reader.seekTo(work_dir.pos);
                     _ = try reader.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size));
 
                     // skip delimiter
@@ -392,7 +429,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     }
 
                     // update file seek position
-                    try work_dir.file.seekTo(reader.logicalPos());
+                    work_dir.pos = reader.logicalPos();
 
                     const line = try line_writer.toOwnedSlice();
                     self.current_line += 1;
@@ -435,8 +472,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     try object.object_reader.reset();
                 },
                 .work_dir => |*work_dir| {
+                    work_dir.pos = 0;
                     work_dir.eof = false;
-                    try work_dir.file.seekTo(0);
                 },
                 .buffer => {},
                 .nothing => {},
@@ -449,7 +486,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn deinit(self: *LineIterator(repo_kind, repo_opts)) void {
-            self.source.deinit(self.allocator);
+            self.source.deinit(self.io, self.allocator);
             self.allocator.free(self.line_offsets);
         }
 
@@ -469,7 +506,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 },
                 .work_dir => |*work_dir| {
                     try self.reset();
-                    try work_dir.file.seekTo(position);
+                    work_dir.pos = position;
                 },
                 .buffer => {},
                 .nothing => {},
@@ -509,7 +546,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             }
 
             if (convert_to_binary) {
-                self.source.deinit(self.allocator);
+                self.source.deinit(self.io, self.allocator);
                 self.source = .binary;
                 offsets.clearAndFree(self.allocator);
             }
@@ -1436,8 +1473,9 @@ pub fn LineIteratorPair(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
         b: LineIterator(repo_kind, repo_opts),
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             path: []const u8,
             status_kind: work.StatusKind,
             stat: *work.Status(repo_kind, repo_opts),
@@ -1446,33 +1484,33 @@ pub fn LineIteratorPair(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                 .added => |added| {
                     switch (added) {
                         .created => {
-                            var a = try LineIterator(repo_kind, repo_opts).initFromNothing(allocator, path);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, path);
                             errdefer a.deinit();
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
-                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, index_entries_for_path[0] orelse return error.NullEntry);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                         .modified => {
-                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, allocator, path, stat.head_tree.entries.get(path) orelse return error.EntryNotFound);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, io, allocator, path, stat.head_tree.entries.get(path) orelse return error.EntryNotFound);
                             errdefer a.deinit();
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
-                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, index_entries_for_path[0] orelse return error.NullEntry);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                         .deleted => {
-                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, allocator, path, stat.head_tree.entries.get(path) orelse return error.EntryNotFound);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, io, allocator, path, stat.head_tree.entries.get(path) orelse return error.EntryNotFound);
                             errdefer a.deinit();
-                            var b = try LineIterator(repo_kind, repo_opts).initFromNothing(allocator, path);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, path);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                         .conflict => {
-                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, allocator, path, stat.resolved_conflicts.get(path) orelse return error.EntryNotFound);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, io, allocator, path, stat.resolved_conflicts.get(path) orelse return error.EntryNotFound);
                             errdefer a.deinit();
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
-                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, index_entries_for_path[0] orelse return error.NullEntry);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
@@ -1481,39 +1519,39 @@ pub fn LineIteratorPair(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                 .not_added => |not_added| {
                     switch (not_added) {
                         .modified => {
-                            const meta = try fs.Metadata.init(state.core.work_dir, path);
+                            const meta = try fs.Metadata.init(io, state.core.work_dir, path);
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
-                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, index_entries_for_path[0] orelse return error.NullEntry);
                             errdefer a.deinit();
-                            var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, allocator, path, meta.mode);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, io, allocator, path, meta.mode);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                         .deleted => {
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
-                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, index_entries_for_path[0] orelse return error.NullEntry);
                             errdefer a.deinit();
-                            var b = try LineIterator(repo_kind, repo_opts).initFromNothing(allocator, path);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, path);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                         .conflict => {
-                            const meta = try fs.Metadata.init(state.core.work_dir, path);
+                            const meta = try fs.Metadata.init(io, state.core.work_dir, path);
                             const index_entries_for_path = stat.index.entries.get(path) orelse return error.EntryNotFound;
                             const conflict_entry = index_entries_for_path[2] orelse index_entries_for_path[3] orelse return error.NullEntry;
-                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, allocator, conflict_entry);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, io, allocator, conflict_entry);
                             errdefer a.deinit();
-                            var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, allocator, path, meta.mode);
+                            var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, io, allocator, path, meta.mode);
                             errdefer b.deinit();
                             return .{ .path = path, .a = a, .b = b };
                         },
                     }
                 },
                 .not_tracked => {
-                    const meta = try fs.Metadata.init(state.core.work_dir, path);
-                    var a = try LineIterator(repo_kind, repo_opts).initFromNothing(allocator, path);
+                    const meta = try fs.Metadata.init(io, state.core.work_dir, path);
+                    var a = try LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, path);
                     errdefer a.deinit();
-                    var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, allocator, path, meta.mode);
+                    var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, io, allocator, path, meta.mode);
                     errdefer b.deinit();
                     return .{ .path = path, .a = a, .b = b };
                 },
@@ -1529,6 +1567,7 @@ pub fn LineIteratorPair(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
 
 pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
+        io: std.Io,
         allocator: std.mem.Allocator,
         core: *rp.Repo(repo_kind, repo_opts).Core,
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
@@ -1536,11 +1575,13 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         next_index: usize,
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             diff_opts: DiffOptions(repo_kind, repo_opts),
         ) !FileIterator(repo_kind, repo_opts) {
             return .{
+                .io = io,
                 .allocator = allocator,
                 .core = state.core,
                 .moment = state.extra.moment.*,
@@ -1556,7 +1597,7 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .work_dir => |work_dir| {
                     if (next_index < work_dir.status.unresolved_conflicts.count()) {
                         const path = work_dir.status.unresolved_conflicts.keys()[next_index];
-                        const meta = try fs.Metadata.init(self.core.work_dir, path);
+                        const meta = try fs.Metadata.init(self.io, self.core.work_dir, path);
                         const stage: usize = switch (work_dir.conflict_diff_kind) {
                             .base => 1,
                             .target => 2,
@@ -1565,12 +1606,12 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         const index_entries_for_path = work_dir.status.index.entries.get(path) orelse return error.EntryNotFound;
                         // if there is an entry for the stage we are diffing
                         if (index_entries_for_path[stage]) |index_entry| {
-                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.allocator, index_entry);
+                            var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.io, self.allocator, index_entry);
                             errdefer a.deinit();
                             var b = switch (meta.kind) {
-                                .file, .sym_link => try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, self.allocator, path, meta.mode),
+                                .file, .sym_link => try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, self.io, self.allocator, path, meta.mode),
                                 // in file/dir conflicts, `path` may be a directory which can't be diffed, so just make it nothing
-                                else => try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path),
+                                else => try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path),
                             };
                             errdefer b.deinit();
                             self.next_index += 1;
@@ -1588,9 +1629,9 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     if (next_index < work_dir.status.work_dir_modified.count()) {
                         const entry = work_dir.status.work_dir_modified.values()[next_index];
                         const index_entries_for_path = work_dir.status.index.entries.get(entry.path) orelse return error.EntryNotFound;
-                        var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                        var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.io, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
                         errdefer a.deinit();
-                        var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, self.allocator, entry.path, entry.meta.mode);
+                        var b = try LineIterator(repo_kind, repo_opts).initFromWorkDir(state, self.io, self.allocator, entry.path, entry.meta.mode);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = entry.path, .a = a, .b = b };
@@ -1601,9 +1642,9 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     if (next_index < work_dir.status.work_dir_deleted.count()) {
                         const path = work_dir.status.work_dir_deleted.keys()[next_index];
                         const index_entries_for_path = work_dir.status.index.entries.get(path) orelse return error.EntryNotFound;
-                        var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                        var a = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.io, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
                         errdefer a.deinit();
-                        var b = try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path);
+                        var b = try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = path, .a = a, .b = b };
@@ -1612,10 +1653,10 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .index => |index| {
                     if (next_index < index.status.index_added.count()) {
                         const path = index.status.index_added.keys()[next_index];
-                        var a = try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path);
+                        var a = try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path);
                         errdefer a.deinit();
                         const index_entries_for_path = index.status.index.entries.get(path) orelse return error.EntryNotFound;
-                        var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                        var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.io, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = path, .a = a, .b = b };
@@ -1625,10 +1666,10 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
 
                     if (next_index < index.status.index_modified.count()) {
                         const path = index.status.index_modified.keys()[next_index];
-                        var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, self.allocator, path, index.status.head_tree.entries.get(path) orelse return error.EntryNotFound);
+                        var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, self.io, self.allocator, path, index.status.head_tree.entries.get(path) orelse return error.EntryNotFound);
                         errdefer a.deinit();
                         const index_entries_for_path = index.status.index.entries.get(path) orelse return error.EntryNotFound;
-                        var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
+                        var b = try LineIterator(repo_kind, repo_opts).initFromIndex(state, self.io, self.allocator, index_entries_for_path[0] orelse return error.NullEntry);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = path, .a = a, .b = b };
@@ -1638,9 +1679,9 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
 
                     if (next_index < index.status.index_deleted.count()) {
                         const path = index.status.index_deleted.keys()[next_index];
-                        var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, self.allocator, path, index.status.head_tree.entries.get(path) orelse return error.EntryNotFound);
+                        var a = try LineIterator(repo_kind, repo_opts).initFromTree(state, self.io, self.allocator, path, index.status.head_tree.entries.get(path) orelse return error.EntryNotFound);
                         errdefer a.deinit();
-                        var b = try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path);
+                        var b = try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = path, .a = a, .b = b };
@@ -1651,14 +1692,14 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         const path = tree.tree_diff.changes.keys()[next_index];
                         const change = tree.tree_diff.changes.values()[next_index];
                         var a = if (change.old) |old|
-                            try LineIterator(repo_kind, repo_opts).initFromOid(state, self.allocator, path, &old.oid, old.mode)
+                            try LineIterator(repo_kind, repo_opts).initFromOid(state, self.io, self.allocator, path, &old.oid, old.mode)
                         else
-                            try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path);
+                            try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path);
                         errdefer a.deinit();
                         var b = if (change.new) |new|
-                            try LineIterator(repo_kind, repo_opts).initFromOid(state, self.allocator, path, &new.oid, new.mode)
+                            try LineIterator(repo_kind, repo_opts).initFromOid(state, self.io, self.allocator, path, &new.oid, new.mode)
                         else
-                            try LineIterator(repo_kind, repo_opts).initFromNothing(self.allocator, path);
+                            try LineIterator(repo_kind, repo_opts).initFromNothing(self.io, self.allocator, path);
                         errdefer b.deinit();
                         self.next_index += 1;
                         return .{ .path = path, .a = a, .b = b };

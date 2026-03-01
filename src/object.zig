@@ -11,31 +11,25 @@ const cfg = @import("./config.zig");
 const tg = @import("./tag.zig");
 const tr = @import("./tree.zig");
 const mrg = @import("./merge.zig");
-const zlib = @import("./std/zlib.zig");
 
-fn compressZlib(comptime read_size: usize, in: std.fs.File, out: std.fs.File) !void {
-    // init stream from input file
-    var zlib_stream = try zlib.compressor(out.deprecatedWriter(), .{ .level = .default });
-
-    // write the compressed data to the output file
-    try in.seekTo(0);
-    const reader = in.deprecatedReader();
-    var buf = [_]u8{0} ** read_size;
-    while (true) {
-        // read from file
-        const size = try reader.read(&buf);
-        if (size == 0) break;
-        // compress
-        try zlib_stream.writer().writeAll(buf[0..size]);
-    }
-    try zlib_stream.finish();
+fn compressZlib(comptime buffer_size: usize, io: std.Io, in: std.Io.File, out: std.Io.File) !void {
+    var rbuf = [_]u8{0} ** buffer_size;
+    var wbuf = [_]u8{0} ** buffer_size;
+    var dbuf = [_]u8{0} ** std.compress.flate.max_window_len;
+    var r = in.reader(io, &rbuf);
+    var w = out.writer(io, &wbuf);
+    var d = try std.compress.flate.Compress.init(&w.interface, &dbuf, .zlib, .default);
+    _ = try r.interface.streamRemaining(&d.writer);
+    try d.writer.flush();
+    try w.interface.flush();
 }
 
 pub fn writeObject(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-    stream: anytype,
+    io: std.Io,
+    reader: *std.Io.Reader,
     header: ObjectHeader,
     hash_bytes_buffer: *[hash.byteLen(repo_opts.hash)]u8,
 ) !void {
@@ -43,57 +37,57 @@ pub fn writeObject(
     var header_bytes = [_]u8{0} ** 32;
     const header_str = try header.write(&header_bytes);
 
-    // calc the hash of its contents
-    try hash.hashReader(repo_opts.hash, repo_opts.read_size, &stream.interface, header_str, hash_bytes_buffer);
-    const hash_hex = std.fmt.bytesToHex(hash_bytes_buffer, .lower);
+    var hasher = hash.Hasher(repo_opts.hash).init();
+    hasher.update(header_str);
 
-    // reset seek pos so we can reuse the reader for copying
-    try stream.seekTo(0);
+    var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
+    var hashed = reader.hashed(hasher, &hash_buffer);
 
     switch (repo_kind) {
         .git => {
-            var objects_dir = try state.core.repo_dir.openDir("objects", .{});
-            defer objects_dir.close();
-
-            // make the two char dir
-            var hash_prefix_dir = try objects_dir.makeOpenPath(hash_hex[0..2], .{});
-            defer hash_prefix_dir.close();
-            const hash_suffix = hash_hex[2..];
-
-            // exit early if the file already exists
-            if (hash_prefix_dir.openFile(hash_suffix, .{})) |hash_suffix_file| {
-                hash_suffix_file.close();
-                return;
-            } else |err| {
-                if (err != error.FileNotFound) {
-                    return err;
-                }
-            }
-
-            // create lock file
-            var lock = try fs.LockFile.init(hash_prefix_dir, hash_suffix ++ ".uncompressed");
-            defer lock.deinit();
-            try lock.lock_file.writeAll(header_str);
+            var temp_lock = try fs.LockFile.init(io, state.core.repo_dir, "object.temp");
+            defer temp_lock.deinit(io);
+            try temp_lock.lock_file.writeStreamingAll(io, header_str);
 
             // copy file into temp file
             var read_buffer = [_]u8{0} ** repo_opts.read_size;
             while (true) {
-                const size = try stream.interface.readSliceShort(&read_buffer);
+                const size = try hashed.reader.readSliceShort(&read_buffer);
                 if (size == 0) {
                     break;
                 }
-                try lock.lock_file.writeAll(read_buffer[0..size]);
+                try temp_lock.lock_file.writeStreamingAll(io, read_buffer[0..size]);
+            }
+
+            hashed.hasher.final(hash_bytes_buffer);
+
+            const hash_hex = std.fmt.bytesToHex(hash_bytes_buffer, .lower);
+
+            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
+            defer objects_dir.close(io);
+
+            // make the two char dir
+            var hash_prefix_dir = try objects_dir.createDirPathOpen(io, hash_hex[0..2], .{});
+            defer hash_prefix_dir.close(io);
+            const hash_suffix = hash_hex[2..];
+
+            // exit early if the file already exists
+            if (hash_prefix_dir.openFile(io, hash_suffix, .{ .allow_directory = false })) |hash_suffix_file| {
+                hash_suffix_file.close(io);
+                return;
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
             }
 
             // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(hash_prefix_dir, hash_suffix);
-            defer compressed_lock.deinit();
-            try compressZlib(repo_opts.read_size, lock.lock_file, compressed_lock.lock_file);
+            var compressed_lock = try fs.LockFile.init(io, hash_prefix_dir, hash_suffix);
+            defer compressed_lock.deinit(io);
+            try compressZlib(repo_opts.buffer_size, io, temp_lock.lock_file, compressed_lock.lock_file);
             compressed_lock.success = true;
         },
         .xit => {
-            const object_hash = hash.bytesToInt(repo_opts.hash, hash_bytes_buffer);
-            try chunk.writeChunks(repo_opts, state, &stream.interface, object_hash, header.size, header.kind.name());
+            try chunk.writeChunks(repo_opts, state, io, &hashed, header.size, header.kind.name(), hash_bytes_buffer);
         },
     }
 }
@@ -136,6 +130,7 @@ const Tree = struct {
         comptime repo_kind: rp.RepoKind,
         comptime repo_opts: rp.RepoOpts(repo_kind),
         state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+        io: std.Io,
         allocator: std.mem.Allocator,
         index: *const idx.Index(repo_kind, repo_opts),
         prefix: []const u8,
@@ -162,6 +157,7 @@ const Tree = struct {
                     repo_kind,
                     repo_opts,
                     state,
+                    io,
                     allocator,
                     index,
                     path,
@@ -169,7 +165,7 @@ const Tree = struct {
                 );
 
                 var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                try writeTree(repo_kind, repo_opts, state, allocator, &subtree, &tree_hash_bytes_buffer);
+                try writeTree(repo_kind, repo_opts, state, io, allocator, &subtree, &tree_hash_bytes_buffer);
 
                 try self.addTreeEntry(name, &tree_hash_bytes_buffer);
             } else {
@@ -183,6 +179,7 @@ fn writeTree(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     tree: *Tree,
     hash_bytes_buffer: *[hash.byteLen(repo_opts.hash)]u8,
@@ -202,51 +199,56 @@ fn writeTree(
 
     // create tree header
     var header_buffer = [_]u8{0} ** 32;
-    const header = try std.fmt.bufPrint(&header_buffer, "tree {}\x00", .{tree_contents.len});
+    const header_str = try std.fmt.bufPrint(&header_buffer, "tree {}\x00", .{tree_contents.len});
 
     // create tree
-    const tree_bytes = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header, tree_contents });
+    const tree_bytes = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, tree_contents });
     defer allocator.free(tree_bytes);
-
-    // calc the hash of its contents
-    try hash.hashBuffer(repo_opts.hash, tree_bytes, hash_bytes_buffer);
-    const tree_hash_hex = std.fmt.bytesToHex(hash_bytes_buffer, .lower);
 
     switch (repo_kind) {
         .git => {
-            var objects_dir = try state.core.repo_dir.openDir("objects", .{});
-            defer objects_dir.close();
+            // calc the hash of its contents
+            try hash.hashBuffer(repo_opts.hash, tree_bytes, hash_bytes_buffer);
+            const tree_hash_hex = std.fmt.bytesToHex(hash_bytes_buffer, .lower);
+
+            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
+            defer objects_dir.close(io);
 
             // make the two char dir
-            var tree_hash_prefix_dir = try objects_dir.makeOpenPath(tree_hash_hex[0..2], .{});
-            defer tree_hash_prefix_dir.close();
+            var tree_hash_prefix_dir = try objects_dir.createDirPathOpen(io, tree_hash_hex[0..2], .{});
+            defer tree_hash_prefix_dir.close(io);
             const tree_hash_suffix = tree_hash_hex[2..];
 
             // exit early if there is nothing to commit
-            if (tree_hash_prefix_dir.openFile(tree_hash_suffix, .{})) |tree_hash_suffix_file| {
-                tree_hash_suffix_file.close();
+            if (tree_hash_prefix_dir.openFile(io, tree_hash_suffix, .{ .allow_directory = false })) |tree_hash_suffix_file| {
+                tree_hash_suffix_file.close(io);
                 return;
-            } else |err| {
-                if (err != error.FileNotFound) {
-                    return err;
-                }
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
             }
 
             // create lock file
-            var lock = try fs.LockFile.init(tree_hash_prefix_dir, tree_hash_suffix ++ ".uncompressed");
-            defer lock.deinit();
-            try lock.lock_file.writeAll(tree_bytes);
+            var lock = try fs.LockFile.init(io, tree_hash_prefix_dir, tree_hash_suffix ++ ".uncompressed");
+            defer lock.deinit(io);
+            try lock.lock_file.writeStreamingAll(io, tree_bytes);
 
             // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(tree_hash_prefix_dir, tree_hash_suffix);
-            defer compressed_lock.deinit();
-            try compressZlib(repo_opts.read_size, lock.lock_file, compressed_lock.lock_file);
+            var compressed_lock = try fs.LockFile.init(io, tree_hash_prefix_dir, tree_hash_suffix);
+            defer compressed_lock.deinit(io);
+            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
             compressed_lock.success = true;
         },
         .xit => {
-            const object_hash = hash.bytesToInt(repo_opts.hash, hash_bytes_buffer);
             var reader = std.Io.Reader.fixed(tree_contents);
-            try chunk.writeChunks(repo_opts, state, &reader, object_hash, tree_contents.len, "tree");
+
+            var hasher = hash.Hasher(repo_opts.hash).init();
+            hasher.update(header_str);
+
+            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
+            var hashed = reader.hashed(hasher, &hash_buffer);
+
+            try chunk.writeChunks(repo_opts, state, io, &hashed, tree_contents.len, "tree", hash_bytes_buffer);
         },
     }
 }
@@ -255,6 +257,7 @@ fn sign(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     lines: []const []const u8,
@@ -272,37 +275,37 @@ fn sign(
     defer allocator.free(content_file_path);
 
     // write the commit content to a file
-    const content_file = try std.fs.createFileAbsolute(content_file_path, .{ .truncate = true, .lock = .exclusive });
+    const content_file = try std.Io.Dir.createFileAbsolute(io, content_file_path, .{ .truncate = true, .lock = .exclusive });
     defer {
-        content_file.close();
-        std.fs.deleteFileAbsolute(content_file_path) catch {};
+        content_file.close(io);
+        std.Io.Dir.deleteFileAbsolute(io, content_file_path) catch {};
     }
-    try content_file.writeAll(content);
+    try content_file.writeStreamingAll(io, content);
 
     // sign the file
-    var process = std.process.Child.init(
-        &.{ "ssh-keygen", "-Y", "sign", "-n", "git", "-f", signing_key, content_file_path },
-        allocator,
-    );
-    process.stdin_behavior = .Inherit;
-    process.stdout_behavior = .Inherit;
-    process.stderr_behavior = .Inherit;
-    const term = try process.spawnAndWait();
-    if (0 != term.Exited) {
+    const behavior: std.process.SpawnOptions.StdIo = if (repo_opts.is_test) .ignore else .inherit;
+    var process = try std.process.spawn(io, .{
+        .argv = &.{ "ssh-keygen", "-Y", "sign", "-n", "git", "-f", signing_key, content_file_path },
+        .stdin = behavior,
+        .stdout = behavior,
+        .stderr = behavior,
+    });
+    const term = try process.wait(io);
+    if (0 != term.exited) {
         return error.ObjectSigningFailed;
     }
 
     // read the sig
     {
         const sig_file_name = content_file_name ++ ".sig";
-        const sig_file = try state.core.repo_dir.openFile(sig_file_name, .{ .mode = .read_only });
+        const sig_file = try state.core.repo_dir.openFile(io, sig_file_name, .{ .mode = .read_only });
         defer {
-            sig_file.close();
-            state.core.repo_dir.deleteFile(sig_file_name) catch {};
+            sig_file.close(io);
+            state.core.repo_dir.deleteFile(io, sig_file_name) catch {};
         }
 
         var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-        var sig_file_reader = sig_file.reader(&reader_buffer);
+        var sig_file_reader = sig_file.reader(io, &reader_buffer);
         var sig_lines = std.ArrayList([]const u8){};
 
         // for each line...
@@ -349,29 +352,30 @@ pub fn writeCommit(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     metadata: CommitMetadata(repo_opts.hash),
 ) ![hash.hexLen(repo_opts.hash)]u8 {
     const parent_oids = if (metadata.parent_oids) |oids| oids else blk: {
-        const head_oid_maybe = try rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly());
+        const head_oid_maybe = try rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), io);
         break :blk if (head_oid_maybe) |head_oid| &.{head_oid} else &.{};
     };
 
     // make sure there is no unfinished merge in progress
-    try mrg.checkForUnfinishedMerge(repo_kind, repo_opts, state.readOnly());
+    try mrg.checkForUnfinishedMerge(repo_kind, repo_opts, state.readOnly(), io);
 
     // read index
-    var index = try idx.Index(repo_kind, repo_opts).init(allocator, state.readOnly());
+    var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
     defer index.deinit();
 
     // create tree and add index entries
     var tree = try Tree.init(allocator);
     defer tree.deinit();
-    try tree.addIndexEntries(repo_kind, repo_opts, state, allocator, &index, "", index.root_children.keys());
+    try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, &index, "", index.root_children.keys());
 
     // write and hash tree
     var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try writeTree(repo_kind, repo_opts, state, allocator, &tree, &tree_hash_bytes_buffer);
+    try writeTree(repo_kind, repo_opts, state, io, allocator, &tree, &tree_hash_bytes_buffer);
     const tree_hash_hex = std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
 
     // don't allow commit if the tree hasn't changed
@@ -381,7 +385,7 @@ pub fn writeCommit(
                 return error.EmptyCommit;
             }
         } else if (parent_oids.len == 1) {
-            var first_parent = try Object(repo_kind, repo_opts, .full).init(allocator, state.readOnly(), &parent_oids[0]);
+            var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
             defer first_parent.deinit();
             if (std.mem.eql(u8, &first_parent.content.commit.tree, &tree_hash_hex)) {
                 return error.EmptyCommit;
@@ -394,7 +398,7 @@ pub fn writeCommit(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), arena.allocator());
+        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, arena.allocator());
         defer config.deinit();
 
         var metadata_lines = std.ArrayList([]const u8){};
@@ -404,7 +408,7 @@ pub fn writeCommit(
             try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "parent {s}", .{parent_oid}));
         }
 
-        const ts = if (repo_opts.is_test) 0 else std.time.timestamp();
+        const ts = if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
         const author = metadata.author orelse auth_blk: {
             if (repo_opts.is_test) break :auth_blk "radar <radar@roark>";
@@ -423,7 +427,7 @@ pub fn writeCommit(
         // sign if key is in config
         if (config.sections.get("user")) |user_section| {
             if (user_section.get("signingkey")) |signing_key| {
-                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), allocator, &arena, metadata_lines.items, signing_key);
+                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
 
                 var header_lines = std.ArrayList([]const u8){};
                 defer header_lines.deinit(allocator);
@@ -447,49 +451,57 @@ pub fn writeCommit(
 
     // create commit header
     var header_buffer = [_]u8{0} ** 32;
-    const header = try std.fmt.bufPrint(&header_buffer, "commit {}\x00", .{commit_contents.len});
+    const header_str = try std.fmt.bufPrint(&header_buffer, "commit {}\x00", .{commit_contents.len});
 
     // create commit
-    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header, commit_contents });
+    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, commit_contents });
     defer allocator.free(obj_content);
 
-    // calc the hash of its contents
     var commit_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try hash.hashBuffer(repo_opts.hash, obj_content, &commit_hash_bytes_buffer);
-    const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
-    const commit_hash = hash.bytesToInt(repo_opts.hash, &commit_hash_bytes_buffer);
 
     switch (repo_kind) {
         .git => {
+            // calc the hash of its contents
+            try hash.hashBuffer(repo_opts.hash, obj_content, &commit_hash_bytes_buffer);
+            const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
+
             // open the objects dir
-            var objects_dir = try state.core.repo_dir.openDir("objects", .{});
-            defer objects_dir.close();
+            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
+            defer objects_dir.close(io);
 
             // make the two char dir
-            var commit_hash_prefix_dir = try objects_dir.makeOpenPath(commit_hash_hex[0..2], .{});
-            defer commit_hash_prefix_dir.close();
+            var commit_hash_prefix_dir = try objects_dir.createDirPathOpen(io, commit_hash_hex[0..2], .{});
+            defer commit_hash_prefix_dir.close(io);
             const commit_hash_suffix = commit_hash_hex[2..];
 
             // create lock file
-            var lock = try fs.LockFile.init(commit_hash_prefix_dir, commit_hash_suffix ++ ".uncompressed");
-            defer lock.deinit();
-            try lock.lock_file.writeAll(obj_content);
+            var lock = try fs.LockFile.init(io, commit_hash_prefix_dir, commit_hash_suffix ++ ".uncompressed");
+            defer lock.deinit(io);
+            try lock.lock_file.writeStreamingAll(io, obj_content);
 
             // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(commit_hash_prefix_dir, commit_hash_suffix);
-            defer compressed_lock.deinit();
-            try compressZlib(repo_opts.read_size, lock.lock_file, compressed_lock.lock_file);
+            var compressed_lock = try fs.LockFile.init(io, commit_hash_prefix_dir, commit_hash_suffix);
+            defer compressed_lock.deinit(io);
+            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
             compressed_lock.success = true;
 
             // write commit id to HEAD
-            try rf.writeRecur(repo_kind, repo_opts, state, "HEAD", &commit_hash_hex);
+            try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &commit_hash_hex);
         },
         .xit => {
             var reader = std.Io.Reader.fixed(commit_contents);
-            try chunk.writeChunks(repo_opts, state, &reader, commit_hash, commit_contents.len, "commit");
+
+            var hasher = hash.Hasher(repo_opts.hash).init();
+            hasher.update(header_str);
+
+            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
+            var hashed = reader.hashed(hasher, &hash_buffer);
+
+            try chunk.writeChunks(repo_opts, state, io, &hashed, commit_contents.len, "commit", &commit_hash_bytes_buffer);
 
             // write commit id to HEAD
-            try rf.writeRecur(repo_kind, repo_opts, state, "HEAD", &commit_hash_hex);
+            const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
+            try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &commit_hash_hex);
         },
     }
 
@@ -500,6 +512,7 @@ pub fn writeTag(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     input: tg.AddTagInput,
     target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
@@ -508,13 +521,13 @@ pub fn writeTag(
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
 
-        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), arena.allocator());
+        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, arena.allocator());
         defer config.deinit();
 
         var metadata_lines = std.ArrayList([]const u8){};
 
         const kind = kind_blk: {
-            var obj = try Object(repo_kind, repo_opts, .raw).init(allocator, state.readOnly(), target_oid);
+            var obj = try Object(repo_kind, repo_opts, .raw).init(state.readOnly(), io, allocator, target_oid);
             defer obj.deinit();
             break :kind_blk obj.content;
         };
@@ -523,7 +536,7 @@ pub fn writeTag(
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "type {s}", .{kind.name()}));
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tag {s}", .{input.name}));
 
-        const ts = if (repo_opts.is_test) 0 else std.time.timestamp();
+        const ts = if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
         const tagger = input.tagger orelse auth_blk: {
             if (repo_opts.is_test) break :auth_blk "radar <radar@roark>";
@@ -539,7 +552,7 @@ pub fn writeTag(
         // sign if key is in config
         if (config.sections.get("user")) |user_section| {
             if (user_section.get("signingkey")) |signing_key| {
-                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), allocator, &arena, metadata_lines.items, signing_key);
+                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
                 try metadata_lines.appendSlice(arena.allocator(), sig_lines);
             }
         }
@@ -550,43 +563,50 @@ pub fn writeTag(
 
     // create tag header
     var header_buffer = [_]u8{0} ** 32;
-    const header = try std.fmt.bufPrint(&header_buffer, "tag {}\x00", .{tag_contents.len});
+    const header_str = try std.fmt.bufPrint(&header_buffer, "tag {}\x00", .{tag_contents.len});
 
     // create tag
-    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header, tag_contents });
+    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, tag_contents });
     defer allocator.free(obj_content);
 
-    // calc the hash of its contents
     var tag_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try hash.hashBuffer(repo_opts.hash, obj_content, &tag_hash_bytes_buffer);
-    const tag_hash_hex = std.fmt.bytesToHex(tag_hash_bytes_buffer, .lower);
-    const tag_hash = hash.bytesToInt(repo_opts.hash, &tag_hash_bytes_buffer);
 
     switch (repo_kind) {
         .git => {
+            // calc the hash of its contents
+            try hash.hashBuffer(repo_opts.hash, obj_content, &tag_hash_bytes_buffer);
+            const tag_hash_hex = std.fmt.bytesToHex(tag_hash_bytes_buffer, .lower);
+
             // open the objects dir
-            var objects_dir = try state.core.repo_dir.openDir("objects", .{});
-            defer objects_dir.close();
+            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
+            defer objects_dir.close(io);
 
             // make the two char dir
-            var tag_hash_prefix_dir = try objects_dir.makeOpenPath(tag_hash_hex[0..2], .{});
-            defer tag_hash_prefix_dir.close();
+            var tag_hash_prefix_dir = try objects_dir.createDirPathOpen(io, tag_hash_hex[0..2], .{});
+            defer tag_hash_prefix_dir.close(io);
             const tag_hash_suffix = tag_hash_hex[2..];
 
             // create lock file
-            var lock = try fs.LockFile.init(tag_hash_prefix_dir, tag_hash_suffix ++ ".uncompressed");
-            defer lock.deinit();
-            try lock.lock_file.writeAll(obj_content);
+            var lock = try fs.LockFile.init(io, tag_hash_prefix_dir, tag_hash_suffix ++ ".uncompressed");
+            defer lock.deinit(io);
+            try lock.lock_file.writeStreamingAll(io, obj_content);
 
             // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(tag_hash_prefix_dir, tag_hash_suffix);
-            defer compressed_lock.deinit();
-            try compressZlib(repo_opts.read_size, lock.lock_file, compressed_lock.lock_file);
+            var compressed_lock = try fs.LockFile.init(io, tag_hash_prefix_dir, tag_hash_suffix);
+            defer compressed_lock.deinit(io);
+            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
             compressed_lock.success = true;
         },
         .xit => {
             var reader = std.Io.Reader.fixed(tag_contents);
-            try chunk.writeChunks(repo_opts, state, &reader, tag_hash, tag_contents.len, "tag");
+
+            var hasher = hash.Hasher(repo_opts.hash).init();
+            hasher.update(header_str);
+
+            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
+            var hashed = reader.hashed(hasher, &hash_buffer);
+
+            try chunk.writeChunks(repo_opts, state, io, &hashed, tag_contents.len, "tag", &tag_hash_bytes_buffer);
         },
     }
 
@@ -624,28 +644,31 @@ pub const ObjectKind = enum {
 
 pub fn ObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
+        io: std.Io,
         allocator: std.mem.Allocator,
         reader: Reader,
         interface: std.Io.Reader,
 
         pub const Reader = switch (repo_kind) {
-            .git => pack.LooseOrPackObjectReader(repo_opts),
+            .git => pack.LooseOrPackObjectReader(repo_kind, repo_opts),
             .xit => chunk.ChunkObjectReader(repo_opts),
         };
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !ObjectReader(repo_kind, repo_opts) {
             const buffer = try allocator.alloc(u8, repo_opts.read_size);
             errdefer allocator.free(buffer);
 
             return .{
+                .io = io,
                 .allocator = allocator,
                 .reader = switch (repo_kind) {
-                    .git => try pack.LooseOrPackObjectReader(repo_opts).init(allocator, state, oid),
-                    .xit => try chunk.ChunkObjectReader(repo_opts).init(allocator, state, oid),
+                    .git => try pack.LooseOrPackObjectReader(repo_kind, repo_opts).init(state, io, allocator, oid),
+                    .xit => try chunk.ChunkObjectReader(repo_opts).init(state, io, allocator, oid),
                 },
                 .interface = .{
                     .vtable = &.{ .stream = stream },
@@ -657,7 +680,7 @@ pub fn ObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn deinit(self: *ObjectReader(repo_kind, repo_opts)) void {
-            self.reader.deinit(self.allocator);
+            self.reader.deinit(self.io, self.allocator);
             self.allocator.free(self.interface.buffer);
         }
 
@@ -770,11 +793,12 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         object_reader: ObjectReader(repo_kind, repo_opts),
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !Object(repo_kind, repo_opts, load_kind) {
-            var obj_rdr = try ObjectReader(repo_kind, repo_opts).init(allocator, state, oid);
+            var obj_rdr = try ObjectReader(repo_kind, repo_opts).init(state, io, allocator, oid);
             errdefer obj_rdr.deinit();
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -1028,18 +1052,19 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         }
 
         pub fn initCommit(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !Object(repo_kind, repo_opts, load_kind) {
-            var object = try Object(repo_kind, repo_opts, load_kind).init(allocator, state, oid);
+            var object = try Object(repo_kind, repo_opts, load_kind).init(state, io, allocator, oid);
             errdefer object.deinit();
 
             switch (object.content) {
                 .blob, .tree => return error.CommitNotFound,
                 .commit => return object,
                 .tag => |tag| {
-                    const commit_object = try initCommit(allocator, state, &tag.target);
+                    const commit_object = try initCommit(state, io, allocator, &tag.target);
                     object.deinit();
                     return commit_object;
                 },
@@ -1068,6 +1093,7 @@ pub fn ObjectIterator(
     comptime load_kind: ObjectLoadKind,
 ) type {
     return struct {
+        io: std.Io,
         allocator: std.mem.Allocator,
         core: *rp.Repo(repo_kind, repo_opts).Core,
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
@@ -1084,11 +1110,13 @@ pub fn ObjectIterator(
         };
 
         pub fn init(
-            allocator: std.mem.Allocator,
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
             options: ObjectIteratorOptions,
         ) !ObjectIterator(repo_kind, repo_opts, load_kind) {
             return .{
+                .io = io,
                 .allocator = allocator,
                 .core = state.core,
                 .moment = state.extra.moment.*,
@@ -1121,7 +1149,7 @@ pub fn ObjectIterator(
                     self.depth = node_depth;
                     switch (load_kind) {
                         .raw => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(self.allocator, state, &next_oid);
+                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, &next_oid);
                             defer object.deinit();
                             try self.includeContent(object.content, node_depth + 1);
 
@@ -1130,13 +1158,13 @@ pub fn ObjectIterator(
                                 .commit => if (.commit != object.content) continue,
                             }
 
-                            var raw_object = try Object(repo_kind, repo_opts, .raw).init(self.allocator, state, &next_oid);
+                            var raw_object = try Object(repo_kind, repo_opts, .raw).init(state, self.io, self.allocator, &next_oid);
                             errdefer raw_object.deinit();
                             self.object = raw_object;
                             return &self.object;
                         },
                         .full => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(self.allocator, state, &next_oid);
+                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, &next_oid);
                             errdefer object.deinit();
                             try self.includeContent(object.content, node_depth + 1);
 
@@ -1202,7 +1230,7 @@ pub fn ObjectIterator(
             try self.oid_excludes.put(oid.*, {});
 
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
-            var object = try Object(repo_kind, repo_opts, .full).init(self.allocator, state, oid);
+            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, oid);
             defer object.deinit();
             switch (object.content) {
                 .blob, .tag => {},
@@ -1235,11 +1263,12 @@ pub fn copyFromObjectIterator(
     comptime source_repo_kind: rp.RepoKind,
     comptime source_repo_opts: rp.RepoOpts(source_repo_kind),
     obj_iter: *ObjectIterator(source_repo_kind, source_repo_opts, .raw),
+    io: std.Io,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
-            try progress_ctx.run(.{ .start = .{
+            try progress_ctx.run(io, .{ .start = .{
                 .kind = .writing_object,
                 .estimated_total_items = 0,
             } });
@@ -1254,44 +1283,49 @@ pub fn copyFromObjectIterator(
             repo_kind,
             repo_opts,
             state,
-            &object.object_reader,
+            io,
+            &object.object_reader.interface,
             object.object_reader.header(),
             &oid,
         );
 
         if (repo_opts.ProgressCtx != void) {
             if (progress_ctx_maybe) |progress_ctx| {
-                try progress_ctx.run(.{ .complete_one = .writing_object });
+                try progress_ctx.run(io, .{ .complete_one = .writing_object });
             }
         }
     }
 
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
-            try progress_ctx.run(.{ .end = .writing_object });
+            try progress_ctx.run(io, .{ .end = .writing_object });
         }
     }
 }
 
-pub fn copyFromPackObjectIterator(
+pub fn copyFromPackIterator(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
-    pack_iter: *pack.PackObjectIterator(repo_kind, repo_opts),
+    pack_iter: *pack.PackIterator(repo_kind, repo_opts),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
-            try progress_ctx.run(.{ .start = .{
+            try progress_ctx.run(io, .{ .start = .{
                 .kind = .writing_object_from_pack,
                 .estimated_total_items = pack_iter.object_count,
             } });
         }
     }
 
-    while (try pack_iter.next(state.readOnly())) |pack_reader| {
-        defer pack_reader.deinit(allocator);
+    var offset_to_oid = std.AutoArrayHashMap(u64, [hash.byteLen(repo_opts.hash)]u8).init(allocator);
+    defer offset_to_oid.deinit();
+
+    while (try pack_iter.next(state.readOnly(), &offset_to_oid)) |pack_obj_rdr| {
+        defer pack_obj_rdr.deinit(io, allocator);
 
         const Stream = struct {
             reader: *pack.PackObjectReader(repo_kind, repo_opts),
@@ -1309,16 +1343,6 @@ pub fn copyFromPackObjectIterator(
                 };
             }
 
-            pub fn seekTo(self: *@This(), offset: usize) !void {
-                if (offset == 0) {
-                    try self.reader.reset();
-                    self.interface.seek = 0;
-                    self.interface.end = 0;
-                } else {
-                    return error.InvalidOffset;
-                }
-            }
-
             fn stream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
                 const r: *@This() = @alignCast(@fieldParentPtr("interface", io_r));
                 const dest = limit.slice(try io_w.writableSliceGreedy(1));
@@ -1330,22 +1354,24 @@ pub fn copyFromPackObjectIterator(
         };
 
         var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-        var stream = Stream.init(pack_reader, &reader_buffer);
+        var stream = Stream.init(pack_obj_rdr, &reader_buffer);
 
         var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-        const header = pack_reader.header();
-        try writeObject(repo_kind, repo_opts, state, &stream, header, &oid);
+        const header = pack_obj_rdr.header();
+        try writeObject(repo_kind, repo_opts, state, io, &stream.interface, header, &oid);
+
+        try offset_to_oid.put(pack_iter.start_position, oid);
 
         if (repo_opts.ProgressCtx != void) {
             if (progress_ctx_maybe) |progress_ctx| {
-                try progress_ctx.run(.{ .complete_one = .writing_object_from_pack });
+                try progress_ctx.run(io, .{ .complete_one = .writing_object_from_pack });
             }
         }
     }
 
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
-            try progress_ctx.run(.{ .end = .writing_object_from_pack });
+            try progress_ctx.run(io, .{ .end = .writing_object_from_pack });
         }
     }
 }

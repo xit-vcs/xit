@@ -13,27 +13,27 @@ pub const Library = struct {
     step: *std.Build.Step.Compile,
 
     pub fn link(self: Library, other: *std.Build.Step.Compile) void {
-        other.addIncludePath(.{ .cwd_relative = include_dir });
-        other.linkLibrary(self.step);
+        other.root_module.addIncludePath(.{ .cwd_relative = include_dir });
+        other.root_module.linkLibrary(self.step);
     }
 };
 
 pub fn create(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Library {
-    const ret = b.addLibrary(.{
+    var ret = b.addLibrary(.{
         .name = "z",
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
         }),
     });
-    ret.linkLibC();
-    ret.addCSourceFiles(.{
+    ret.root_module.link_libc = true;
+    ret.root_module.addCSourceFiles(.{
         .root = .{ .cwd_relative = root() },
         .files = srcs,
         .flags = &.{"-std=c89"},
     });
 
-    return Library{ .step = ret };
+    return .{ .step = ret };
 }
 
 const srcs = &.{

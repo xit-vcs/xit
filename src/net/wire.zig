@@ -31,11 +31,11 @@ pub const WireState = union(WireKind) {
     raw: net_raw.RawState,
     ssh: net_ssh.SshState,
 
-    pub fn close(self: *WireState) !void {
+    pub fn close(self: *WireState, io: std.Io) !void {
         switch (self.*) {
             .http => |*http| http.close(),
             .raw => |*raw| try raw.close(),
-            .ssh => |*ssh| try ssh.close(),
+            .ssh => |*ssh| try ssh.close(io),
         }
     }
 
@@ -61,6 +61,7 @@ pub const WireStream = union(WireKind) {
     ssh: net_ssh.SshStream,
 
     pub fn initMaybe(
+        io: std.Io,
         allocator: std.mem.Allocator,
         wire_state: *WireState,
         url: []const u8,
@@ -68,7 +69,7 @@ pub const WireStream = union(WireKind) {
     ) !?WireStream {
         return switch (wire_state.*) {
             .http => |*http| .{ .http = try net_http.HttpStream.init(http, url, wire_action) },
-            .raw => |*raw| if (try net_raw.RawStream.initMaybe(allocator, raw, url, wire_action)) |stream| .{ .raw = stream } else null,
+            .raw => |*raw| if (try net_raw.RawStream.initMaybe(io, allocator, raw, url, wire_action)) |stream| .{ .raw = stream } else null,
             .ssh => |*ssh| if (try net_ssh.SshStream.initMaybe(ssh, url, wire_action)) |stream| .{ .ssh = stream } else null,
         };
     }
@@ -157,6 +158,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             wire_kind: WireKind,
             opts: net_transport.Opts(repo_opts.ProgressCtx),
@@ -164,9 +166,9 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const wire_state = try allocator.create(WireState);
             errdefer allocator.destroy(wire_state);
             wire_state.* = switch (wire_kind) {
-                .http => .{ .http = try net_http.HttpState.init(allocator) },
+                .http => .{ .http = try net_http.HttpState.init(io, allocator) },
                 .raw => .{ .raw = net_raw.RawState.init() },
-                .ssh => .{ .ssh = try net_ssh.SshState.init(repo_kind, repo_opts, state, allocator, opts.wire.ssh) },
+                .ssh => .{ .ssh = try net_ssh.SshState.init(repo_kind, repo_opts, state, io, allocator, opts.wire.ssh) },
             };
             errdefer wire_state.deinit();
 
@@ -195,8 +197,8 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             };
         }
 
-        pub fn deinit(self: *WireTransport(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
-            self.close(allocator);
+        pub fn deinit(self: *WireTransport(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
+            self.close(io, allocator);
 
             self.wire_state.deinit();
             allocator.destroy(self.wire_state);
@@ -215,6 +217,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         pub fn connect(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             url: []const u8,
             direction: net.Direction,
@@ -223,7 +226,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 allocator.free(current_url);
                 self.url = null;
             }
-            try self.wire_state.close();
+            try self.wire_state.close(io);
 
             const url_dupe = try allocator.dupe(u8, url);
             self.url = url_dupe;
@@ -235,7 +238,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 .push => .list_receive_pack,
             };
 
-            if (try WireStream.initMaybe(allocator, self.wire_state, url_dupe, action)) |stream| {
+            if (try WireStream.initMaybe(io, allocator, self.wire_state, url_dupe, action)) |stream| {
                 self.clearStream(allocator);
                 self.wire_stream = stream;
             }
@@ -297,6 +300,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         pub fn push(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             git_push: *net_push.Push(repo_kind, repo_opts),
         ) !void {
@@ -310,14 +314,14 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             if (self.is_stateless) {
                 self.clearStream(allocator);
-                try self.wire_state.close();
+                try self.wire_state.close(io);
             }
 
             if (.push != self.direction) {
                 return error.InvalidDirection;
             }
 
-            if (try WireStream.initMaybe(allocator, self.wire_state, self.url orelse return error.NotConnected, .receive_pack)) |stream| {
+            if (try WireStream.initMaybe(io, allocator, self.wire_state, self.url orelse return error.NotConnected, .receive_pack)) |stream| {
                 self.clearStream(allocator);
                 self.wire_stream = stream;
             }
@@ -331,13 +335,13 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             try stream.write(allocator, buffer.items.ptr, buffer.items.len);
 
             if (need_pack) {
-                var pack_writer_maybe = try pack.PackObjectWriter(repo_kind, repo_opts).init(allocator, &git_push.obj_iter);
+                var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &git_push.obj_iter);
                 if (pack_writer_maybe) |*pack_writer| {
                     defer pack_writer.deinit();
 
                     if (repo_opts.ProgressCtx != void) {
                         if (self.opts.progress_ctx) |progress_ctx| {
-                            try progress_ctx.run(.{ .start = .{
+                            try progress_ctx.run(io, .{ .start = .{
                                 .kind = .sending_bytes,
                                 .estimated_total_items = 0,
                             } });
@@ -358,7 +362,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         if (repo_opts.ProgressCtx != void) {
                             if (self.opts.progress_ctx) |progress_ctx| {
                                 total_size += size;
-                                try progress_ctx.run(.{ .complete_total = .{ .kind = .sending_bytes, .count = total_size } });
+                                try progress_ctx.run(io, .{ .complete_total = .{ .kind = .sending_bytes, .count = total_size } });
                             }
                         }
                     }
@@ -371,13 +375,14 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             if (0 == git_push.specs.items.len) {
                 git_push.unpack_ok = true;
             } else {
-                try self.handlePushPkts(allocator, git_push);
+                try self.handlePushPkts(io, allocator, git_push);
             }
         }
 
         pub fn negotiateFetch(
             self: *WireTransport(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
             allocator: std.mem.Allocator,
             fetch_data: *const net_fetch.FetchNegotiation(repo_kind, repo_opts),
         ) !void {
@@ -388,24 +393,24 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             try net_pkt.bufferWants(repo_kind, repo_opts, allocator, fetch_data, &self.caps, &buffer);
 
-            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(allocator, state, .{ .kind = .all });
+            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
             defer obj_iter.deinit();
 
             {
-                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .tag);
-                defer tags.deinit();
+                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+                defer tags.deinit(io);
 
-                while (try tags.next()) |ref| {
-                    if (try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = ref })) |*oid| {
+                while (try tags.next(io)) |ref| {
+                    if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                         try obj_iter.include(oid);
                     }
                 }
 
-                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, allocator, .head);
-                defer heads.deinit();
+                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+                defer heads.deinit(io);
 
-                while (try heads.next()) |ref| {
-                    if (try rf.readRecur(repo_kind, repo_opts, state, .{ .ref = ref })) |*oid| {
+                while (try heads.next(io)) |ref| {
+                    if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                         try obj_iter.include(oid);
                     }
                 }
@@ -421,7 +426,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 if (i % 20 == 0) {
                     try buffer.appendSlice(allocator, "0000");
 
-                    try self.negotiationStep(allocator, buffer.items);
+                    try self.negotiationStep(io, allocator, buffer.items);
 
                     buffer.clearAndFree(allocator);
 
@@ -471,7 +476,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             try buffer.appendSlice(allocator, "0009done\n");
 
-            try self.negotiationStep(allocator, buffer.items);
+            try self.negotiationStep(io, allocator, buffer.items);
 
             if (!self.caps.multi_ack and !self.caps.multi_ack_detailed) {
                 var pkt = try self.recvPkt(allocator);
@@ -514,19 +519,20 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         fn negotiationStep(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             buffer: []const u8,
         ) !void {
             if (self.is_stateless) {
                 self.clearStream(allocator);
-                try self.wire_state.close();
+                try self.wire_state.close(io);
             }
 
             if (.fetch != self.direction) {
                 return error.InvalidDirection;
             }
 
-            if (try WireStream.initMaybe(allocator, self.wire_state, self.url orelse return error.NotConnected, .upload_pack)) |stream| {
+            if (try WireStream.initMaybe(io, allocator, self.wire_state, self.url orelse return error.NotConnected, .upload_pack)) |stream| {
                 self.clearStream(allocator);
                 self.wire_stream = stream;
             }
@@ -539,14 +545,15 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         pub fn downloadPack(
             self: *WireTransport(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
             const temp_pack_name = "temp.pack";
 
             // receive pack file
             {
-                var temp_pack = try fs.LockFile.init(state.core.repo_dir, temp_pack_name);
-                defer temp_pack.deinit();
+                var temp_pack = try fs.LockFile.init(io, state.core.repo_dir, temp_pack_name);
+                defer temp_pack.deinit(io);
 
                 while (true) {
                     var pkt = try self.recvPkt(allocator);
@@ -555,11 +562,11 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                     switch (pkt) {
                         .progress => |progress| if (repo_opts.ProgressCtx != void) {
                             if (self.opts.progress_ctx) |progress_ctx| {
-                                try progress_ctx.run(.{ .text = progress });
+                                try progress_ctx.run(io, .{ .text = progress });
                             }
                         },
                         .data => |data| if (data.len > 0) {
-                            try temp_pack.lock_file.writeAll(data);
+                            try temp_pack.lock_file.writeStreamingAll(io, data);
                         },
                         .flush => break,
                         else => {},
@@ -571,10 +578,14 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             // iterate over pack file
             {
-                defer state.core.repo_dir.deleteFile(temp_pack_name) catch {};
-                var pack_iter = try pack.PackObjectIterator(repo_kind, repo_opts).init(allocator, state.core.repo_dir, temp_pack_name);
-                defer pack_iter.deinit();
-                try obj.copyFromPackObjectIterator(repo_kind, repo_opts, state, allocator, &pack_iter, self.opts.progress_ctx);
+                defer state.core.repo_dir.deleteFile(io, temp_pack_name) catch {};
+
+                var pack_reader = try pack.PackReader.initFile(io, allocator, state.core.repo_dir, temp_pack_name);
+                defer pack_reader.deinit();
+
+                var pack_iter = try pack.PackIterator(repo_kind, repo_opts).init(io, allocator, &pack_reader);
+
+                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, self.opts.progress_ctx);
             }
         }
 
@@ -698,6 +709,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         pub fn close(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
         ) void {
             const action: WireAction = switch (self.direction) {
@@ -708,7 +720,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const flush = "0000";
             if (self.connected and !self.is_stateless) {
                 if (self.url) |url| {
-                    if (WireStream.initMaybe(allocator, self.wire_state, url, action)) |stream_maybe| {
+                    if (WireStream.initMaybe(io, allocator, self.wire_state, url, action)) |stream_maybe| {
                         if (stream_maybe) |stream| {
                             self.wire_stream = stream;
                         }
@@ -725,7 +737,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 allocator.free(url);
                 self.url = null;
             }
-            self.wire_state.close() catch {};
+            self.wire_state.close(io) catch {};
 
             for (self.common.items) |*pkt| {
                 pkt.deinit(allocator);
@@ -764,6 +776,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         fn handlePushPkts(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             git_push: *net_push.Push(repo_kind, repo_opts),
         ) !void {
@@ -790,7 +803,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         .err => return error.ServerReportedError,
                         .progress => |progress| if (repo_opts.ProgressCtx != void) {
                             if (self.opts.progress_ctx) |progress_ctx| {
-                                try progress_ctx.run(.{ .text = progress });
+                                try progress_ctx.run(io, .{ .text = progress });
                             }
                         },
                         else => iter_over = try handlePushPkt(git_push, pkt),
