@@ -258,7 +258,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 },
                 .xit => {
                     // create the db file
-                    const db_file = try repo_dir.createFile("db", .{ .exclusive = true, .lock = .exclusive, .read = true });
+                    const db_file = try repo_dir.createFile("db", .{ .exclusive = true, .lock = .none, .read = true });
                     errdefer db_file.close();
 
                     const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
@@ -354,7 +354,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                 },
                 .xit => {
-                    var db_file = repo_dir.openFile("db", .{ .mode = .read_write, .lock = .exclusive }) catch |err| switch (err) {
+                    var db_file = repo_dir.openFile("db", .{ .mode = .read_write, .lock = .none }) catch |err| switch (err) {
                         error.FileNotFound => return error.RepoNotFound,
                         else => |e| return e,
                     };
@@ -434,6 +434,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -471,6 +474,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -497,6 +503,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .tag = .{ .remove = ctx.input } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -544,6 +553,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .add = .{ .paths = ctx.paths, .allocator = ctx.allocator } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -597,6 +609,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .unadd = .{ .paths = ctx.paths, .allocator = ctx.allocator } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -663,6 +678,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .rm = .{ .paths = ctx.paths, .opts = ctx.opts, .allocator = ctx.allocator } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -745,6 +763,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -769,6 +790,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .branch = .{ .remove = ctx.input } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -798,6 +822,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .switch_dir = ctx.input });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -850,6 +877,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .reset_add = ctx.target });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -932,6 +963,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -979,6 +1013,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -1014,6 +1051,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .config = .{ .remove = ctx.input } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -1062,6 +1102,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     }
                 }
             };
+
+            try self.core.db_file.lock(.exclusive);
+            defer self.core.db_file.unlock();
 
             const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
             history.appendContext(
@@ -1137,6 +1180,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 }
             };
 
+            try self.core.db_file.lock(.exclusive);
+            defer self.core.db_file.unlock();
+
             const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
             try history.appendContext(
                 .{ .slot = try history.getSlot(-1) },
@@ -1183,6 +1229,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -1219,6 +1268,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .remote = .{ .remove = ctx.input } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
@@ -1270,6 +1322,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         }
                     };
 
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
+
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
@@ -1318,6 +1373,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try un.writeMessage(repo_opts, state, .{ .fetch = .{ .remote_name = ctx.remote_name } });
                         }
                     };
+
+                    try self.core.db_file.lock(.exclusive);
+                    defer self.core.db_file.unlock();
 
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
