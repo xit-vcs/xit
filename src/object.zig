@@ -1162,6 +1162,7 @@ pub fn ObjectIterator(
                 .blob => {},
                 .tree => |tree_content| switch (self.options.kind) {
                     .all => for (tree_content.entries.values()) |entry| {
+                        if (entry.mode.content.object_type == .gitlink) continue;
                         const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
                         try self.includeAtDepth(&entry_oid, child_depth);
                     },
@@ -1208,6 +1209,7 @@ pub fn ObjectIterator(
                 .blob, .tag => {},
                 .tree => |tree| switch (self.options.kind) {
                     .all => for (tree.entries.values()) |entry| {
+                        if (entry.mode.content.object_type == .gitlink) continue;
                         try self.exclude(&std.fmt.bytesToHex(entry.oid, .lower));
                     },
                     .commit => {},
