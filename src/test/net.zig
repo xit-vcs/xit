@@ -235,7 +235,7 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                         defer allocator.free(auth_keys_path);
                         const sshd_contents = try std.fmt.allocPrint(
                             allocator,
-                            "#!/bin/sh\nexec $(which sshd) -p {} -f sshd_config -h \"{s}\" -D -e -ddd -o AuthorizedKeysFile=\"{s}\"",
+                            "#!/bin/sh\nexec $(which sshd) -p {} -f sshd_config -h \"{s}\" -D -e -o AuthorizedKeysFile=\"{s}\"",
                             .{ port, host_key_path, auth_keys_path },
                         );
                         defer allocator.free(sshd_contents);
@@ -327,7 +327,7 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                                         var accept = std.ArrayList([]const u8){};
                                         defer accept.deinit(core.allocator);
 
-                                        var keep_alive = false;
+                                        var keep_alive = true; // HTTP 1.1 defaults to keep-alive
 
                                         // iterate over headers to fill env map
                                         var req_header_it = request.iterateHeaders();
@@ -346,7 +346,9 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                                             } else if (std.ascii.eqlIgnoreCase(header_name, "user-agent")) {
                                                 try env_map.put("HTTP_USER_AGENT", header_value);
                                             } else if (std.ascii.eqlIgnoreCase(header_name, "connection")) {
-                                                keep_alive = std.ascii.eqlIgnoreCase(header_value, "keep-alive");
+                                                if (std.ascii.eqlIgnoreCase(header_value, "close")) {
+                                                    keep_alive = false;
+                                                }
                                             }
                                         }
 
@@ -370,6 +372,8 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                                             defer core.allocator.free(request_body);
                                             try process.stdin.?.writeAll(request_body);
                                         }
+                                        process.stdin.?.close();
+                                        process.stdin = null;
 
                                         var stdout = std.ArrayList(u8){};
                                         defer stdout.deinit(core.allocator);
@@ -378,6 +382,12 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                                         try process.collectOutput(core.allocator, &stdout, &stderr, 20 * 1024 * 1024);
 
                                         _ = try process.wait();
+
+                                        // transition the http state machine so it can
+                                        // read the next request on this connection
+                                        if (http_server.reader.state == .received_head) {
+                                            http_server.reader.state = .ready;
+                                        }
 
                                         if (stderr.items.len > 0) {
                                             std.debug.print("Error from git-http-backend:\n{s}\n", .{stderr.items});
@@ -566,12 +576,6 @@ fn testFetch(
         try std.testing.expectEqualStrings(&commit1, &oid_master);
     }
 
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
-
     // make another commit
     const commit2 = blk: {
         const goodbye_txt = try server_repo.core.work_dir.createFile("goodbye.txt", .{ .truncate = true });
@@ -747,12 +751,6 @@ fn testPush(
         try std.testing.expectEqualStrings(&commit1, &oid_master);
     }
 
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
-
     // make a commit on the server
     {
         const hello_txt = try server_repo.core.work_dir.createFile("hello.txt", .{ .truncate = true });
@@ -780,12 +778,6 @@ fn testPush(
         .{ .wire = .{ .ssh = .{ .command = ssh_cmd_maybe } } },
     ));
 
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
-
     // make a commit on the server with no parents, thus creating an incompatible git history
     {
         const hello_txt = try server_repo.core.work_dir.createFile("hello.txt", .{ .truncate = true });
@@ -804,24 +796,12 @@ fn testPush(
         .{ .wire = .{ .ssh = .{ .command = ssh_cmd_maybe } } },
     ));
 
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
-
     // retrieve the commit object
     try client_repo.fetch(
         allocator,
         "origin",
         .{ .wire = .{ .ssh = .{ .command = ssh_cmd_maybe } } },
     );
-
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
 
     // can't push because server's history is incompatible
     try std.testing.expectError(error.RemoteRefContainsIncompatibleHistory, client_repo.push(
@@ -831,12 +811,6 @@ fn testPush(
         false,
         .{ .wire = .{ .ssh = .{ .command = ssh_cmd_maybe } } },
     ));
-
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
-    }
 
     // force push
     try client_repo.push(
@@ -851,12 +825,6 @@ fn testPush(
     {
         const oid_master = (try server_repo.readRef(.{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit2, &oid_master);
-    }
-
-    // restart the ssh server because it's flaky when multiple requests are made
-    if (is_ssh) {
-        server.stop();
-        try server.start();
     }
 
     // remove the remote tag
