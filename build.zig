@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match any filter") orelse &[0][]const u8{};
 
     // main
-    {
+    const install_main_exe = blk: {
         const exe = b.addExecutable(.{
             .name = "xit",
             .root_module = b.createModule(.{
@@ -22,7 +22,9 @@ pub fn build(b: *std.Build) !void {
             exe.root_module.link_libc = true;
         }
         exe.use_llvm = true;
-        b.installArtifact(exe);
+
+        const install_exe = b.addInstallArtifact(exe, .{});
+        b.getInstallStep().dependOn(&install_exe.step);
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(b.getInstallStep());
@@ -32,7 +34,9 @@ pub fn build(b: *std.Build) !void {
 
         const run_step = b.step("run", "Run the app");
         run_step.dependOn(&run_cmd.step);
-    }
+
+        break :blk install_exe;
+    };
 
     // module for using xit as a library
     // (the commands below consume xit this way)
@@ -119,6 +123,7 @@ pub fn build(b: *std.Build) !void {
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
         const test_step = b.step("testnet", "Run network unit tests");
+        test_step.dependOn(&install_main_exe.step);
         test_step.dependOn(&run_unit_tests.step);
     }
 }

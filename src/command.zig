@@ -10,6 +10,8 @@ const rf = @import("./ref.zig");
 const hash = @import("./hash.zig");
 const work = @import("./workdir.zig");
 const tg = @import("./tag.zig");
+const server_upload_pack = @import("./net/server/upload_pack.zig");
+const server_receive_pack = @import("./net/server/receive_pack.zig");
 
 pub const CommandKind = enum {
     init,
@@ -37,6 +39,9 @@ pub const CommandKind = enum {
     clone,
     fetch,
     push,
+    upload_pack,
+    receive_pack,
+    http_backend,
 };
 
 const Help = struct {
@@ -360,6 +365,33 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\    xit push origin master -f
             ,
         },
+        .upload_pack => .{
+            .name = "upload-pack",
+            .descrip =
+            \\send what is fetched from the repository.
+            ,
+            .example =
+            \\xit upload-pack <directory>
+            ,
+        },
+        .receive_pack => .{
+            .name = "receive-pack",
+            .descrip =
+            \\receive what is pushed into the repository.
+            ,
+            .example =
+            \\xit receive-pack <directory>
+            ,
+        },
+        .http_backend => .{
+            .name = "http-backend",
+            .descrip =
+            \\a CGI program forwarding receive-pack and upload-pack over HTTP.
+            ,
+            .example =
+            \\xit http-backend
+            ,
+        },
     };
 }
 
@@ -566,6 +598,15 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
             refspec: []const u8,
             force: bool,
         },
+        upload_pack: struct {
+            dir: []const u8,
+            options: server_upload_pack.Options,
+        },
+        receive_pack: struct {
+            dir: []const u8,
+            options: server_receive_pack.Options,
+        },
+        http_backend,
 
         pub fn initMaybe(cmd_args: *CommandArgs) !?Command(repo_kind, hash_kind) {
             const command_kind = cmd_args.command_kind orelse return null;
@@ -851,6 +892,34 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         .refspec = cmd_args.positional_args[1],
                         .force = cmd_args.contains("-f"),
                     } };
+                },
+                .upload_pack => {
+                    if (cmd_args.positional_args.len != 1) return null;
+
+                    return .{ .upload_pack = .{
+                        .dir = cmd_args.positional_args[0],
+                        .options = .{
+                            .advertise_refs = cmd_args.contains("--http-backend-info-refs"),
+                            .is_stateless = cmd_args.contains("--stateless-rpc"),
+                        },
+                    } };
+                },
+                .receive_pack => {
+                    if (cmd_args.positional_args.len != 1) return null;
+
+                    return .{ .receive_pack = .{
+                        .dir = cmd_args.positional_args[0],
+                        .options = .{
+                            .skip_connectivity_check = cmd_args.contains("--skip-connectivity-check"),
+                            .advertise_refs = cmd_args.contains("--http-backend-info-refs"),
+                            .is_stateless = cmd_args.contains("--stateless-rpc"),
+                        },
+                    } };
+                },
+                .http_backend => {
+                    if (cmd_args.positional_args.len != 0) return null;
+
+                    return .http_backend;
                 },
             }
         }
