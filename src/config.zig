@@ -21,11 +21,15 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     return struct {
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
-        sections: std.StringArrayHashMap(Variables),
+        sections: std.StringArrayHashMapUnmanaged(Variables),
 
-        const Variables = std.StringArrayHashMap([]const u8);
+        const Variables = std.StringArrayHashMapUnmanaged([]const u8);
 
-        pub fn init(state: rp.Repo(repo_kind, repo_opts).State(.read_only), allocator: std.mem.Allocator) !Config(repo_kind, repo_opts) {
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+        ) !Config(repo_kind, repo_opts) {
             var arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer {
@@ -33,10 +37,10 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 allocator.destroy(arena);
             }
 
-            var sections = std.StringArrayHashMap(Variables).init(arena.allocator());
+            var sections: std.StringArrayHashMapUnmanaged(Variables) = .empty;
 
             var current_section_name_maybe: ?[]const u8 = null;
-            var current_variables = Variables.init(arena.allocator());
+            var current_variables = Variables.empty;
 
             switch (repo_kind) {
                 .git => {
@@ -122,11 +126,11 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         }
                     };
 
-                    var config_file = try state.core.repo_dir.createFile("config", .{ .read = true, .truncate = false });
-                    defer config_file.close();
+                    var config_file = try state.core.repo_dir.createFile(io, "config", .{ .read = true, .truncate = false });
+                    defer config_file.close(io);
 
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = config_file.reader(&reader_buffer);
+                    var reader = config_file.reader(io, &reader_buffer);
 
                     // for each line...
                     while (reader.interface.peekByte()) |_| {
@@ -144,10 +148,10 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         var iter = text.iterator();
                         var next_cursor: usize = 0;
 
-                        var token_kinds = std.ArrayList(CharKind){};
+                        var token_kinds: std.ArrayList(CharKind) = .empty;
                         defer token_kinds.deinit(allocator);
 
-                        var token_ranges = std.ArrayList(struct { start: usize, end: usize }){};
+                        var token_ranges: std.ArrayList(struct { start: usize, end: usize }) = .empty;
                         defer token_ranges.deinit(allocator);
 
                         var current_token_maybe: ?struct { kind: CharKind, start: usize } = null;
@@ -208,7 +212,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         }
 
                         // get all the tokens from the line using the ranges
-                        var tokens = std.ArrayList([]const u8){};
+                        var tokens: std.ArrayList([]const u8) = .empty;
                         for (token_ranges.items) |range| {
                             try tokens.append(arena.allocator(), try arena.allocator().dupe(u8, line[range.start..range.end]));
                         }
@@ -219,13 +223,13 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                             .empty => {},
                             .section_header => |section_header| {
                                 if (current_section_name_maybe) |current_section_name| {
-                                    try sections.put(current_section_name, current_variables);
-                                    current_variables = Variables.init(arena.allocator());
+                                    try sections.put(arena.allocator(), current_section_name, current_variables);
+                                    current_variables = Variables.empty;
                                 }
                                 current_section_name_maybe = section_header;
                             },
                             .variable => |variable| {
-                                try current_variables.put(variable.name, variable.value);
+                                try current_variables.put(arena.allocator(), variable.name, variable.value);
                             },
                             .invalid => return error.InvalidLine,
                         }
@@ -236,7 +240,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
                     // add the last section if necessary
                     if (current_section_name_maybe) |current_section_name| {
-                        try sections.put(current_section_name, current_variables);
+                        try sections.put(arena.allocator(), current_section_name, current_variables);
                     }
                 },
                 .xit => {
@@ -246,17 +250,17 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                             const section_kv_pair = try section_cursor.readKeyValuePair();
                             const section_name = try section_kv_pair.key_cursor.readBytesAlloc(arena.allocator(), repo_opts.max_read_size);
 
-                            var variables = Variables.init(arena.allocator());
+                            var variables = Variables.empty;
 
                             var var_iter = try section_kv_pair.value_cursor.iterator();
                             while (try var_iter.next()) |*var_cursor| {
                                 const var_kv_pair = try var_cursor.readKeyValuePair();
                                 const var_name = try var_kv_pair.key_cursor.readBytesAlloc(arena.allocator(), repo_opts.max_read_size);
                                 const var_value = try var_kv_pair.value_cursor.readBytesAlloc(arena.allocator(), repo_opts.max_read_size);
-                                try variables.put(var_name, var_value);
+                                try variables.put(arena.allocator(), var_name, var_value);
                             }
 
-                            try sections.put(section_name, variables);
+                            try sections.put(arena.allocator(), section_name, variables);
                         }
                     }
                 },
@@ -274,7 +278,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             self.allocator.destroy(self.arena);
         }
 
-        pub fn add(self: *Config(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_write), input: AddConfigInput) !void {
+        pub fn add(
+            self: *Config(repo_kind, repo_opts),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
+            input: AddConfigInput,
+        ) !void {
             const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             // extract the parts of the config name
@@ -308,15 +317,15 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             const var_value = try self.arena.allocator().dupe(u8, input.value);
 
             if (self.sections.getPtr(section_name)) |variables| {
-                try variables.put(var_name, var_value);
+                try variables.put(self.arena.allocator(), var_name, var_value);
             } else {
-                var variables = Variables.init(self.arena.allocator());
-                try variables.put(var_name, var_value);
-                try self.sections.put(section_name, variables);
+                var variables = Variables.empty;
+                try variables.put(self.arena.allocator(), var_name, var_value);
+                try self.sections.put(self.arena.allocator(), section_name, variables);
             }
 
             switch (repo_kind) {
-                .git => try self.write(state),
+                .git => try self.write(state, io),
                 .xit => {
                     const config_name_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config-name-set"));
                     const config_name_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(config_name_set_cursor);
@@ -347,7 +356,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        pub fn remove(self: *Config(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_write), input: RemoveConfigInput) !void {
+        pub fn remove(
+            self: *Config(repo_kind, repo_opts),
+            state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+            io: std.Io,
+            input: RemoveConfigInput,
+        ) !void {
             const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             const section_name = try self.arena.allocator().dupe(u8, input.name[0..last_dot_index]);
@@ -362,7 +376,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
 
             switch (repo_kind) {
-                .git => try self.write(state),
+                .git => try self.write(state, io),
                 .xit => {
                     const config_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config"));
                     const config = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(config_cursor);
@@ -377,10 +391,10 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        fn write(self: *Config(.git, repo_opts), state: rp.Repo(.git, repo_opts).State(.read_write)) !void {
+        fn write(self: *Config(.git, repo_opts), state: rp.Repo(.git, repo_opts).State(.read_write), io: std.Io) !void {
             const lock_file = state.extra.lock_file_maybe orelse return error.NoLockFile;
-            try lock_file.seekTo(0);
-            try lock_file.setEndPos(0); // truncate file in case this method is called multiple times
+            try io.vtable.fileSeekTo(io.userdata, lock_file, 0);
+            try lock_file.setLength(io, 0); // truncate file in case this method is called multiple times
 
             for (self.sections.keys(), self.sections.values()) |section_name, variables| {
                 // if the section name has periods, put everything after the first period in quotes
@@ -390,12 +404,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     break :blk try std.fmt.allocPrint(self.allocator, "[{s} \"{s}\"]\n", .{ section_name[0..index], subsection_name });
                 } else try std.fmt.allocPrint(self.allocator, "[{s}]\n", .{section_name});
                 defer self.allocator.free(section_line);
-                try lock_file.writeAll(section_line);
+                try lock_file.writeStreamingAll(io, section_line);
 
                 for (variables.keys(), variables.values()) |name, value| {
                     const var_line = try std.fmt.allocPrint(self.allocator, "\t{s} = {s}\n", .{ name, value });
                     defer self.allocator.free(var_line);
-                    try lock_file.writeAll(var_line);
+                    try lock_file.writeStreamingAll(io, var_line);
                 }
             }
         }
@@ -421,7 +435,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         }
 
         fn escapeStr(allocator: std.mem.Allocator, str: []const u8) ![]u8 {
-            var arr = std.ArrayList(u8){};
+            var arr: std.ArrayList(u8) = .empty;
             errdefer arr.deinit(allocator);
             for (str) |ch| {
                 if (escapeChar(ch)) |esc_ch| {
@@ -435,7 +449,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         }
 
         fn unescapeStr(allocator: std.mem.Allocator, str: []const u8) ![]u8 {
-            var arr = std.ArrayList(u8){};
+            var arr: std.ArrayList(u8) = .empty;
             errdefer arr.deinit(allocator);
             var i: usize = 0;
             while (i < str.len) {
@@ -457,9 +471,9 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 pub const RemoteConfig = struct {
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
-    sections: std.StringArrayHashMap(Variables),
+    sections: std.StringArrayHashMapUnmanaged(Variables),
 
-    const Variables = std.StringArrayHashMap([]const u8);
+    const Variables = std.StringArrayHashMapUnmanaged([]const u8);
 
     pub fn init(
         comptime repo_kind: rp.RepoKind,
@@ -474,7 +488,7 @@ pub const RemoteConfig = struct {
             allocator.destroy(arena);
         }
 
-        var sections = std.StringArrayHashMap(Variables).init(arena.allocator());
+        var sections: std.StringArrayHashMapUnmanaged(Variables) = .empty;
 
         const prefix = "remote.";
 
@@ -482,14 +496,14 @@ pub const RemoteConfig = struct {
             if (std.mem.startsWith(u8, section_name, prefix)) {
                 const remote_name = try arena.allocator().dupe(u8, section_name[prefix.len..]);
 
-                var remote_variables = Variables.init(arena.allocator());
+                var remote_variables = Variables.empty;
                 for (variables.keys(), variables.values()) |key, val| {
                     const remote_key = try arena.allocator().dupe(u8, key);
                     const remote_val = try arena.allocator().dupe(u8, val);
-                    try remote_variables.put(remote_key, remote_val);
+                    try remote_variables.put(arena.allocator(), remote_key, remote_val);
                 }
 
-                try sections.put(remote_name, remote_variables);
+                try sections.put(arena.allocator(), remote_name, remote_variables);
             }
         }
 

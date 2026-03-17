@@ -27,7 +27,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 arena.* = std.heap.ArenaAllocator.init(allocator);
 
                 // init txes
-                const txes = std.ArrayList(?[]const u8){};
+                const txes: std.ArrayList(?[]const u8) = .empty;
 
                 var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
                 errdefer inner_box.deinit();
@@ -192,7 +192,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 var text_box = try wgt.TextBox(Widget).init(self.allocator, msg, .hidden, .none);
                 errdefer text_box.deinit();
                 text_box.getFocus().focusable = true;
-                try inner_box.children.put(text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
         }
     };
@@ -212,14 +212,14 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             {
                 var undo_list = try UndoList(Widget, repo_kind, repo_opts).init(allocator, repo);
                 errdefer undo_list.deinit();
-                try box.children.put(undo_list.getFocus().id, .{ .widget = .{ .ui_undo_list = undo_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
+                try box.children.put(allocator, undo_list.getFocus().id, .{ .widget = .{ .ui_undo_list = undo_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
             }
 
             // add empty box
             {
                 var empty_box = try wgt.Box(Widget).init(allocator, null, .horiz);
                 errdefer empty_box.deinit();
-                try box.children.put(empty_box.getFocus().id, .{ .widget = .{ .box = empty_box }, .rect = null, .min_size = .{ .width = 60, .height = null } });
+                try box.children.put(allocator, empty_box.getFocus().id, .{ .widget = .{ .box = empty_box }, .rect = null, .min_size = .{ .width = 60, .height = null } });
             }
 
             var undo = Undo(Widget, repo_kind, repo_opts){

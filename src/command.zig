@@ -414,8 +414,8 @@ pub const CommandArgs = struct {
     command_kind: ?CommandKind,
     command_name: ?[]const u8,
     positional_args: []const []const u8,
-    map_args: std.StringArrayHashMap(?[]const u8),
-    unused_args: std.StringArrayHashMap(void),
+    map_args: std.StringArrayHashMapUnmanaged(?[]const u8),
+    unused_args: std.StringArrayHashMapUnmanaged(void),
 
     // flags that can have a value associated with them
     // must be included here
@@ -431,14 +431,14 @@ pub const CommandArgs = struct {
             allocator.destroy(arena);
         }
 
-        var positional_args = std.ArrayList([]const u8){};
-        var map_args = std.StringArrayHashMap(?[]const u8).init(arena.allocator());
-        var unused_args = std.StringArrayHashMap(void).init(arena.allocator());
+        var positional_args: std.ArrayList([]const u8) = .empty;
+        var map_args: std.StringArrayHashMapUnmanaged(?[]const u8) = .empty;
+        var unused_args: std.StringArrayHashMapUnmanaged(void) = .empty;
 
         for (args) |arg| {
             if (arg.len > 1 and arg[0] == '-') {
-                try map_args.put(arg, null);
-                try unused_args.put(arg, {});
+                try map_args.put(arena.allocator(), arg, null);
+                try unused_args.put(arena.allocator(), arg, {});
             } else {
                 // if the last key is a value flag and doesn't have a value yet,
                 // set this arg as its value
@@ -447,7 +447,7 @@ pub const CommandArgs = struct {
                     const last_key = keys[keys.len - 1];
                     if (map_args.get(last_key)) |last_val| {
                         if (value_flags.has(last_key) and last_val == null) {
-                            try map_args.put(last_key, arg);
+                            try map_args.put(arena.allocator(), last_key, arg);
                             continue;
                         }
                     }
@@ -657,7 +657,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         }
                         cmd = .{ .remove = .{ .name = cmd_args.positional_args[1] } };
                     } else {
-                        try cmd_args.unused_args.put(cmd_name, {});
+                        try cmd_args.unused_args.put(cmd_args.arena.allocator(), cmd_name, {});
                         return null;
                     }
 
@@ -696,7 +696,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         }
                         cmd = .{ .remove = .{ .name = cmd_args.positional_args[1] } };
                     } else {
-                        try cmd_args.unused_args.put(cmd_name, {});
+                        try cmd_args.unused_args.put(cmd_args.arena.allocator(), cmd_name, {});
                         return null;
                     }
 
@@ -748,7 +748,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                     return .{ .restore = .{ .path = cmd_args.positional_args[0] } };
                 },
                 .log => {
-                    var source = std.ArrayList(rf.RefOrOid(hash_kind)){};
+                    var source: std.ArrayList(rf.RefOrOid(hash_kind)) = .empty;
                     for (cmd_args.positional_args) |arg| {
                         const ref_or_oid = rf.RefOrOid(hash_kind).initFromUser(arg) orelse return error.InvalidRefOrOid;
                         try source.append(cmd_args.arena.allocator(), ref_or_oid);
@@ -772,7 +772,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         } };
                     } else {
                         if (cmd_args.positional_args.len == 0) return null;
-                        var source = std.ArrayList(rf.RefOrOid(hash_kind)){};
+                        var source: std.ArrayList(rf.RefOrOid(hash_kind)) = .empty;
                         for (cmd_args.positional_args) |arg| {
                             try source.append(cmd_args.arena.allocator(), rf.RefOrOid(hash_kind).initFromUser(arg) orelse return error.InvalidRefOrOid);
                         }
@@ -817,7 +817,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                             .name = cmd_args.positional_args[1],
                         } };
                     } else {
-                        try cmd_args.unused_args.put(cmd_name, {});
+                        try cmd_args.unused_args.put(cmd_args.arena.allocator(), cmd_name, {});
                         return null;
                     }
 

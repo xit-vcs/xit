@@ -29,7 +29,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             var outer_box = try wgt.Box(Widget).init(allocator, .single, .vert);
             errdefer outer_box.deinit();
-            try outer_box.children.put(scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
+            try outer_box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
 
             return .{
                 .box = outer_box,
@@ -38,7 +38,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 .iter_arena = std.heap.ArenaAllocator.init(allocator),
                 .file_iter = null,
                 .hunk_iter = null,
-                .bufs = std.ArrayList([]const u8){},
+                .bufs = .empty,
             };
         }
 
@@ -203,7 +203,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             for (self.box.children.values()[0].widget.scroll.child.box.children.values()) |*child| {
                 child.widget.deinit();
             }
-            self.box.children.values()[0].widget.scroll.child.box.children.clearAndFree();
+            self.box.children.values()[0].widget.scroll.child.box.children.clearAndFree(self.allocator);
 
             // reset scroll position
             const widget = &self.box.children.values()[0].widget;
@@ -233,7 +233,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             // add new diff widget
             var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .hidden, .none);
             errdefer text_box.deinit();
-            try self.box.children.values()[0].widget.scroll.child.box.children.put(text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         pub fn addHunk(
@@ -286,7 +286,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             // add new diff widget
             var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .hidden, .none);
             errdefer text_box.deinit();
-            try self.box.children.values()[0].widget.scroll.child.box.children.put(text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         pub fn getScrollX(self: Diff(Widget, repo_kind, repo_opts)) isize {

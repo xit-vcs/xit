@@ -44,8 +44,8 @@ pub fn StatusListItem(comptime Widget: type) type {
 
             var box = try wgt.Box(Widget).init(allocator, null, .horiz);
             errdefer box.deinit();
-            try box.children.put(status_text.getFocus().id, .{ .widget = .{ .text_box = status_text }, .rect = null, .min_size = null });
-            try box.children.put(path_text.getFocus().id, .{ .widget = .{ .text_box = path_text }, .rect = null, .min_size = null });
+            try box.children.put(allocator, status_text.getFocus().id, .{ .widget = .{ .text_box = status_text }, .rect = null, .min_size = null });
+            try box.children.put(allocator, path_text.getFocus().id, .{ .widget = .{ .text_box = path_text }, .rect = null, .min_size = null });
 
             return .{
                 .box = box,
@@ -98,7 +98,7 @@ pub fn StatusList(comptime Widget: type) type {
                 var list_item = try StatusListItem(Widget).init(allocator, item);
                 errdefer list_item.deinit();
                 list_item.getFocus().focusable = true;
-                try inner_box.children.put(list_item.getFocus().id, .{ .widget = .{ .ui_status_list_item = list_item }, .rect = null, .min_size = null });
+                try inner_box.children.put(allocator, list_item.getFocus().id, .{ .widget = .{ .ui_status_list_item = list_item }, .rect = null, .min_size = null });
             }
 
             // init scroll
@@ -250,7 +250,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 var text_box = try wgt.TextBox(Widget).init(allocator, label, .single, .none);
                 errdefer text_box.deinit();
                 text_box.getFocus().focusable = true;
-                try box.children.put(text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
 
             var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){
@@ -334,12 +334,13 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         filtered_statuses: std.ArrayList(StatusItem),
         repo: *rp.Repo(repo_kind, repo_opts),
         status: *work.Status(repo_kind, repo_opts),
+        io: std.Io,
         allocator: std.mem.Allocator,
 
         const FocusKind = enum { status_list, diff };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), status: *work.Status(repo_kind, repo_opts), selected: work.IndexStatusKind) !StatusContent(Widget, repo_kind, repo_opts) {
-            var filtered_statuses = std.ArrayList(StatusItem){};
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), status: *work.Status(repo_kind, repo_opts), selected: work.IndexStatusKind) !StatusContent(Widget, repo_kind, repo_opts) {
+            var filtered_statuses: std.ArrayList(StatusItem) = .empty;
             errdefer filtered_statuses.deinit(allocator);
 
             switch (selected) {
@@ -384,13 +385,13 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     .status_list => {
                         var status_list = try StatusList(Widget).init(allocator, filtered_statuses.items);
                         errdefer status_list.deinit();
-                        try box.children.put(status_list.getFocus().id, .{ .widget = .{ .ui_status_list = status_list }, .rect = null, .min_size = .{ .width = 20, .height = null } });
+                        try box.children.put(allocator, status_list.getFocus().id, .{ .widget = .{ .ui_status_list = status_list }, .rect = null, .min_size = .{ .width = 20, .height = null } });
                     },
                     .diff => {
                         var diff = try ui_diff.Diff(Widget, repo_kind, repo_opts).init(allocator, repo);
                         errdefer diff.deinit();
                         diff.getFocus().focusable = true;
-                        try box.children.put(diff.getFocus().id, .{ .widget = .{ .ui_diff = diff }, .rect = null, .min_size = .{ .width = 60, .height = null } });
+                        try box.children.put(allocator, diff.getFocus().id, .{ .widget = .{ .ui_diff = diff }, .rect = null, .min_size = .{ .width = 60, .height = null } });
                     },
                 }
             }
@@ -400,6 +401,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 .filtered_statuses = filtered_statuses,
                 .repo = repo,
                 .status = status,
+                .io = io,
                 .allocator = allocator,
             };
             status_content.getFocus().child_id = box.children.keys()[0];
@@ -514,7 +516,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 var diff = &self.box.children.values()[1].widget.ui_diff;
                 try diff.clearDiffs();
 
-                const line_iter_pair = self.repo.filePair(diff.iter_arena.allocator(), status_item.path, status_item.kind, self.status) catch |err| switch (err) {
+                const line_iter_pair = self.repo.filePair(self.io, diff.iter_arena.allocator(), status_item.path, status_item.kind, self.status) catch |err| switch (err) {
                     error.IsDir => return,
                     else => |e| return e,
                 };
@@ -539,8 +541,8 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
         const FocusKind = enum { status_tabs, status_content };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Status(Widget, repo_kind, repo_opts) {
-            var status = try repo.status(allocator);
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Status(Widget, repo_kind, repo_opts) {
+            var status = try repo.status(io, allocator);
             errdefer status.deinit(allocator);
 
             // put Status object on the heap so the pointer is stable
@@ -558,7 +560,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                     .status_tabs => {
                         var status_tabs = try StatusTabs(Widget, repo_kind, repo_opts).init(allocator, status_ptr);
                         errdefer status_tabs.deinit();
-                        try box.children.put(status_tabs.getFocus().id, .{ .widget = .{ .ui_status_tabs = status_tabs }, .rect = null, .min_size = null });
+                        try box.children.put(allocator, status_tabs.getFocus().id, .{ .widget = .{ .ui_status_tabs = status_tabs }, .rect = null, .min_size = null });
                     },
                     .status_content => {
                         var stack = wgt.Stack(Widget).init(allocator);
@@ -566,12 +568,12 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
                         inline for (@typeInfo(work.IndexStatusKind).@"enum".fields) |index_kind_field| {
                             const index_kind: work.IndexStatusKind = @enumFromInt(index_kind_field.value);
-                            var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(allocator, repo, status_ptr, index_kind);
+                            var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(io, allocator, repo, status_ptr, index_kind);
                             errdefer status_content.deinit();
-                            try stack.children.put(status_content.getFocus().id, .{ .ui_status_content = status_content });
+                            try stack.children.put(allocator, status_content.getFocus().id, .{ .ui_status_content = status_content });
                         }
 
-                        try box.children.put(stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
+                        try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
                     },
                 }
             }

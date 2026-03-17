@@ -33,7 +33,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                 var text_box = try wgt.TextBox(Widget).init(allocator, name, .single, .none);
                 errdefer text_box.deinit();
                 text_box.getFocus().focusable = true;
-                try box.children.put(text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
 
             var ui_root_tabs = RootTabs(Widget, repo_kind){
@@ -116,7 +116,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         const FocusKind = enum { tabs, stack };
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, null, .vert);
             errdefer box.deinit();
 
@@ -126,37 +126,37 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     .tabs => {
                         var ui_root_tabs = try RootTabs(Widget, repo_kind).init(allocator);
                         errdefer ui_root_tabs.deinit();
-                        try box.children.put(ui_root_tabs.getFocus().id, .{ .widget = .{ .ui_root_tabs = ui_root_tabs }, .rect = null, .min_size = null });
+                        try box.children.put(allocator, ui_root_tabs.getFocus().id, .{ .widget = .{ .ui_root_tabs = ui_root_tabs }, .rect = null, .min_size = null });
                     },
                     .stack => {
                         var stack = wgt.Stack(Widget).init(allocator);
                         errdefer stack.deinit();
 
                         {
-                            var log = Widget{ .ui_log = try ui_log.Log(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var log = Widget{ .ui_log = try ui_log.Log(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer log.deinit();
-                            try stack.children.put(log.getFocus().id, log);
+                            try stack.children.put(allocator, log.getFocus().id, log);
                         }
 
                         {
-                            var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer status.deinit();
-                            try stack.children.put(status.getFocus().id, status);
+                            try stack.children.put(allocator, status.getFocus().id, status);
                         }
 
                         {
-                            var config = Widget{ .ui_config_list = try ui_config.ConfigList(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var config = Widget{ .ui_config_list = try ui_config.ConfigList(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer config.deinit();
-                            try stack.children.put(config.getFocus().id, config);
+                            try stack.children.put(allocator, config.getFocus().id, config);
                         }
 
                         if (repo_kind == .xit) {
                             var undo = Widget{ .ui_undo = try ui_undo.Undo(Widget, repo_kind, repo_opts).init(allocator, repo) };
                             errdefer undo.deinit();
-                            try stack.children.put(undo.getFocus().id, undo);
+                            try stack.children.put(allocator, undo.getFocus().id, undo);
                         }
 
-                        try box.children.put(stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
+                        try box.children.put(allocator, stack.getFocus().id, .{ .widget = .{ .stack = stack }, .rect = null, .min_size = null });
                     },
                 }
             }

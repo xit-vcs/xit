@@ -20,12 +20,12 @@ pub fn ConfigListItem(comptime Widget: type) type {
             var name_text_box = try wgt.TextBox(Widget).init(allocator, full_name, .single, .none);
             errdefer name_text_box.deinit();
             name_text_box.getFocus().focusable = true;
-            try box.children.put(name_text_box.getFocus().id, .{ .widget = .{ .text_box = name_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
+            try box.children.put(allocator, name_text_box.getFocus().id, .{ .widget = .{ .text_box = name_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
 
             var value_text_box = try wgt.TextBox(Widget).init(allocator, value, .single, .none);
             errdefer value_text_box.deinit();
             value_text_box.getFocus().focusable = true;
-            try box.children.put(value_text_box.getFocus().id, .{ .widget = .{ .text_box = value_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
+            try box.children.put(allocator, value_text_box.getFocus().id, .{ .widget = .{ .text_box = value_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
 
             var self = ConfigListItem(Widget){
                 .box = box,
@@ -99,8 +99,8 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
 
-        pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !ConfigList(Widget, repo_kind, repo_opts) {
-            var config = try repo.listConfig(allocator);
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !ConfigList(Widget, repo_kind, repo_opts) {
+            var config = try repo.listConfig(io, allocator);
             errdefer config.deinit();
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -118,7 +118,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 for (variables.keys(), variables.values()) |name, value| {
                     const full_name = try std.fmt.allocPrint(arena.allocator(), "{s}.{s}", .{ section_name, name });
                     var config_item = try ConfigListItem(Widget).init(allocator, full_name, value);
-                    try inner_box.children.put(config_item.getFocus().id, .{ .widget = .{ .ui_config_list_item = config_item }, .rect = null, .min_size = null });
+                    try inner_box.children.put(allocator, config_item.getFocus().id, .{ .widget = .{ .ui_config_list_item = config_item }, .rect = null, .min_size = null });
                 }
             }
 

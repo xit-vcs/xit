@@ -39,7 +39,7 @@ You're looking at xit, a new version control system. It's pronounced like "zit" 
   * contains a reuseable git implementation in pure Zig
   * [read more](docs/lib.md) about xit's internals and using xit as a library
 
-To get started, install zig 0.15.1. In this repo, run `zig build` and you'll find the binary at `zig-out/bin/xit`. The CLI is similar to git:
+To get started, install zig 0.16.0. In this repo, run `zig build` and you'll find the binary at `zig-out/bin/xit`. The CLI is similar to git:
 
 ```
 xit init test
@@ -62,7 +62,7 @@ xit switch master
 xit merge stuff
 ```
 
-The networking commands are a work in progress, but they're good enough to try out. Here's what a clone and push look like:
+There are also networking commands. You can clone, fetch, and push with git remotes over HTTP and SSH. Here's what a clone and push look like:
 
 ```
 xit clone https://github.com/xit-vcs/xitstarter myrepo
