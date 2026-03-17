@@ -27,7 +27,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 arena.* = std.heap.ArenaAllocator.init(allocator);
 
                 // init txes
-                const txes = std.ArrayList(?[]const u8){};
+                const txes: std.ArrayList(?[]const u8) = .empty;
 
                 var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
                 errdefer inner_box.deinit();

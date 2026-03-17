@@ -1,19 +1,13 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const CONNECT_TIMEOUT = 5000;
-
-const INVALID_SOCKET = if (.windows == builtin.os.tag)
-    std.os.windows.ws2_32.INVALID_SOCKET
-else
-    -1;
 
 pub const SocketStream = struct {
+    io: std.Io,
     host: []const u8,
     port: u16,
-    socket: std.posix.socket_t,
+    net_stream: ?std.Io.net.Stream,
 
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         host: []const u8,
         port: u16,
@@ -22,9 +16,10 @@ pub const SocketStream = struct {
         errdefer allocator.free(host_dupe);
 
         return .{
+            .io = io,
             .host = host_dupe,
             .port = port,
-            .socket = INVALID_SOCKET,
+            .net_stream = null,
         };
     }
 
@@ -33,9 +28,9 @@ pub const SocketStream = struct {
     }
 
     pub fn close(self: *SocketStream) !void {
-        if (self.socket != INVALID_SOCKET) {
-            std.posix.close(self.socket);
-            self.socket = INVALID_SOCKET;
+        if (self.net_stream) |*s| {
+            s.close(self.io);
+            self.net_stream = null;
         }
     }
 
@@ -44,7 +39,9 @@ pub const SocketStream = struct {
         data: [*c]u8,
         len: usize,
     ) !usize {
-        return try std.posix.recv(self.socket, data[0..len], 0);
+        const stream = self.net_stream orelse return error.SocketUnconnected;
+        var bufs: [1][]u8 = .{data[0..len]};
+        return try self.io.vtable.netRead(self.io.userdata, stream.socket.handle, &bufs);
     }
 
     pub fn write(
@@ -52,7 +49,9 @@ pub const SocketStream = struct {
         data: [*c]const u8,
         len: usize,
     ) !usize {
-        return try std.posix.send(self.socket, data[0..len], 0);
+        const stream = self.net_stream orelse return error.SocketUnconnected;
+        const dummy: [1][]const u8 = .{""};
+        return try self.io.vtable.netWrite(self.io.userdata, stream.socket.handle, data[0..len], &dummy, 0);
     }
 
     pub fn writeAll(
@@ -67,120 +66,27 @@ pub const SocketStream = struct {
         }
     }
 
-    pub fn connect(self: *SocketStream, allocator: std.mem.Allocator) !void {
-        var addr_list = try std.net.getAddressList(allocator, self.host, self.port);
-        defer addr_list.deinit();
+    pub fn connect(self: *SocketStream) !void {
+        var canonical_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+        var results_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+        var results: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&results_buffer);
 
-        var s: std.posix.socket_t = undefined;
-        for (addr_list.addrs) |addr| {
-            s = std.posix.socket(addr.any.family, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP) catch continue;
+        try std.Io.net.HostName.lookup(try .init(self.host), self.io, &results, .{
+            .port = self.port,
+            .canonical_name_buffer = &canonical_name_buffer,
+        });
 
-            if (INVALID_SOCKET != s) {
-                try connectWithTimeout(s, addr, CONNECT_TIMEOUT);
-                break;
-            }
-        }
+        var addr_v4: ?std.Io.net.IpAddress = null;
+        var addr_v6: ?std.Io.net.IpAddress = null;
+        while (results.getOne(self.io)) |result| switch (result) {
+            .address => |address| switch (address) {
+                .ip4 => addr_v4 = address,
+                .ip6 => addr_v6 = address,
+            },
+            .canonical_name => continue,
+        } else |_| {}
 
-        if (INVALID_SOCKET == s) {
-            return error.ConnectFailed;
-        }
-
-        self.socket = s;
+        const address = addr_v4 orelse addr_v6 orelse return error.AddressNotFound;
+        self.net_stream = try address.connect(self.io, .{ .mode = .stream });
     }
 };
-
-fn setBlocking(s: std.posix.socket_t, blocking: bool) !void {
-    if (.windows == builtin.os.tag) {
-        var nonblocking: u32 = if (blocking) 0 else 1;
-        if (std.os.windows.ws2_32.ioctlsocket(s, std.os.windows.ws2_32.FIONBIO, &nonblocking) != 0) {
-            return error.SocketError;
-        }
-    } else {
-        var flags = try std.posix.fcntl(s, std.posix.F.GETFL, 0);
-
-        if (flags == -1) {
-            return error.SocketError;
-        }
-
-        if (blocking) {
-            flags &= ~@as(usize, std.os.linux.SOCK.NONBLOCK);
-        } else {
-            flags |= std.os.linux.SOCK.NONBLOCK;
-        }
-
-        _ = try std.posix.fcntl(s, std.posix.F.SETFL, flags);
-    }
-}
-
-fn waitWithTimeout(
-    socket: std.posix.socket_t,
-    timeout: c_int,
-    comptime event_kind: enum { in, out },
-) !void {
-    if (.windows == builtin.os.tag) {
-        const POLL = std.os.windows.ws2_32.POLL;
-        const event = switch (event_kind) {
-            .in => POLL.IN,
-            .out => POLL.OUT,
-        };
-
-        var fds = [_]std.os.windows.ws2_32.pollfd{.{
-            .fd = socket,
-            .events = event,
-            .revents = 0,
-        }};
-
-        const ret = std.os.windows.ws2_32.WSAPoll(&fds, fds.len, timeout);
-
-        if (ret <= 0) {
-            return error.SocketError;
-        } else if ((fds[0].revents & (POLL.PRI | POLL.HUP | POLL.ERR)) != 0) {
-            return error.SocketError;
-        } else if ((fds[0].revents & event) != event) {
-            return error.SocketError;
-        }
-    } else {
-        const POLL = std.os.linux.POLL;
-        const event = switch (event_kind) {
-            .in => POLL.IN,
-            .out => POLL.OUT,
-        };
-
-        var fds = [_]std.posix.pollfd{.{
-            .fd = socket,
-            .events = event,
-            .revents = 0,
-        }};
-
-        const ret = try std.posix.poll(&fds, timeout);
-
-        if (ret == 0) {
-            return error.SocketError;
-        } else if ((fds[0].revents & (POLL.PRI | POLL.HUP | POLL.ERR)) != 0) {
-            return error.SocketError;
-        } else if ((fds[0].revents & event) != event) {
-            return error.SocketError;
-        }
-    }
-}
-
-fn connectWithTimeout(
-    socket: std.posix.socket_t,
-    addr: std.net.Address,
-    timeout: c_int,
-) !void {
-    if (0 != timeout) {
-        try setBlocking(socket, false);
-    }
-
-    std.posix.connect(socket, &addr.any, addr.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
-        else => |e| return e,
-    };
-
-    if (0 != timeout) {
-        try waitWithTimeout(socket, timeout, .out);
-
-        try setBlocking(socket, true);
-    }
-}
