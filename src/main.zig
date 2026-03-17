@@ -22,14 +22,17 @@ const obj = @import("./object.zig");
 const tr = @import("./tree.zig");
 const rf = @import("./ref.zig");
 const net_refspec = @import("./net/refspec.zig");
+const server_common = @import("./net/server/common.zig");
+const server_http_backend = @import("./net/server/http_backend.zig");
 
-pub const Writers = struct {
+pub const RunOpts = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,
+    environ_map: *std.process.Environ.Map,
 };
 
 const ProgressCtx = struct {
-    writers: Writers,
+    run_opts: RunOpts,
     clear_line: *bool,
     node: *?std.Progress.Node,
 
@@ -58,9 +61,9 @@ const ProgressCtx = struct {
             },
             .text => |text| {
                 if (self.clear_line.*) {
-                    try self.writers.out.print("\x1B[F", .{});
+                    try self.run_opts.out.print("\x1B[F", .{});
                 }
-                try self.writers.out.print("{s}\n", .{text});
+                try self.run_opts.out.print("{s}\n", .{text});
                 self.clear_line.* = true;
             },
         }
@@ -78,7 +81,7 @@ pub fn run(
     allocator: std.mem.Allocator,
     args: []const []const u8,
     cwd_path: []const u8,
-    writers: Writers,
+    run_opts: RunOpts,
 ) !void {
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
@@ -86,17 +89,17 @@ pub fn run(
     switch (try cmd.CommandDispatch(repo_kind, any_repo_opts.toRepoOpts().hash).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
-                try writers.err.print("\"{s}\" is not a valid command\n\n", .{command});
-                try cmd.printHelp(null, writers.err);
+                try run_opts.err.print("\"{s}\" is not a valid command\n\n", .{command});
+                try cmd.printHelp(null, run_opts.err);
                 return error.HandledError;
             },
             .argument => |argument| {
-                try writers.err.print("\"{s}\" is not a valid argument\n\n", .{argument.value});
-                try cmd.printHelp(argument.command, writers.err);
+                try run_opts.err.print("\"{s}\" is not a valid argument\n\n", .{argument.value});
+                try cmd.printHelp(argument.command, run_opts.err);
                 return error.HandledError;
             },
         },
-        .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, writers.out),
+        .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .tui => |cmd_kind_maybe| if (any_repo_opts.hash) |hash_kind| {
             var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path });
             defer repo.deinit(io, allocator);
@@ -121,7 +124,7 @@ pub fn run(
                 var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path });
                 defer repo.deinit(io, allocator);
 
-                try writers.out.print(
+                try run_opts.out.print(
                     \\congrats, you just created a new repo! aren't you special.
                     \\try setting your name and email like this:
                     \\
@@ -141,31 +144,48 @@ pub fn run(
                     clone_cmd.url,
                     cwd_path,
                     work_path,
-                    .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node } },
+                    .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } },
                 );
                 defer repo.deinit(io, allocator);
 
                 if (repo_kind == .xit) {
-                    try writers.out.print(
+                    try run_opts.out.print(
                         \\
                         \\clone complete!
                         \\
                     , .{});
                 }
             },
-            else => if (any_repo_opts.hash) |hash_kind| {
-                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path });
-                defer repo.deinit(io, allocator);
-                try runCommand(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cli_cmd, writers);
-            } else {
-                // if no hash was specified, use AnyRepo to detect the hash being used
-                var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = cwd_path });
-                defer any_repo.deinit(io, allocator);
-                switch (any_repo) {
-                    inline else => |*repo| {
-                        const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash).initMaybe(&cmd_args);
-                        try runCommand(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_maybe orelse return error.InvalidCommand, writers);
+            else => {
+                // some commands allow the path to be specified. for all others, just use the cwd path.
+                const work_path_maybe = switch (cli_cmd) {
+                    .upload_pack => |upload_pack| try std.fs.path.resolve(allocator, &.{ cwd_path, upload_pack.dir }),
+                    .receive_pack => |receive_pack| try std.fs.path.resolve(allocator, &.{ cwd_path, receive_pack.dir }),
+                    .http_backend => server_http_backend.resolveDir(allocator, cwd_path, run_opts.environ_map) catch {
+                        var http_stdout_buf: [any_repo_opts.buffer_size]u8 = undefined;
+                        var http_stdout_writer = std.Io.File.stdout().writer(io, &http_stdout_buf);
+                        try server_http_backend.sendNotFound(&http_stdout_writer.interface);
+                        return;
                     },
+                    else => null,
+                };
+                defer if (work_path_maybe) |work_path| allocator.free(work_path);
+                const work_path = work_path_maybe orelse cwd_path;
+
+                if (any_repo_opts.hash) |hash_kind| {
+                    var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = work_path });
+                    defer repo.deinit(io, allocator);
+                    try runCommand(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cli_cmd, run_opts);
+                } else {
+                    // if no hash was specified, use AnyRepo to detect the hash being used
+                    var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = work_path });
+                    defer any_repo.deinit(io, allocator);
+                    switch (any_repo) {
+                        inline else => |*repo| {
+                            const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash).initMaybe(&cmd_args);
+                            try runCommand(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_maybe orelse return error.InvalidCommand, run_opts);
+                        },
+                    }
                 }
             },
         },
@@ -180,21 +200,21 @@ pub fn runPrint(
     allocator: std.mem.Allocator,
     args: []const []const u8,
     cwd_path: []const u8,
-    writers: Writers,
+    run_opts: RunOpts,
 ) !void {
-    run(repo_kind, any_repo_opts, io, allocator, args, cwd_path, writers) catch |err| switch (err) {
+    run(repo_kind, any_repo_opts, io, allocator, args, cwd_path, run_opts) catch |err| switch (err) {
         error.RepoNotFound => {
-            try writers.err.print(
+            try run_opts.err.print(
                 \\repo not found, dummy.
                 \\either you're in the wrong place or you need to make a new one like this:
                 \\
                 \\
             , .{});
-            try cmd.printHelp(.init, writers.err);
+            try cmd.printHelp(.init, run_opts.err);
             return error.HandledError;
         },
         error.RepoAlreadyExists => {
-            try writers.err.print(
+            try run_opts.err.print(
                 \\repo already exists, dummy.
                 \\two repos in the same directory makes no sense.
                 \\think about it.
@@ -203,35 +223,35 @@ pub fn runPrint(
             return error.HandledError;
         },
         error.CannotRemoveFileWithStagedAndUnstagedChanges, error.CannotRemoveFileWithStagedChanges, error.CannotRemoveFileWithUnstagedChanges => {
-            try writers.err.print("a file has uncommitted changes. if you really want to do it, throw caution into the wind by adding the -f flag.\n", .{});
+            try run_opts.err.print("a file has uncommitted changes. if you really want to do it, throw caution into the wind by adding the -f flag.\n", .{});
             return error.HandledError;
         },
         error.EmptyCommit => {
-            try writers.err.print("you haven't added anything to commit yet. if you really want to commit anyway, add the --allow-empty flag and no one will judge you.\n", .{});
+            try run_opts.err.print("you haven't added anything to commit yet. if you really want to commit anyway, add the --allow-empty flag and no one will judge you.\n", .{});
             return error.HandledError;
         },
         error.AddIndexPathNotFound => {
-            try writers.err.print("a path you are adding does not exist\n", .{});
+            try run_opts.err.print("a path you are adding does not exist\n", .{});
             return error.HandledError;
         },
         error.RemoveIndexPathNotFound => {
-            try writers.err.print("a path you are removing does not exist\n", .{});
+            try run_opts.err.print("a path you are removing does not exist\n", .{});
             return error.HandledError;
         },
         error.RecursiveOptionRequired => {
-            try writers.err.print("to do this on a dir, add the -r flag\n", .{});
+            try run_opts.err.print("to do this on a dir, add the -r flag\n", .{});
             return error.HandledError;
         },
         error.RefNotFound => {
-            try writers.err.print("ref does not exist\n", .{});
+            try run_opts.err.print("ref does not exist\n", .{});
             return error.HandledError;
         },
         error.BranchAlreadyExists => {
-            try writers.err.print("branch already exists\n", .{});
+            try run_opts.err.print("branch already exists\n", .{});
             return error.HandledError;
         },
         error.UserConfigNotFound => {
-            try writers.err.print(
+            try run_opts.err.print(
                 \\you need to set your name and email, mystery man. you can do it like this:
                 \\
                 \\    xit config add user.name foo
@@ -241,31 +261,31 @@ pub fn runPrint(
             return error.HandledError;
         },
         error.SubmodulesNotSupported => {
-            try writers.err.print("repos with submodules aren't supported right now, sowwy\n", .{});
+            try run_opts.err.print("repos with submodules aren't supported right now, sowwy\n", .{});
             return error.HandledError;
         },
         error.InvalidMergeSource => {
-            try writers.err.print("your merge source doesn't look right and you should feel bad\n", .{});
+            try run_opts.err.print("your merge source doesn't look right and you should feel bad\n", .{});
             return error.HandledError;
         },
         error.InvalidSwitchTarget => {
-            try writers.err.print("your switch target doesn't look right and you should feel bad\n", .{});
+            try run_opts.err.print("your switch target doesn't look right and you should feel bad\n", .{});
             return error.HandledError;
         },
         error.UnfinishedMergeInProgress => {
-            try writers.err.print("there is an unfinished merge in progress! use `--continue` or `--abort` to finish it.\n", .{});
+            try run_opts.err.print("there is an unfinished merge in progress! use `--continue` or `--abort` to finish it.\n", .{});
             return error.HandledError;
         },
         error.OtherMergeInProgress => {
-            try writers.err.print("there's another merge already in progress! use `--continue` or `--abort` to finish it.\n", .{});
+            try run_opts.err.print("there's another merge already in progress! use `--continue` or `--abort` to finish it.\n", .{});
             return error.HandledError;
         },
         error.CannotContinueMergeWithUnresolvedConflicts => {
-            try writers.err.print("you haven't resolved all the conflicts! after fixing, run `xit add` on them.\n", .{});
+            try run_opts.err.print("you haven't resolved all the conflicts! after fixing, run `xit add` on them.\n", .{});
             return error.HandledError;
         },
         error.RemoteRefContainsCommitsNotFoundLocally => {
-            try writers.err.print(
+            try run_opts.err.print(
                 \\a ref you are pushing to contains commits you don't have locally.
                 \\you either need to retrieve them with `xit fetch` and then `xit merge`,
                 \\or if you want to obliterate them like a badass, run this command with `-f`.
@@ -274,7 +294,7 @@ pub fn runPrint(
             return error.HandledError;
         },
         error.RemoteRefContainsIncompatibleHistory => {
-            try writers.err.print(
+            try run_opts.err.print(
                 \\a ref you are pushing to has commits with an incompatible history.
                 \\if you want to obliterate them like a badass, run this command with `-f`.
                 \\
@@ -294,7 +314,7 @@ fn runCommand(
     io: std.Io,
     allocator: std.mem.Allocator,
     command: cmd.Command(repo_kind, repo_opts.hash),
-    writers: Writers,
+    run_opts: RunOpts,
 ) !void {
     switch (command) {
         .init => {},
@@ -309,7 +329,7 @@ fn runCommand(
                 defer ref_iter.deinit(io);
 
                 while (try ref_iter.next(io)) |ref| {
-                    try writers.out.print("{s}\n", .{ref.name});
+                    try run_opts.out.print("{s}\n", .{ref.name});
                 }
             },
             .add => |add_tag| _ = try repo.addTag(io, allocator, add_tag),
@@ -318,48 +338,48 @@ fn runCommand(
         .status => {
             var head_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
             switch (try repo.head(io, &head_buffer)) {
-                .ref => |ref| try writers.out.print("on branch {s}\n\n", .{ref.name}),
-                .oid => |oid| try writers.out.print("HEAD detached at {s}\n\n", .{oid}),
+                .ref => |ref| try run_opts.out.print("on branch {s}\n\n", .{ref.name}),
+                .oid => |oid| try run_opts.out.print("HEAD detached at {s}\n\n", .{oid}),
             }
 
             var stat = try repo.status(io, allocator);
             defer stat.deinit(allocator);
 
             for (stat.untracked.values()) |entry| {
-                try writers.out.print("?? {s}\n", .{entry.path});
+                try run_opts.out.print("?? {s}\n", .{entry.path});
             }
 
             for (stat.work_dir_modified.values()) |entry| {
-                try writers.out.print(" M {s}\n", .{entry.path});
+                try run_opts.out.print(" M {s}\n", .{entry.path});
             }
 
             for (stat.work_dir_deleted.keys()) |path| {
-                try writers.out.print(" D {s}\n", .{path});
+                try run_opts.out.print(" D {s}\n", .{path});
             }
 
             for (stat.index_added.keys()) |path| {
-                try writers.out.print("A  {s}\n", .{path});
+                try run_opts.out.print("A  {s}\n", .{path});
             }
 
             for (stat.index_modified.keys()) |path| {
-                try writers.out.print("M  {s}\n", .{path});
+                try run_opts.out.print("M  {s}\n", .{path});
             }
 
             for (stat.index_deleted.keys()) |path| {
-                try writers.out.print("D  {s}\n", .{path});
+                try run_opts.out.print("D  {s}\n", .{path});
             }
 
             for (stat.unresolved_conflicts.keys(), stat.unresolved_conflicts.values()) |path, conflict| {
                 if (conflict.base) {
                     if (conflict.target) {
                         if (conflict.source) {
-                            try writers.out.print("UU {s}\n", .{path}); // both modified
+                            try run_opts.out.print("UU {s}\n", .{path}); // both modified
                         } else {
-                            try writers.out.print("UD {s}\n", .{path}); // deleted by them
+                            try run_opts.out.print("UD {s}\n", .{path}); // deleted by them
                         }
                     } else {
                         if (conflict.source) {
-                            try writers.out.print("DU {s}\n", .{path}); // deleted by us
+                            try run_opts.out.print("DU {s}\n", .{path}); // deleted by us
                         } else {
                             return error.InvalidConflict;
                         }
@@ -367,13 +387,13 @@ fn runCommand(
                 } else {
                     if (conflict.target) {
                         if (conflict.source) {
-                            try writers.out.print("AA {s}\n", .{path}); // both added
+                            try run_opts.out.print("AA {s}\n", .{path}); // both added
                         } else {
-                            try writers.out.print("AU {s}\n", .{path}); // added by us
+                            try run_opts.out.print("AU {s}\n", .{path}); // added by us
                         }
                     } else {
                         if (conflict.source) {
-                            try writers.out.print("UA {s}\n", .{path}); // added by them
+                            try run_opts.out.print("UA {s}\n", .{path}); // added by them
                         } else {
                             return error.InvalidConflict;
                         }
@@ -424,13 +444,13 @@ fn runCommand(
                 var hunk_iter = try df.HunkIterator(repo_kind, repo_opts).init(allocator, &line_iter_pair.a, &line_iter_pair.b);
                 defer hunk_iter.deinit(allocator);
                 for (hunk_iter.header_lines.items) |header_line| {
-                    try writers.out.print("{s}\n", .{header_line});
+                    try run_opts.out.print("{s}\n", .{header_line});
                 }
                 while (try hunk_iter.next(allocator)) |*hunk_ptr| {
                     var hunk = hunk_ptr.*;
                     defer hunk.deinit(allocator);
                     const offsets = hunk.offsets();
-                    try writers.out.print("@@ -{},{} +{},{} @@\n", .{
+                    try run_opts.out.print("@@ -{},{} +{},{} @@\n", .{
                         offsets.del_start,
                         offsets.del_count,
                         offsets.ins_start,
@@ -447,7 +467,7 @@ fn runCommand(
                             .ins => hunk_iter.line_iter_b.free(line),
                             .del => hunk_iter.line_iter_a.free(line),
                         };
-                        try writers.out.print("{s} {s}\n", .{
+                        try run_opts.out.print("{s} {s}\n", .{
                             switch (edit) {
                                 .eql => " ",
                                 .ins => "+",
@@ -473,7 +493,7 @@ fn runCommand(
 
                     while (try ref_iter.next(io)) |ref| {
                         const prefix = if (std.mem.eql(u8, current_branch_name, ref.name)) "*" else " ";
-                        try writers.out.print("{s} {s}\n", .{ prefix, ref.name });
+                        try run_opts.out.print("{s} {s}\n", .{ prefix, ref.name });
                     }
                 },
                 .add => |add_branch| try repo.addBranch(io, add_branch),
@@ -486,23 +506,23 @@ fn runCommand(
             switch (switch_result.result) {
                 .success => {},
                 .conflict => |conflict| {
-                    try writers.err.print(
+                    try run_opts.err.print(
                         \\conflicts detected in the following file paths:
                         \\
                     , .{});
                     for (conflict.stale_files.keys()) |path| {
-                        try writers.err.print("  {s}\n", .{path});
+                        try run_opts.err.print("  {s}\n", .{path});
                     }
                     for (conflict.stale_dirs.keys()) |path| {
-                        try writers.err.print("  {s}\n", .{path});
+                        try run_opts.err.print("  {s}\n", .{path});
                     }
                     for (conflict.untracked_overwritten.keys()) |path| {
-                        try writers.err.print("  {s}\n", .{path});
+                        try run_opts.err.print("  {s}\n", .{path});
                     }
                     for (conflict.untracked_removed.keys()) |path| {
-                        try writers.err.print("  {s}\n", .{path});
+                        try run_opts.err.print("  {s}\n", .{path});
                     }
-                    try writers.err.print("if you really want to continue, throw caution into the wind by adding the -f flag\n", .{});
+                    try run_opts.err.print("if you really want to continue, throw caution into the wind by adding the -f flag\n", .{});
                     return error.HandledError;
                 },
             }
@@ -519,7 +539,7 @@ fn runCommand(
                 };
                 const oid = oid_maybe orelse {
                     var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-                    try writers.err.print("invalid ref: {s}\n", .{switch (ref_or_oid) {
+                    try run_opts.err.print("invalid ref: {s}\n", .{switch (ref_or_oid) {
                         .oid => |oid| oid,
                         .ref => |ref| try ref.toPath(&ref_path_buffer),
                     }});
@@ -532,11 +552,11 @@ fn runCommand(
             defer commit_iter.deinit();
             while (try commit_iter.next()) |commit_object| {
                 defer commit_object.deinit();
-                try writers.out.print("commit {s}\n", .{commit_object.oid});
+                try run_opts.out.print("commit {s}\n", .{commit_object.oid});
                 if (commit_object.content.commit.metadata.author) |author| {
-                    try writers.out.print("author: {s}\n", .{author});
+                    try run_opts.out.print("author: {s}\n", .{author});
                 }
-                try writers.out.print("\n", .{});
+                try run_opts.out.print("\n", .{});
 
                 try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
 
@@ -551,13 +571,13 @@ fn runCommand(
                         commit_object.object_reader.interface.toss(1);
                     }
 
-                    try writers.out.print("    {s}\n", .{line_writer.written()});
+                    try run_opts.out.print("    {s}\n", .{line_writer.written()});
                 } else |err| switch (err) {
                     error.EndOfStream => {},
                     else => |e| return e,
                 }
 
-                try writers.out.print("\n", .{});
+                try run_opts.out.print("\n", .{});
             }
         },
         .merge, .cherry_pick => |merge_cmd| {
@@ -567,10 +587,10 @@ fn runCommand(
                 io,
                 allocator,
                 merge_cmd,
-                if (repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node },
+                if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node },
             );
             defer result.deinit();
-            try printMergeResult(repo_kind, repo_opts, &result, writers);
+            try printMergeResult(repo_kind, repo_opts, &result, run_opts);
         },
         .config => |config_cmd| switch (config_cmd) {
             .list => {
@@ -579,7 +599,7 @@ fn runCommand(
 
                 for (conf.sections.keys(), conf.sections.values()) |section_name, variables| {
                     for (variables.keys(), variables.values()) |name, value| {
-                        try writers.out.print("{s}.{s}={s}\n", .{ section_name, name, value });
+                        try run_opts.out.print("{s}.{s}={s}\n", .{ section_name, name, value });
                     }
                 }
             },
@@ -593,7 +613,7 @@ fn runCommand(
 
                 for (rem.sections.keys(), rem.sections.values()) |section_name, variables| {
                     for (variables.keys(), variables.values()) |name, value| {
-                        try writers.out.print("{s}.{s}={s}\n", .{ section_name, name, value });
+                        try run_opts.out.print("{s}.{s}={s}\n", .{ section_name, name, value });
                     }
                 }
             },
@@ -626,7 +646,7 @@ fn runCommand(
                 allocator,
                 fetch_cmd.remote_name,
                 .{
-                    .progress_ctx = if (repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node },
+                    .progress_ctx = if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node },
                     .refspecs = if (refspecs.items.len > 0) refspecs.items else null,
                 },
             );
@@ -640,12 +660,64 @@ fn runCommand(
                 push_cmd.remote_name,
                 push_cmd.refspec,
                 push_cmd.force,
-                .{ .progress_ctx = if (repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node } },
+                .{ .progress_ctx = if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } },
             );
+        },
+        .upload_pack => |upload_pack_cmd| {
+            var options = upload_pack_cmd.options;
+            options.protocol_version = server_common.detectProtocolVersion(run_opts.environ_map);
+            var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+            var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+            try repo.uploadPack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options);
+        },
+        .receive_pack => |receive_pack_cmd| {
+            var options = receive_pack_cmd.options;
+            options.protocol_version = server_common.detectProtocolVersion(run_opts.environ_map);
+            var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+            var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+            try repo.receivePack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options);
+        },
+        .http_backend => {
+            const environ_map = run_opts.environ_map;
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try server_http_backend.resolveRepoPath(environ_map, &path_buf);
+
+            var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+
+            const handler, const suffix = for (&server_http_backend.routes) |*svc| {
+                if (std.mem.endsWith(u8, path, svc.suffix))
+                    break .{ svc.handler, svc.suffix };
+            } else {
+                try server_http_backend.sendNotFound(&stdout_writer.interface);
+                return;
+            };
+
+            const request_method: std.http.Method = blk: {
+                const method_str = environ_map.get("REQUEST_METHOD") orelse break :blk .GET;
+                const method = std.meta.stringToEnum(std.http.Method, method_str) orelse break :blk .GET;
+                break :blk if (method == .HEAD) .GET else method;
+            };
+
+            var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
+            var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
+            try repo.httpBackend(io, allocator, &stdin_reader.interface, &stdout_writer.interface, .{
+                .request_method = request_method,
+                .handler = handler,
+                .suffix = suffix,
+                .query_string = environ_map.get("QUERY_STRING") orelse "",
+                .content_type = environ_map.get("CONTENT_TYPE") orelse "",
+                .has_remote_user = environ_map.get("REMOTE_USER") != null,
+                .protocol_version = server_common.detectProtocolVersion(environ_map),
+            });
         },
         .patch => |patch_cmd| switch (repo_kind) {
             .git => {
-                try writers.err.print("command not valid for this backend\n", .{});
+                try run_opts.err.print("command not valid for this backend\n", .{});
                 return error.HandledError;
             },
             .xit => switch (patch_cmd) {
@@ -657,7 +729,7 @@ fn runCommand(
                     try repo.patchAll(
                         io,
                         allocator,
-                        if (repo_opts.ProgressCtx == void) {} else .{ .writers = writers, .clear_line = &clear_line, .node = &progress_node },
+                        if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node },
                     );
                 },
             },
@@ -669,20 +741,20 @@ fn printMergeResult(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     merge_result: *const mrg.Merge(repo_kind, repo_opts),
-    writers: Writers,
+    run_opts: RunOpts,
 ) !void {
     for (merge_result.auto_resolved_conflicts.keys()) |path| {
         if (merge_result.changes.contains(path)) {
-            try writers.out.print("auto-merging {s}\n", .{path});
+            try run_opts.out.print("auto-merging {s}\n", .{path});
         }
     }
     switch (merge_result.result) {
         .success => {},
         .nothing => {
-            try writers.out.print("already up to date\n", .{});
+            try run_opts.out.print("already up to date\n", .{});
         },
         .fast_forward => {
-            try writers.out.print("fast-forward\n", .{});
+            try run_opts.out.print("fast-forward\n", .{});
         },
         .conflict => |result_conflict| {
             for (result_conflict.conflicts.keys(), result_conflict.conflicts.values()) |path, conflict| {
@@ -695,17 +767,17 @@ fn printMergeResult(
                         merge_result.source_name
                     else
                         merge_result.target_name;
-                    try writers.err.print("CONFLICT ({s}): there is a directory with name {s} in {s}. adding {s} as {s}\n", .{ conflict_type, path, dir_branch_name, path, renamed.path });
+                    try run_opts.err.print("CONFLICT ({s}): there is a directory with name {s} in {s}. adding {s} as {s}\n", .{ conflict_type, path, dir_branch_name, path, renamed.path });
                 } else {
                     if (merge_result.changes.contains(path)) {
-                        try writers.out.print("auto-merging {s}\n", .{path});
+                        try run_opts.out.print("auto-merging {s}\n", .{path});
                     }
                     if (conflict.target != null and conflict.source != null) {
                         const conflict_type = if (conflict.base != null)
                             "content"
                         else
                             "add/add";
-                        try writers.err.print("CONFLICT ({s}): merge conflict in {s}\n", .{ conflict_type, path });
+                        try run_opts.err.print("CONFLICT ({s}): merge conflict in {s}\n", .{ conflict_type, path });
                     } else {
                         const conflict_type = if (conflict.target != null)
                             "modify/delete"
@@ -715,7 +787,7 @@ fn printMergeResult(
                             .{ merge_result.source_name, merge_result.target_name }
                         else
                             .{ merge_result.target_name, merge_result.source_name };
-                        try writers.err.print("CONFLICT ({s}): {s} deleted in {s} and modified in {s}\n", .{ conflict_type, path, deleted_branch_name, modified_branch_name });
+                        try run_opts.err.print("CONFLICT ({s}): {s} deleted in {s} and modified in {s}\n", .{ conflict_type, path, deleted_branch_name, modified_branch_name });
                     }
                 }
             }
@@ -751,12 +823,12 @@ pub fn main(init: std.process.Init) !u8 {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const writers = Writers{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
+    const run_opts = RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    runPrint(.xit, .{ .ProgressCtx = ProgressCtx }, io, allocator, args.items, cwd_path, writers) catch |err| switch (err) {
+    runPrint(.xit, .{ .ProgressCtx = ProgressCtx }, io, allocator, args.items, cwd_path, run_opts) catch |err| switch (err) {
         error.HandledError => return 1,
         else => |e| return e,
     };
