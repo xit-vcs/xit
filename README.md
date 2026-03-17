@@ -97,41 +97,44 @@ Here's the output of `xit --help` to give you an idea of what's supported so far
 ```
 help: xit <command> [<args>]
 
-init         create an empty xit repository.
-patch        enable or disable patch-based merging.
-add          add file contents to the index.
-unadd        remove any changes to a file that were added to the index.
-             similar to `git reset HEAD`.
-untrack      no longer track file in the index, but leave it in the work dir.
-             similar to `git rm --cached`.
-rm           no longer track file in the index *and* remove it from the work dir.
-commit       create a new commit.
-tag          add, remove, and list tags.
-status       show the status of uncommitted changes.
-diff         show changes between the last commit and the work dir that haven't been added to the index.
-diff-added   show changes between the last commit and what has been added to the index.
-             similar to `git diff --cached`.
-branch       add, remove, and list branches.
-switch       switch to a branch or commit id.
-             updates both the index and the work dir.
-reset        make the current branch point to a new commit id.
-             updates the index, but the files in the work dir are left alone.
-reset-dir    make the current branch point to a new commit id.
-             updates both the index and the work dir.
-             similar to `git reset --hard`.
-reset-add    make the current branch point to a new commit id.
-             does not update the index or the work dir.
-             this is like calling reset and then adding everything to the index.
-             similar to `git reset --soft`.
-restore      restore files in the work dir.
-log          show commit logs.
-merge        join two or more development histories together.
-cherry-pick  apply the changes introduced by an existing commit.
-config       add, remove, and list config options.
-remote       add, remove, and list remotes.
-clone        clone a repository into a new directory.
-fetch        download objects and refs from another repository.
-push         update remote refs along with associated objects.
+init          create an empty xit repository.
+patch         enable or disable patch-based merging.
+add           add file contents to the index.
+unadd         remove any changes to a file that were added to the index.
+              similar to `git reset HEAD`.
+untrack       no longer track file in the index, but leave it in the work dir.
+              similar to `git rm --cached`.
+rm            no longer track file in the index *and* remove it from the work dir.
+commit        create a new commit.
+tag           add, remove, and list tags.
+status        show the status of uncommitted changes.
+diff          show changes between the last commit and the work dir that haven't been added to the index.
+diff-added    show changes between the last commit and what has been added to the index.
+              similar to `git diff --cached`.
+branch        add, remove, and list branches.
+switch        switch to a branch or commit id.
+              updates both the index and the work dir.
+reset         make the current branch point to a new commit id.
+              updates the index, but the files in the work dir are left alone.
+reset-dir     make the current branch point to a new commit id.
+              updates both the index and the work dir.
+              similar to `git reset --hard`.
+reset-add     make the current branch point to a new commit id.
+              does not update the index or the work dir.
+              this is like calling reset and then adding everything to the index.
+              similar to `git reset --soft`.
+restore       restore files in the work dir.
+log           show commit logs.
+merge         join two or more development histories together.
+cherry-pick   apply the changes introduced by an existing commit.
+config        add, remove, and list config options.
+remote        add, remove, and list remotes.
+clone         clone a repository into a new directory.
+fetch         download objects and refs from another repository.
+push          update remote refs along with associated objects.
+upload-pack   send what is fetched from the repository.
+receive-pack  receive what is pushed into the repository.
+http-backend  a CGI program forwarding receive-pack and upload-pack over HTTP.
 ```
 
 To launch the TUI, just run `xit` without arguments, and press `q` to quit it. In the repo created above, it'll look like this:

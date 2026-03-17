@@ -34,7 +34,7 @@ Networking is tested with a separate command: `zig build testnet`
 
 * There are three networking actions tested: push, fetch, and clone. They create server and client repos in temp dirs starting with `temp-testnet-`. Each of these is run over each of the supported protocols:
 
-  * `http` - Runs a server using the built-in HTTP server from the Zig standard library. This is run in-process using a separate thread. The server implements CGI by forwarding requests to `git http-backend`, which it runs in a separate short-lived process. The client then communicates with it using the Zig's built-in HTTP client.
+  * `http` - Runs a server using the built-in HTTP server from the Zig standard library. This is run in-process using a separate thread. The server implements CGI by forwarding requests to `git http-backend` or `xit http-backend`, which it runs in a separate short-lived process. The client then communicates with it using the Zig's built-in HTTP client.
 
   * `raw` - Runs a server process using `git daemon` which the client communicates with over the raw git protocol.
 

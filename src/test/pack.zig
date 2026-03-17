@@ -332,7 +332,9 @@ test "iterate pack from stream" {
     var buffer: [repo_opts.buffer_size]u8 = undefined;
     var reader = pack_file.reader(io, &buffer);
 
-    var pack_reader = pack.PackReader.initStream(&reader);
+    var counting_buf: [repo_opts.buffer_size]u8 = undefined;
+    var counting_reader = pack.CountingReader.init(&reader.interface, &counting_buf);
+    var pack_reader = pack.PackReader.initStream(&counting_reader);
     defer pack_reader.deinit();
 
     var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
