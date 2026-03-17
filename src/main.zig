@@ -1,4 +1,4 @@
-//! you're looking at radar's hopeless attempt to implement
+//! you're looking at my hopeless attempt to implement
 //! the successor to git. behold the three rules of xit:
 //!
 //! 1. keep the codebase small and stupid.
