@@ -119,7 +119,7 @@ pub fn writeMessage(
         },
         .merge => |merge_cmd| switch (merge_cmd.input.action) {
             .new => |new| blk: {
-                var sources = std.ArrayList([]const u8){};
+                var sources: std.ArrayList([]const u8) = .empty;
                 defer sources.deinit(merge_cmd.allocator);
                 for (new.source) |source| {
                     try sources.append(merge_cmd.allocator, source.name());
