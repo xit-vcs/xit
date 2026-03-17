@@ -38,7 +38,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 .iter_arena = std.heap.ArenaAllocator.init(allocator),
                 .file_iter = null,
                 .hunk_iter = null,
-                .bufs = std.ArrayList([]const u8){},
+                .bufs = .empty,
             };
         }
 

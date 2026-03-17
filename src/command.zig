@@ -431,7 +431,7 @@ pub const CommandArgs = struct {
             allocator.destroy(arena);
         }
 
-        var positional_args = std.ArrayList([]const u8){};
+        var positional_args: std.ArrayList([]const u8) = .empty;
         var map_args = std.StringArrayHashMap(?[]const u8).init(arena.allocator());
         var unused_args = std.StringArrayHashMap(void).init(arena.allocator());
 
@@ -748,7 +748,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                     return .{ .restore = .{ .path = cmd_args.positional_args[0] } };
                 },
                 .log => {
-                    var source = std.ArrayList(rf.RefOrOid(hash_kind)){};
+                    var source: std.ArrayList(rf.RefOrOid(hash_kind)) = .empty;
                     for (cmd_args.positional_args) |arg| {
                         const ref_or_oid = rf.RefOrOid(hash_kind).initFromUser(arg) orelse return error.InvalidRefOrOid;
                         try source.append(cmd_args.arena.allocator(), ref_or_oid);
@@ -772,7 +772,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         } };
                     } else {
                         if (cmd_args.positional_args.len == 0) return null;
-                        var source = std.ArrayList(rf.RefOrOid(hash_kind)){};
+                        var source: std.ArrayList(rf.RefOrOid(hash_kind)) = .empty;
                         for (cmd_args.positional_args) |arg| {
                             try source.append(cmd_args.arena.allocator(), rf.RefOrOid(hash_kind).initFromUser(arg) orelse return error.InvalidRefOrOid);
                         }
