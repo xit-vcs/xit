@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const writers = xit.main.Writers{ .out = &stdout_writer.interface, .err = &stderr_writer.interface };
+    const run_opts = xit.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
 
     {
         var git_repo = try rp.Repo(.git, .{}).open(io, allocator, .{ .path = temp_path });
@@ -97,9 +97,9 @@ pub fn main(init: std.process.Init) !void {
         defer status.deinit(allocator);
         for (status.work_dir_deleted.keys()) |path| {
             if (std.mem.startsWith(u8, path, "deps/")) continue;
-            try writers.out.print("Restoring: {s}\n", .{path});
+            try run_opts.out.print("Restoring: {s}\n", .{path});
             git_repo.restore(io, allocator, path) catch |err| switch (err) {
-                error.FileNotFound, error.ObjectInvalid => try writers.err.print("Failed to restore: {s}\n", .{path}),
+                error.FileNotFound, error.ObjectInvalid => try run_opts.err.print("Failed to restore: {s}\n", .{path}),
                 else => |e| return e,
             };
         }
@@ -131,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
 
         for (0..commits.items.len) |i| {
             var commit_object = commits.items[commits.items.len - i - 1];
-            try writers.out.print("Creating commit: {s}\n", .{commit_object.content.commit.metadata.message orelse ""});
+            try run_opts.out.print("Creating commit: {s}\n", .{commit_object.content.commit.metadata.message orelse ""});
 
             var switch_result = try git_repo.switchDir(io, allocator, .{ .target = .{ .oid = &commit_object.oid }, .force = true });
             defer switch_result.deinit();
@@ -148,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         if (patch_enabled) {
-            try writers.out.print("Generating patches\n", .{});
+            try run_opts.out.print("Generating patches\n", .{});
             try xit_repo.patchAll(io, allocator, null);
         }
 
@@ -169,5 +169,5 @@ pub fn main(init: std.process.Init) !void {
         try xit_repo.addConfig(io, allocator, .{ .name = "branch.master.remote", .value = "origin" });
     }
 
-    try xit.main.run(.xit, .{}, io, allocator, args.items, temp_path, writers);
+    try xit.main.run(.xit, .{}, io, allocator, args.items, temp_path, run_opts);
 }

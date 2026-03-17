@@ -16,6 +16,9 @@ const tr = @import("./tree.zig");
 const net = @import("./net.zig");
 const net_refspec = @import("./net/refspec.zig");
 const un = @import("./undo.zig");
+const server_upload_pack = @import("./net/server/upload_pack.zig");
+const server_receive_pack = @import("./net/server/receive_pack.zig");
+const server_http_backend = @import("./net/server/http_backend.zig");
 
 pub const ProgressKind = enum {
     writing_object_from_pack,
@@ -58,11 +61,11 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
     return struct {
         hash: HashKindType = if (hash_kind_known) .sha1 else null,
         buffer_size: usize = 2048,
+        net_buffer_size: usize = 65536,
         read_size: usize = 2048,
         max_read_size: usize = 4096,
         max_line_size: usize = 10_000,
         max_line_count: usize = 10_000_000,
-        net_read_size: usize = 65536,
         is_test: bool = false,
         ProgressCtx: type = void,
         extra: Extra = .{},
@@ -1505,6 +1508,86 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             var remote = try net.Remote(repo_kind, repo_opts).open(state, io, allocator, remote_name);
             defer remote.deinit(io, allocator);
             try net.push(repo_kind, repo_opts, state, io, allocator, &remote, new_opts);
+        }
+
+        pub fn uploadPack(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_upload_pack.Options) !void {
+            var moment = try self.core.latestMoment();
+            const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
+            try server_upload_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options);
+        }
+
+        pub fn receivePack(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_receive_pack.Options) !void {
+            switch (repo_kind) {
+                .git => {
+                    const state = State(.read_write){ .core = &self.core, .extra = .{} };
+                    try server_receive_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options);
+                },
+                .xit => {
+                    const Ctx = struct {
+                        core: *Repo(repo_kind, repo_opts).Core,
+                        io: std.Io,
+                        allocator: std.mem.Allocator,
+                        reader: *std.Io.Reader,
+                        writer: *std.Io.Writer,
+                        options: server_receive_pack.Options,
+
+                        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                            var moment = try DB.HashMap(.read_write).init(cursor.*);
+                            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                            try server_receive_pack.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
+                        }
+                    };
+
+                    try self.core.db_file.lock(io, .exclusive);
+                    defer self.core.db_file.unlock(io);
+
+                    const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+                    try history.appendContext(
+                        .{ .slot = try history.getSlot(-1) },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .options = options },
+                    );
+                },
+            }
+        }
+
+        pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_http_backend.Options) !void {
+            switch (repo_kind) {
+                .git => {
+                    const state = State(.read_write){ .core = &self.core, .extra = .{} };
+                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options) catch |err| switch (err) {
+                        error.CancelTransaction => {},
+                        else => |e| return e,
+                    };
+                },
+                .xit => {
+                    const Ctx = struct {
+                        core: *Repo(repo_kind, repo_opts).Core,
+                        io: std.Io,
+                        allocator: std.mem.Allocator,
+                        reader: *std.Io.Reader,
+                        writer: *std.Io.Writer,
+                        options: server_http_backend.Options,
+
+                        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                            var moment = try DB.HashMap(.read_write).init(cursor.*);
+                            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
+                        }
+                    };
+
+                    try self.core.db_file.lock(io, .exclusive);
+                    defer self.core.db_file.unlock(io);
+
+                    const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+                    history.appendContext(
+                        .{ .slot = try history.getSlot(-1) },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .options = options },
+                    ) catch |err| switch (err) {
+                        error.CancelTransaction => {},
+                        else => |e| return e,
+                    };
+                },
+            }
         }
     };
 }

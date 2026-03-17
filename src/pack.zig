@@ -15,7 +15,7 @@ pub const PackReader = union(enum) {
         file_reader_buffer: []u8,
     },
     stream: struct {
-        file_reader: *std.Io.File.Reader,
+        counting_reader: *CountingReader,
     },
 
     const buffer_size = 4 * 1024;
@@ -51,10 +51,10 @@ pub const PackReader = union(enum) {
         };
     }
 
-    pub fn initStream(rdr: *std.Io.File.Reader) PackReader {
+    pub fn initStream(counting_reader: *CountingReader) PackReader {
         return .{
             .stream = .{
-                .file_reader = rdr,
+                .counting_reader = counting_reader,
             },
         };
     }
@@ -75,7 +75,7 @@ pub const PackReader = union(enum) {
     pub fn dupe(self: *const PackReader) !PackReader {
         switch (self.*) {
             .file => |*file| return try .initFile(file.io, file.allocator, file.dir, file.file_name),
-            .stream => |*stream| return .initStream(stream.file_reader),
+            .stream => |*stream| return .initStream(stream.counting_reader),
         }
     }
 
@@ -84,7 +84,7 @@ pub const PackReader = union(enum) {
             .file => |*file| try file.file_reader.seekTo(position),
             // stream-based PackReaders can't seek, so unless we are trying to seek
             // to the position that we are already at, we have to return an error
-            .stream => |*stream| if (position != stream.file_reader.logicalPos()) {
+            .stream => |*stream| if (position != stream.counting_reader.logicalPos()) {
                 return error.Unseekable;
             },
         }
@@ -93,15 +93,56 @@ pub const PackReader = union(enum) {
     pub fn logicalPos(self: *const PackReader) u64 {
         switch (self.*) {
             .file => |*file| return file.file_reader.logicalPos(),
-            .stream => |*stream| return stream.file_reader.logicalPos(),
+            .stream => |*stream| return stream.counting_reader.logicalPos(),
         }
     }
 
     pub fn reader(self: *PackReader) *std.Io.Reader {
         switch (self.*) {
             .file => |*file| return &file.file_reader.interface,
-            .stream => |*stream| return &stream.file_reader.interface,
+            .stream => |*stream| return &stream.counting_reader.interface,
         }
+    }
+};
+
+/// wraps a `*std.Io.Reader` and tracks the total number of bytes consumed,
+/// providing a `logicalPos` method analogous to `std.Io.File.Reader.logicalPos`.
+pub const CountingReader = struct {
+    inner: *std.Io.Reader,
+    pos: u64 = 0,
+    interface: std.Io.Reader,
+
+    pub fn init(inner: *std.Io.Reader, buffer: []u8) CountingReader {
+        return .{
+            .inner = inner,
+            .interface = .{
+                .vtable = &.{
+                    .stream = streamFn,
+                    .discard = discardFn,
+                },
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn streamFn(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *CountingReader = @fieldParentPtr("interface", r);
+        const n = try self.inner.stream(w, limit);
+        self.pos += n;
+        return n;
+    }
+
+    fn discardFn(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const self: *CountingReader = @fieldParentPtr("interface", r);
+        const n = try self.inner.discard(limit);
+        self.pos += n;
+        return n;
+    }
+
+    pub fn logicalPos(self: *const CountingReader) u64 {
+        return self.pos - self.interface.bufferedLen();
     }
 };
 

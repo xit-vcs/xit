@@ -112,7 +112,7 @@ pub const WireStream = union(WireKind) {
 pub fn Buffer(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         len: usize,
-        data: [repo_opts.net_read_size]u8,
+        data: [repo_opts.net_buffer_size]u8,
 
         fn consume(self: *Buffer(repo_kind, repo_opts), end: [*c]const u8) void {
             if (@intFromPtr(end) > @intFromPtr(&self.data) and
