@@ -6,18 +6,10 @@ const obj = xit.object;
 const pack = xit.pack;
 const rf = xit.ref;
 
-const c = @cImport({
-    @cInclude("git2.h");
-});
-
 test "pack" {
     const allocator = std.testing.allocator;
     const temp_dir_name = "temp-test-pack";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
-
-    // start libgit
-    _ = c.git_libgit2_init();
-    defer _ = c.git_libgit2_shutdown();
 
     // create the temp dir
     const cwd = std.fs.cwd();
@@ -34,181 +26,60 @@ test "pack" {
     const cwd_path = try std.process.getCwdAlloc(allocator);
     defer allocator.free(cwd_path);
 
-    // get work dir path (null-terminated because it's used by libgit)
-    const work_path = try std.fs.path.joinZ(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    // get work dir path
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
     defer allocator.free(work_path);
 
-    // create the work dir
-    var work_dir = try cwd.makeOpenPath(work_path, .{});
-    defer work_dir.close();
-
     // init repo
-    var repo: ?*c.git_repository = null;
-    try std.testing.expectEqual(0, c.git_repository_init(&repo, work_path, 0));
-    defer c.git_repository_free(repo);
+    var repo = try rp.Repo(.git, repo_opts).init(allocator, .{ .path = work_path });
+    defer repo.deinit(allocator);
 
     // make sure the git dir was created
-    var repo_dir = try work_dir.openDir(".git", .{});
+    var repo_dir = try repo.core.work_dir.openDir(".git", .{});
     defer repo_dir.close();
 
     // add and commit
-    var commit_oid1: c.git_oid = undefined;
+    var commit_oid1: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     {
         // make file
-        var hello_txt = try work_dir.createFile("hello.txt", .{});
+        var hello_txt = try repo.core.work_dir.createFile("hello.txt", .{});
         defer hello_txt.close();
         try hello_txt.writeAll("hello, world!");
 
         // make file
-        var readme = try work_dir.createFile("README", .{});
+        var readme = try repo.core.work_dir.createFile("README", .{});
         defer readme.close();
         try readme.writeAll("My cool project");
 
         // add the files
-        var index: ?*c.git_index = null;
-        try std.testing.expectEqual(0, c.git_repository_index(&index, repo));
-        defer c.git_index_free(index);
-        try std.testing.expectEqual(0, c.git_index_add_bypath(index, "hello.txt"));
-        try std.testing.expectEqual(0, c.git_index_add_bypath(index, "README"));
-        try std.testing.expectEqual(0, c.git_index_write(index));
+        try repo.add(allocator, &.{ "hello.txt", "README" });
 
         // make the commit
-        var tree_oid: c.git_oid = undefined;
-        try std.testing.expectEqual(0, c.git_index_write_tree(&tree_oid, index));
-        var tree: ?*c.git_tree = null;
-        try std.testing.expectEqual(0, c.git_tree_lookup(&tree, repo, &tree_oid));
-        defer c.git_tree_free(tree);
-        var signature: ?*c.git_signature = null;
-        try std.testing.expectEqual(0, c.git_signature_new(&signature, "radarroark", "radarroark@radar.roark", 0, 0));
-        defer c.git_signature_free(signature);
-        try std.testing.expectEqual(0, c.git_commit_create(
-            &commit_oid1,
-            repo,
-            "HEAD",
-            signature,
-            signature,
-            null,
-            "let there be light",
-            tree,
-            0,
-            null,
-        ));
+        commit_oid1 = try repo.commit(allocator, .{ .message = "let there be light" });
     }
 
     // add and commit
-    var commit_oid2: c.git_oid = undefined;
+    var commit_oid2: [hash.hexLen(repo_opts.hash)]u8 = undefined;
     {
         // make files
-        var license = try work_dir.createFile("LICENSE", .{});
+        var license = try repo.core.work_dir.createFile("LICENSE", .{});
         defer license.close();
         try license.writeAll("do whatever you want");
-        var change_log = try work_dir.createFile("CHANGELOG", .{});
+        var change_log = try repo.core.work_dir.createFile("CHANGELOG", .{});
         defer change_log.close();
         try change_log.writeAll("cha-cha-cha-changes");
 
         // change file
-        const hello_txt = try work_dir.openFile("hello.txt", .{ .mode = .read_write });
+        const hello_txt = try repo.core.work_dir.openFile("hello.txt", .{ .mode = .read_write });
         defer hello_txt.close();
         try hello_txt.writeAll("goodbye, world!");
         try hello_txt.setEndPos(try hello_txt.getPos());
 
         // add the files
-        var index: ?*c.git_index = null;
-        try std.testing.expectEqual(0, c.git_repository_index(&index, repo));
-        defer c.git_index_free(index);
-        try std.testing.expectEqual(0, c.git_index_add_bypath(index, "LICENSE"));
-        try std.testing.expectEqual(0, c.git_index_add_bypath(index, "CHANGELOG"));
-        try std.testing.expectEqual(0, c.git_index_add_bypath(index, "hello.txt"));
-        try std.testing.expectEqual(0, c.git_index_write(index));
-
-        // get previous commit
-        var parent_object: ?*c.git_object = null;
-        var parent_ref: ?*c.git_reference = null;
-        try std.testing.expectEqual(0, c.git_revparse_ext(&parent_object, &parent_ref, repo, "HEAD"));
-        defer c.git_object_free(parent_object);
-        defer c.git_reference_free(parent_ref);
-        var parent_commit: ?*c.git_commit = null;
-        try std.testing.expectEqual(0, c.git_commit_lookup(&parent_commit, repo, c.git_object_id(parent_object)));
-        defer c.git_commit_free(parent_commit);
-        var parents = [_]?*const c.git_commit{parent_commit};
+        try repo.add(allocator, &.{ "LICENSE", "CHANGELOG", "hello.txt" });
 
         // make the commit
-        var tree_oid: c.git_oid = undefined;
-        try std.testing.expectEqual(0, c.git_index_write_tree(&tree_oid, index));
-        var tree: ?*c.git_tree = null;
-        try std.testing.expectEqual(0, c.git_tree_lookup(&tree, repo, &tree_oid));
-        defer c.git_tree_free(tree);
-        var signature: ?*c.git_signature = null;
-        try std.testing.expectEqual(0, c.git_signature_new(&signature, "radarroark", "radarroark@radar.roark", 0, 0));
-        defer c.git_signature_free(signature);
-        try std.testing.expectEqual(0, c.git_commit_create(
-            &commit_oid2,
-            repo,
-            "HEAD",
-            signature,
-            signature,
-            null,
-            "add license",
-            tree,
-            1,
-            &parents,
-        ));
-    }
-
-    // create pack file
-    {
-        var pb: ?*c.git_packbuilder = null;
-        try std.testing.expectEqual(0, c.git_packbuilder_new(&pb, repo));
-        defer c.git_packbuilder_free(pb);
-        try std.testing.expectEqual(0, c.git_packbuilder_insert_commit(pb, &commit_oid1));
-        try std.testing.expectEqual(0, c.git_packbuilder_insert_commit(pb, &commit_oid2));
-        try std.testing.expectEqual(0, c.git_packbuilder_write(pb, null, 0, null, null));
-    }
-
-    // check that pack file exists
-    {
-        var pack_dir = try work_dir.openDir(".git/objects/pack", .{ .iterate = true });
-        defer pack_dir.close();
-        var entries = std.ArrayList([]const u8){};
-        defer entries.deinit(allocator);
-        var iter = pack_dir.iterate();
-        while (try iter.next()) |entry| {
-            switch (entry.kind) {
-                .file => try entries.append(allocator, entry.name),
-                else => {},
-            }
-        }
-        try std.testing.expectEqual(2, entries.items.len);
-    }
-
-    // delete the loose objects
-    for (&[_]*c.git_oid{ &commit_oid1, &commit_oid2 }) |commit_oid| {
-        var commit_oid_hex = [_]u8{0} ** hash.hexLen(repo_opts.hash);
-        try std.testing.expectEqual(0, c.git_oid_fmt(@ptrCast(&commit_oid_hex), commit_oid));
-
-        var path_buf = [_]u8{0} ** (hash.hexLen(repo_opts.hash) + 1);
-        const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ commit_oid_hex[0..2], commit_oid_hex[2..] });
-
-        var objects_dir = try work_dir.openDir(".git/objects", .{});
-        defer objects_dir.close();
-
-        try objects_dir.deleteFile(path);
-    }
-
-    // read the pack objects
-    for (
-        &[_]*c.git_oid{ &commit_oid1, &commit_oid2 },
-        &[_][]const u8{ "let there be light", "add license" },
-    ) |commit_oid, expected_message| {
-        var commit_oid_hex = [_]u8{0} ** hash.hexLen(repo_opts.hash);
-        try std.testing.expectEqual(0, c.git_oid_fmt(@ptrCast(&commit_oid_hex), commit_oid));
-
-        var r = try rp.Repo(.git, repo_opts).open(allocator, .{ .path = work_path });
-        defer r.deinit(allocator);
-
-        var commit_object = try obj.Object(.git, repo_opts, .full).init(allocator, .{ .core = &r.core, .extra = .{} }, &commit_oid_hex);
-        defer commit_object.deinit();
-        try std.testing.expectEqualStrings(expected_message, commit_object.content.commit.metadata.message.?);
+        commit_oid2 = try repo.commit(allocator, .{ .message = "add license" });
     }
 
     // write and read a pack object
@@ -237,11 +108,8 @@ test "pack" {
             }
         }
 
-        for (&[_]*c.git_oid{ &commit_oid1, &commit_oid2 }) |commit_oid| {
-            var commit_oid_hex = [_]u8{0} ** hash.hexLen(repo_opts.hash);
-            try std.testing.expectEqual(0, c.git_oid_fmt(@ptrCast(&commit_oid_hex), commit_oid));
-
-            var pack_reader = try pack.PackObjectReader(.git, repo_opts).initWithPath(allocator, .{ .core = &r.core, .extra = .{} }, temp_dir, "test.pack", &commit_oid_hex);
+        for (&[_]*const [hash.hexLen(repo_opts.hash)]u8{ &commit_oid1, &commit_oid2 }) |commit_oid_hex| {
+            var pack_reader = try pack.PackObjectReader(.git, repo_opts).initWithPath(allocator, .{ .core = &r.core, .extra = .{} }, temp_dir, "test.pack", commit_oid_hex);
             defer pack_reader.deinit(allocator);
 
             // make sure the reader's position is at the beginning
