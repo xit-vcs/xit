@@ -283,11 +283,6 @@ fn Server(comptime transport_def: net.TransportDefinition) type {
                                     var http_server = std.http.Server.init(conn_br.interface(), &conn_bw.interface);
 
                                     while (http_server.reader.state == .ready) {
-                                        // give server some time to receive the request.
-                                        // without it, POST requests sometimes don't have all the
-                                        // expected data in their bodies because they use chunked encoding.
-                                        std.Thread.sleep(std.time.ns_per_s * 0.5);
-
                                         var request = http_server.receiveHead() catch |err| switch (err) {
                                             error.HttpConnectionClosing => continue :accept,
                                             else => |e| return e,
