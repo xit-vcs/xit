@@ -251,7 +251,7 @@ fn Server(
                         const known_hosts_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/known_hosts", .{});
                         defer known_hosts_file.close(io);
                         const port_str = std.fmt.comptimePrint("{}", .{port});
-                        try known_hosts_file.writeStreamingAll(io, "[localhost]:" ++ port_str ++ " ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoSDPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiUQ=");
+                        try known_hosts_file.writeStreamingAll(io, "[127.0.0.1]:" ++ port_str ++ " ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoSDPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiUQ=");
                         if (.windows != builtin.os.tag) {
                             try known_hosts_file.setPermissions(io, @enumFromInt(0o600));
                         }
@@ -602,9 +602,9 @@ fn testFetch(
             //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
             .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
             .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+                .http => try std.fmt.allocPrint(allocator, "http://127.0.0.1:{}/server", .{port}),
+                .raw => try std.fmt.allocPrint(allocator, "git://127.0.0.1:{}/server", .{port}),
+                .ssh => try std.fmt.allocPrint(allocator, "ssh://127.0.0.1:{}{s}{s}", .{ port, separator, server_path }),
             },
         };
         defer allocator.free(remote_url);
@@ -780,9 +780,9 @@ fn testPush(
             //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
             .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
             .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+                .http => try std.fmt.allocPrint(allocator, "http://127.0.0.1:{}/server", .{port}),
+                .raw => try std.fmt.allocPrint(allocator, "git://127.0.0.1:{}/server", .{port}),
+                .ssh => try std.fmt.allocPrint(allocator, "ssh://127.0.0.1:{}{s}{s}", .{ port, separator, server_path }),
             },
         };
         defer allocator.free(remote_url);
@@ -1076,9 +1076,9 @@ fn testClone(
             //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
             .file => try std.fmt.allocPrint(allocator, "server", .{}), // relative file paths work too
             .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+                .http => try std.fmt.allocPrint(allocator, "http://127.0.0.1:{}/server", .{port}),
+                .raw => try std.fmt.allocPrint(allocator, "git://127.0.0.1:{}/server", .{port}),
+                .ssh => try std.fmt.allocPrint(allocator, "ssh://127.0.0.1:{}{s}{s}", .{ port, separator, server_path }),
             },
         };
     };
@@ -1379,9 +1379,9 @@ fn testFetchLarge(
             //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
             .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
             .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+                .http => try std.fmt.allocPrint(allocator, "http://127.0.0.1:{}/server", .{port}),
+                .raw => try std.fmt.allocPrint(allocator, "git://127.0.0.1:{}/server", .{port}),
+                .ssh => try std.fmt.allocPrint(allocator, "ssh://127.0.0.1:{}{s}{s}", .{ port, separator, server_path }),
             },
         };
         defer allocator.free(remote_url);
@@ -1618,9 +1618,9 @@ fn testPushLarge(
             //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
             .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
             .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+                .http => try std.fmt.allocPrint(allocator, "http://127.0.0.1:{}/server", .{port}),
+                .raw => try std.fmt.allocPrint(allocator, "git://127.0.0.1:{}/server", .{port}),
+                .ssh => try std.fmt.allocPrint(allocator, "ssh://127.0.0.1:{}{s}{s}", .{ port, separator, server_path }),
             },
         };
         defer allocator.free(remote_url);
