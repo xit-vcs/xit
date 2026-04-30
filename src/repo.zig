@@ -1550,11 +1550,11 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
         }
 
-        pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_http_backend.Options) !void {
+        pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, response_kind: server_http_backend.ResponseKind, options: server_http_backend.Options) !void {
             switch (repo_kind) {
                 .git => {
                     const state = State(.read_write){ .core = &self.core, .extra = .{} };
-                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options) catch |err| switch (err) {
+                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,
                     };
@@ -1566,12 +1566,13 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         allocator: std.mem.Allocator,
                         reader: *std.Io.Reader,
                         writer: *std.Io.Writer,
+                        response_kind: server_http_backend.ResponseKind,
                         options: server_http_backend.Options,
 
                         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
+                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options);
                         }
                     };
 
@@ -1581,7 +1582,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .options = options },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .response_kind = response_kind, .options = options },
                     ) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,

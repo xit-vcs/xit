@@ -22,6 +22,11 @@ pub const Options = struct {
     protocol_version: common.ProtocolVersion,
 };
 
+pub const ResponseKind = enum {
+    cgi,
+    http,
+};
+
 const Route = struct {
     method: std.http.Method,
     suffix: []const u8,
@@ -64,22 +69,23 @@ pub fn run(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    response_kind: ResponseKind,
     options: Options,
 ) !void {
     // method validation
     for (&routes) |*svc| {
         if (svc.handler == options.handler) {
             if (options.request_method != svc.method) {
-                try sendBadRequest(writer, svc.method, options);
+                try sendBadRequest(response_kind, writer, svc.method, options);
                 return error.CancelTransaction;
             }
             break;
         }
     }
 
-    runRoute(repo_kind, repo_opts, state, io, allocator, reader, writer, options) catch |err| switch (err) {
+    runRoute(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options) catch |err| switch (err) {
         error.Forbidden, error.ServiceNotEnabled => {
-            try sendForbidden(writer);
+            try sendForbidden(response_kind, writer);
             return error.CancelTransaction;
         },
         error.BadRequest, error.UnsupportedMediaType => return error.CancelTransaction,
@@ -95,6 +101,7 @@ fn runRoute(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    response_kind: ResponseKind,
     options: Options,
 ) !void {
     // read http config
@@ -115,51 +122,66 @@ fn runRoute(
     }
 
     switch (options.handler) {
-        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, io, allocator, reader, writer, options, &http_config),
-        .run_service => try runService(repo_kind, repo_opts, state, io, allocator, reader, writer, options, &http_config),
+        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
+        .run_service => try runService(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
     }
 }
 
-fn httpStatus(writer: *std.Io.Writer, code: u16, msg: []const u8) std.Io.Writer.Error!void {
-    try writer.print("Status: {d} {s}\r\n", .{ code, msg });
+fn httpStatus(response_kind: ResponseKind, writer: *std.Io.Writer, code: u16, msg: []const u8) !void {
+    switch (response_kind) {
+        .cgi => try writer.print("Status: {d} {s}\r\n", .{ code, msg }),
+        .http => try writer.print("HTTP/1.1 {d} {s}\r\n", .{ code, msg }),
+    }
 }
 
-fn writeHeader(writer: *std.Io.Writer, name: []const u8, value: []const u8) std.Io.Writer.Error!void {
+fn writeHeader(writer: *std.Io.Writer, name: []const u8, value: []const u8) !void {
     try writer.print("{s}: {s}\r\n", .{ name, value });
 }
 
-fn writeNocacheHeaders(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+fn writeNocacheHeaders(writer: *std.Io.Writer) !void {
     try writeHeader(writer, "Expires", "Fri, 01 Jan 1980 00:00:00 GMT");
     try writeHeader(writer, "Pragma", "no-cache");
     try writeHeader(writer, "Cache-Control", "no-cache, max-age=0, must-revalidate");
 }
 
-fn finishHeaders(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try writer.writeAll("\r\n");
-    try writer.flush();
+fn finishHeaders(response_kind: ResponseKind, writer: *std.Io.Writer) !void {
+    switch (response_kind) {
+        .cgi => {
+            try writer.writeAll("\r\n");
+            try writer.flush();
+        },
+        .http => {
+            try writer.writeAll("Connection: close\r\n\r\n");
+            try writer.flush();
+        },
+    }
 }
 
-pub fn sendNotFound(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try httpStatus(writer, 404, "Not Found");
+pub fn sendNotFound(writer: *std.Io.Writer) !void {
+    try sendNotFoundResponse(.cgi, writer);
+}
+
+pub fn sendNotFoundResponse(response_kind: ResponseKind, writer: *std.Io.Writer) !void {
+    try httpStatus(response_kind, writer, 404, "Not Found");
     try writeNocacheHeaders(writer);
-    try finishHeaders(writer);
+    try finishHeaders(response_kind, writer);
 }
 
-fn sendForbidden(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try httpStatus(writer, 403, "Forbidden");
+fn sendForbidden(response_kind: ResponseKind, writer: *std.Io.Writer) !void {
+    try httpStatus(response_kind, writer, 403, "Forbidden");
     try writeNocacheHeaders(writer);
-    try finishHeaders(writer);
+    try finishHeaders(response_kind, writer);
 }
 
-fn sendBadRequest(writer: *std.Io.Writer, allowed_method: std.http.Method, options: Options) std.Io.Writer.Error!void {
+fn sendBadRequest(response_kind: ResponseKind, writer: *std.Io.Writer, allowed_method: std.http.Method, options: Options) !void {
     if (options.request_method != allowed_method) {
-        try httpStatus(writer, 405, "Method Not Allowed");
+        try httpStatus(response_kind, writer, 405, "Method Not Allowed");
         try writeHeader(writer, "Allow", @tagName(allowed_method));
     } else {
-        try httpStatus(writer, 400, "Bad Request");
+        try httpStatus(response_kind, writer, 400, "Bad Request");
     }
     try writeNocacheHeaders(writer);
-    try finishHeaders(writer);
+    try finishHeaders(response_kind, writer);
 }
 
 pub fn resolveRepoPath(environ_map: *std.process.Environ.Map, buf: []u8) ![]const u8 {
@@ -191,16 +213,17 @@ fn getInfoRefs(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    response_kind: ResponseKind,
     options: Options,
     http_config: *const Config,
 ) !void {
     // smart protocol: ?service=git-upload-pack or ?service=git-receive-pack
     if (std.mem.startsWith(u8, options.query_string, "service=git-upload-pack")) {
         if (!http_config.uploadpack) return error.ServiceNotEnabled;
-        try httpStatus(writer, 200, "OK");
+        try httpStatus(response_kind, writer, 200, "OK");
         try writeHeader(writer, "Content-Type", "application/x-git-upload-pack-advertisement");
         try writeNocacheHeaders(writer);
-        try finishHeaders(writer);
+        try finishHeaders(response_kind, writer);
 
         if (options.protocol_version != .v2) {
             try pkt.writePktLineFmt(writer, "# service=git-upload-pack\n", .{});
@@ -218,10 +241,10 @@ fn getInfoRefs(
 
     if (std.mem.startsWith(u8, options.query_string, "service=git-receive-pack")) {
         if (!http_config.receivepack) return error.ServiceNotEnabled;
-        try httpStatus(writer, 200, "OK");
+        try httpStatus(response_kind, writer, 200, "OK");
         try writeHeader(writer, "Content-Type", "application/x-git-receive-pack-advertisement");
         try writeNocacheHeaders(writer);
-        try finishHeaders(writer);
+        try finishHeaders(response_kind, writer);
 
         if (options.protocol_version != .v2) {
             try pkt.writePktLineFmt(writer, "# service=git-receive-pack\n", .{});
@@ -248,6 +271,7 @@ fn runService(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
+    response_kind: ResponseKind,
     options: Options,
     http_config: *const Config,
 ) !void {
@@ -269,19 +293,19 @@ fn runService(
     var expected_ct_buf: [64]u8 = undefined;
     const expected_ct = std.fmt.bufPrint(&expected_ct_buf, "application/x-git-{s}-request", .{service}) catch return error.BadRequest;
     if (!std.mem.eql(u8, options.content_type, expected_ct)) {
-        try httpStatus(writer, 415, "Unsupported Media Type");
+        try httpStatus(response_kind, writer, 415, "Unsupported Media Type");
         try writeNocacheHeaders(writer);
-        try finishHeaders(writer);
+        try finishHeaders(response_kind, writer);
         return error.UnsupportedMediaType;
     }
 
     // response headers
     var result_ct_buf: [64]u8 = undefined;
     const result_ct = std.fmt.bufPrint(&result_ct_buf, "application/x-git-{s}-result", .{service}) catch return error.BadRequest;
-    try httpStatus(writer, 200, "OK");
+    try httpStatus(response_kind, writer, 200, "OK");
     try writeHeader(writer, "Content-Type", result_ct);
     try writeNocacheHeaders(writer);
-    try finishHeaders(writer);
+    try finishHeaders(response_kind, writer);
 
     // dispatch
     if (is_upload) {

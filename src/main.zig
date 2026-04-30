@@ -705,7 +705,7 @@ fn runCommand(
 
             var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
             var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
-            try repo.httpBackend(io, allocator, &stdin_reader.interface, &stdout_writer.interface, .{
+            try repo.httpBackend(io, allocator, &stdin_reader.interface, &stdout_writer.interface, .cgi, .{
                 .request_method = request_method,
                 .handler = handler,
                 .suffix = suffix,
