@@ -1,3 +1,5 @@
+pub const xitdb = @import("xitdb");
+pub const xitui = @import("xitui");
 pub const main = @import("./main.zig");
 pub const repo = @import("./repo.zig");
 pub const hash = @import("./hash.zig");
@@ -21,4 +23,3 @@ pub const net_server_upload_pack = @import("./net/server/upload_pack.zig");
 pub const net_server_receive_pack = @import("./net/server/receive_pack.zig");
 pub const net_server_http_backend = @import("./net/server/http_backend.zig");
 pub const net_server_common = @import("./net/server/common.zig");
-pub const db = @import("xitdb");
