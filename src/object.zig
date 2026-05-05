@@ -92,7 +92,7 @@ pub fn writeObject(
     }
 }
 
-const Tree = struct {
+pub const Tree = struct {
     entries: std.StringArrayHashMapUnmanaged([]const u8),
     arena: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
@@ -368,7 +368,7 @@ pub fn writeCommitAtHead(
     defer tree.deinit();
     try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, &index, "", index.root_children.keys());
 
-    return try writeCommit(repo_kind, repo_opts, state, io, allocator, metadata, &tree, "HEAD");
+    return try writeCommit(repo_kind, repo_opts, state, io, allocator, metadata, &tree, .{ .kind = .none, .name = "HEAD" });
 }
 
 pub fn writeCommit(
@@ -378,34 +378,51 @@ pub fn writeCommit(
     io: std.Io,
     allocator: std.mem.Allocator,
     metadata: CommitMetadata(repo_opts.hash),
-    tree: *Tree,
-    ref_path: []const u8,
+    tree_maybe: ?*Tree,
+    ref: rf.Ref,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    const parent_oids = if (metadata.parent_oids) |oids| oids else blk: {
-        const ref = rf.Ref.initFromPath(ref_path, null) orelse return error.InvalidRef;
-        const oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref });
-        break :blk if (oid_maybe) |oid| &.{oid} else &.{};
-    };
+    const parent_oids = if (metadata.parent_oids) |oids|
+        oids
+    else if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref })) |oid|
+        &.{oid}
+    else
+        &.{};
 
-    // write and hash tree
-    var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try writeTree(repo_kind, repo_opts, state, io, allocator, tree, &tree_hash_bytes_buffer);
-    const tree_hash_hex = std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
+    const tree_hash_hex = if (tree_maybe) |tree| blk: {
+        // hash the tree
+        var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        try writeTree(repo_kind, repo_opts, state, io, allocator, tree, &tree_hash_bytes_buffer);
+        const hash_hex = std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
 
-    // don't allow commit if the tree hasn't changed
-    if (!metadata.allow_empty) {
-        if (parent_oids.len == 0) {
-            if (tree.entries.count() == 0) {
-                return error.EmptyCommit;
-            }
-        } else if (parent_oids.len == 1) {
-            var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
-            defer first_parent.deinit();
-            if (std.mem.eql(u8, &first_parent.content.commit.tree, &tree_hash_hex)) {
-                return error.EmptyCommit;
+        if (!metadata.allow_empty) {
+            // don't allow commit if the tree hasn't changed
+            if (parent_oids.len == 0) {
+                if (tree.entries.count() == 0) {
+                    return error.EmptyCommit;
+                }
+            } else if (parent_oids.len == 1) {
+                var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
+                defer first_parent.deinit();
+                if (std.mem.eql(u8, &first_parent.content.commit.tree, &hash_hex)) {
+                    return error.EmptyCommit;
+                }
             }
         }
-    }
+
+        break :blk hash_hex;
+    } else if (parent_oids.len == 0) blk: {
+        // hash an empty tree
+        var tree = try Tree.init(allocator);
+        defer tree.deinit();
+        var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        try writeTree(repo_kind, repo_opts, state, io, allocator, &tree, &tree_hash_bytes_buffer);
+        break :blk std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
+    } else blk: {
+        // use the first parent's tree hash
+        var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
+        defer first_parent.deinit();
+        break :blk first_parent.content.commit.tree;
+    };
 
     // create commit contents
     const commit_contents = blk: {
@@ -500,6 +517,8 @@ pub fn writeCommit(
             compressed_lock.success = true;
 
             // write commit id to ref
+            var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            const ref_path = try ref.toPath(&ref_path_buffer);
             try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
         },
         .xit => {
@@ -514,6 +533,8 @@ pub fn writeCommit(
             try chunk.writeChunks(repo_opts, state, io, &hashed, commit_contents.len, "commit", &commit_hash_bytes_buffer);
 
             // write commit id to ref
+            var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            const ref_path = try ref.toPath(&ref_path_buffer);
             const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
             try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
         },

@@ -12,6 +12,10 @@ pub const BranchCommand = union(enum) {
 
 pub const AddBranchInput = struct {
     name: []const u8,
+    target: union(enum) {
+        none,
+        head,
+    } = .head,
 };
 
 pub const RemoveBranchInput = struct {
@@ -37,6 +41,14 @@ pub fn add(
     if (try rf.exists(repo_kind, repo_opts, state.readOnly(), io, .{ .kind = .head, .name = input.name })) {
         return error.BranchAlreadyExists;
     }
+
+    const oid_maybe = switch (input.target) {
+        .none => null,
+        .head => rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), io) catch |err| switch (err) {
+            error.RefNotFound => null,
+            else => |e| return e,
+        },
+    };
 
     switch (repo_kind) {
         .git => {
@@ -64,10 +76,6 @@ pub fn add(
             defer lock.deinit(io);
 
             // get HEAD contents and write to lock file
-            const oid_maybe = rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), io) catch |err| switch (err) {
-                error.RefNotFound => null,
-                else => |e| return e,
-            };
             if (oid_maybe) |oid| {
                 try lock.lock_file.writeStreamingAll(io, &oid);
                 try lock.lock_file.writeStreamingAll(io, "\n");
@@ -91,10 +99,6 @@ pub fn add(
             try heads.putKey(name_hash, .{ .slot = ref_name_cursor.slot() });
 
             // store ref content
-            const oid_maybe = rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), io) catch |err| switch (err) {
-                error.RefNotFound => null,
-                else => |e| return e,
-            };
             if (oid_maybe) |oid| {
                 const ref_content_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-content-set"));
                 const ref_content_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(ref_content_set_cursor);

@@ -179,6 +179,84 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     }
 }
 
+test "empty branch" {
+    try testEmptyBranch(.git, .{ .is_test = true });
+    try testEmptyBranch(.xit, .{ .is_test = true });
+}
+
+fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const temp_dir_name = "temp-test-repo-branch";
+
+    // create the temp dir
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    defer allocator.free(work_path);
+
+    {
+        var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+        defer repo.deinit(io, allocator);
+    }
+
+    var repo = try rp.Repo(repo_kind, repo_opts).open(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "README.md", "Hello, world!");
+    _ = try repo.commit(io, allocator, .{ .message = "a" });
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "README.md", "Goodbye, world!");
+    const commit_b = try repo.commit(io, allocator, .{ .message = "b" });
+
+    // create empty branch with no target, so it doesn't point to anything
+    try repo.addBranch(io, .{ .name = "foo", .target = .none });
+
+    // make an empty commit at foo without checking it out
+    const commit_c = try repo.commitAtRef(io, allocator, .{ .message = "c" }, null, .{ .kind = .head, .name = "foo" });
+
+    // foo points to c
+    {
+        const oid_foo = try repo.readRef(io, .{ .kind = .head, .name = "foo" }) orelse return error.RefNotFound;
+        try std.testing.expectEqualStrings(&commit_c, &oid_foo);
+    }
+
+    // master points to b
+    const oid_master = try repo.readRef(io, .{ .kind = .head, .name = "master" }) orelse return error.RefNotFound;
+    try std.testing.expectEqualStrings(&commit_b, &oid_master);
+
+    // c has no parents
+    {
+        var obj_iter = try repo.log(io, allocator, &.{commit_c});
+        defer obj_iter.deinit();
+        var count: usize = 0;
+        while (try obj_iter.next()) |commit| {
+            defer commit.deinit();
+            count += 1;
+        }
+        try std.testing.expectEqual(1, count);
+    }
+
+    // make another empty commit at foo without checking it out
+    const commit_d = try repo.commitAtRef(io, allocator, .{ .message = "d" }, null, .{ .kind = .head, .name = "foo" });
+
+    // foo points to d
+    {
+        const oid_foo = try repo.readRef(io, .{ .kind = .head, .name = "foo" }) orelse return error.RefNotFound;
+        try std.testing.expectEqualStrings(&commit_d, &oid_foo);
+    }
+}
+
 test "merge" {
     try testMerge(.git, .{ .is_test = true });
     try testMerge(.xit, .{ .is_test = true });

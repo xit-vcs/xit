@@ -459,6 +459,50 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
         }
 
+        pub fn commitAtRef(
+            self: *Repo(repo_kind, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            metadata: obj.CommitMetadata(repo_opts.hash),
+            tree_maybe: ?*obj.Tree,
+            ref: rf.Ref,
+        ) ![hash.hexLen(repo_opts.hash)]u8 {
+            switch (repo_kind) {
+                .git => return try obj.writeCommit(repo_kind, repo_opts, .{ .core = &self.core, .extra = .{} }, io, allocator, metadata, tree_maybe, ref),
+                .xit => {
+                    var result: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+
+                    const Ctx = struct {
+                        core: *Repo(repo_kind, repo_opts).Core,
+                        io: std.Io,
+                        allocator: std.mem.Allocator,
+                        metadata: obj.CommitMetadata(repo_opts.hash),
+                        tree_maybe: ?*obj.Tree,
+                        ref: rf.Ref,
+                        result: *[hash.hexLen(repo_opts.hash)]u8,
+
+                        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                            var moment = try DB.HashMap(.read_write).init(cursor.*);
+                            const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                            ctx.result.* = try obj.writeCommit(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata, ctx.tree_maybe, ctx.ref);
+                            try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
+                        }
+                    };
+
+                    try self.core.db_file.lock(io, .exclusive);
+                    defer self.core.db_file.unlock(io);
+
+                    const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+                    try history.appendContext(
+                        .{ .slot = try history.getSlot(-1) },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .metadata = metadata, .tree_maybe = tree_maybe, .ref = ref, .result = &result },
+                    );
+
+                    return result;
+                },
+            }
+        }
+
         pub fn listTags(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) !rf.RefIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
