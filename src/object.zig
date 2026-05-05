@@ -348,7 +348,7 @@ pub fn CommitMetadata(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub fn writeCommit(
+pub fn writeCommitAtHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
@@ -356,11 +356,6 @@ pub fn writeCommit(
     allocator: std.mem.Allocator,
     metadata: CommitMetadata(repo_opts.hash),
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    const parent_oids = if (metadata.parent_oids) |oids| oids else blk: {
-        const head_oid_maybe = try rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), io);
-        break :blk if (head_oid_maybe) |head_oid| &.{head_oid} else &.{};
-    };
-
     // make sure there is no unfinished merge in progress
     try mrg.checkForUnfinishedMerge(repo_kind, repo_opts, state.readOnly(), io);
 
@@ -373,9 +368,28 @@ pub fn writeCommit(
     defer tree.deinit();
     try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, &index, "", index.root_children.keys());
 
+    return try writeCommit(repo_kind, repo_opts, state, io, allocator, metadata, &tree, "HEAD");
+}
+
+pub fn writeCommit(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    metadata: CommitMetadata(repo_opts.hash),
+    tree: *Tree,
+    ref_path: []const u8,
+) ![hash.hexLen(repo_opts.hash)]u8 {
+    const parent_oids = if (metadata.parent_oids) |oids| oids else blk: {
+        const ref = rf.Ref.initFromPath(ref_path, null) orelse return error.InvalidRef;
+        const oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref });
+        break :blk if (oid_maybe) |oid| &.{oid} else &.{};
+    };
+
     // write and hash tree
     var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try writeTree(repo_kind, repo_opts, state, io, allocator, &tree, &tree_hash_bytes_buffer);
+    try writeTree(repo_kind, repo_opts, state, io, allocator, tree, &tree_hash_bytes_buffer);
     const tree_hash_hex = std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
 
     // don't allow commit if the tree hasn't changed
@@ -485,8 +499,8 @@ pub fn writeCommit(
             try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
             compressed_lock.success = true;
 
-            // write commit id to HEAD
-            try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &commit_hash_hex);
+            // write commit id to ref
+            try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
         },
         .xit => {
             var reader = std.Io.Reader.fixed(commit_contents);
@@ -499,9 +513,9 @@ pub fn writeCommit(
 
             try chunk.writeChunks(repo_opts, state, io, &hashed, commit_contents.len, "commit", &commit_hash_bytes_buffer);
 
-            // write commit id to HEAD
+            // write commit id to ref
             const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
-            try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &commit_hash_hex);
+            try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
         },
     }
 

@@ -1790,7 +1790,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata);
+                    const commit_oid = try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
                     return .{
                         .arena = arena,
@@ -1856,7 +1856,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata);
+                    const commit_oid = try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
                     return .{
                         .arena = arena,

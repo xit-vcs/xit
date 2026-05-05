@@ -426,7 +426,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             metadata: obj.CommitMetadata(repo_opts.hash),
         ) ![hash.hexLen(repo_opts.hash)]u8 {
             switch (repo_kind) {
-                .git => return try obj.writeCommit(repo_kind, repo_opts, .{ .core = &self.core, .extra = .{} }, io, allocator, metadata),
+                .git => return try obj.writeCommitAtHead(repo_kind, repo_opts, .{ .core = &self.core, .extra = .{} }, io, allocator, metadata),
                 .xit => {
                     var result: [hash.hexLen(repo_opts.hash)]u8 = undefined;
 
@@ -440,7 +440,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                            ctx.result.* = try obj.writeCommit(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata);
+                            ctx.result.* = try obj.writeCommitAtHead(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata);
                             try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
                         }
                     };
