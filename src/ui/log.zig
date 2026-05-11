@@ -172,7 +172,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
 
         fn addCommits(self: *LogCommitList(Widget, repo_kind, repo_opts), max_commits: usize) !void {
             for (0..max_commits) |_| {
-                if (try self.commit_iter.next()) |commit_object| {
+                if (try self.commit_iter.next(self.allocator)) |commit_object| {
                     {
                         errdefer commit_object.deinit();
                         try self.commits.append(self.allocator, commit_object.*);

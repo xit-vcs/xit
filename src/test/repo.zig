@@ -119,7 +119,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     {
         var commit_iter = try repo.log(io, allocator, null);
         defer commit_iter.deinit();
-        while (try commit_iter.next()) |commit_object| {
+        while (try commit_iter.next(allocator)) |commit_object| {
             defer commit_object.deinit();
             _ = oid_set.swapRemove(&commit_object.oid);
         }
@@ -240,7 +240,7 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
         var obj_iter = try repo.log(io, allocator, &.{commit_c});
         defer obj_iter.deinit();
         var count: usize = 0;
-        while (try obj_iter.next()) |commit| {
+        while (try obj_iter.next(allocator)) |commit| {
             defer commit.deinit();
             count += 1;
         }
@@ -404,7 +404,7 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
         var dest_obj_iter = try dest_repo.log(io, allocator, &.{commit_k});
         defer dest_obj_iter.deinit();
-        const dest_commit_k = (try dest_obj_iter.next()) orelse return error.ExpectedObject;
+        const dest_commit_k = (try dest_obj_iter.next(allocator)) orelse return error.ExpectedObject;
         defer dest_commit_k.deinit();
     }
 }
@@ -2854,7 +2854,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
     {
         var commit_iter = try repo.log(io, allocator, null);
         defer commit_iter.deinit();
-        while (try commit_iter.next()) |commit_object| {
+        while (try commit_iter.next(allocator)) |commit_object| {
             defer commit_object.deinit();
             try std.testing.expect(oid_set.contains(&commit_object.oid));
             _ = oid_set.swapRemove(&commit_object.oid);
@@ -2874,7 +2874,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
         var commit_iter = try repo.log(io, allocator, &.{commit_g});
         defer commit_iter.deinit();
         try commit_iter.exclude(&commit_b);
-        while (try commit_iter.next()) |commit_object| {
+        while (try commit_iter.next(allocator)) |commit_object| {
             defer commit_object.deinit();
             try std.testing.expect(oid_set.contains(&commit_object.oid));
             _ = oid_set.swapRemove(&commit_object.oid);
@@ -2890,7 +2890,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
         var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state, io, allocator, .{ .kind = .all });
         defer obj_iter.deinit();
         try obj_iter.include(&commit_g);
-        while (try obj_iter.next()) |object| {
+        while (try obj_iter.next(allocator)) |object| {
             defer object.deinit();
             count += 1;
         }

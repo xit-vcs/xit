@@ -1292,7 +1292,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             };
             errdefer self.deinit();
 
-            while (try obj_iter.next()) |object| {
+            while (try obj_iter.next(allocator)) |object| {
                 errdefer object.deinit();
                 try self.objects.append(allocator, object.*);
             }

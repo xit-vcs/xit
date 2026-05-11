@@ -550,7 +550,7 @@ fn runCommand(
 
             var commit_iter = try repo.log(io, allocator, if (start_oids.items.len > 0) start_oids.items else null);
             defer commit_iter.deinit();
-            while (try commit_iter.next()) |commit_object| {
+            while (try commit_iter.next(allocator)) |commit_object| {
                 defer commit_object.deinit();
                 try run_opts.out.print("commit {s}\n", .{commit_object.oid});
                 if (commit_object.content.commit.metadata.author) |author| {

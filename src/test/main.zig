@@ -1357,7 +1357,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         defer iter.deinit();
 
         {
-            var object = try iter.next() orelse return error.ExpectedObject;
+            var object = try iter.next(allocator) orelse return error.ExpectedObject;
             defer object.deinit();
             try std.testing.expectEqual(commit4, object.oid);
 
@@ -1368,7 +1368,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         }
 
         {
-            var object = try iter.next() orelse return error.ExpectedObject;
+            var object = try iter.next(allocator) orelse return error.ExpectedObject;
             defer object.deinit();
             try std.testing.expectEqual(commit3, object.oid);
 
@@ -1379,7 +1379,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         }
 
         {
-            var object = try iter.next() orelse return error.ExpectedObject;
+            var object = try iter.next(allocator) orelse return error.ExpectedObject;
             defer object.deinit();
             try std.testing.expectEqual(commit2, object.oid);
 
@@ -1390,7 +1390,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         }
 
         {
-            var object = try iter.next() orelse return error.ExpectedObject;
+            var object = try iter.next(allocator) orelse return error.ExpectedObject;
             defer object.deinit();
             try std.testing.expectEqual(commit1, object.oid);
 
@@ -1400,7 +1400,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             try std.testing.expectEqualStrings("first commit", message);
         }
 
-        try std.testing.expectEqual(null, try iter.next());
+        try std.testing.expectEqual(null, try iter.next(allocator));
     }
 
     // common ancestor

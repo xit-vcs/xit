@@ -1171,7 +1171,7 @@ pub fn ObjectIterator(
             self.oid_excludes.deinit();
         }
 
-        pub fn next(self: *ObjectIterator(repo_kind, repo_opts, load_kind)) !?*Object(repo_kind, repo_opts, load_kind) {
+        pub fn next(self: *ObjectIterator(repo_kind, repo_opts, load_kind), allocator: std.mem.Allocator) !?*Object(repo_kind, repo_opts, load_kind) {
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
             while (self.oid_queue.popFirst()) |node| {
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
@@ -1184,7 +1184,7 @@ pub fn ObjectIterator(
                     self.depth = node_depth;
                     switch (load_kind) {
                         .raw => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, &next_oid);
+                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, allocator, &next_oid);
                             defer object.deinit();
                             try self.includeContent(object.content, node_depth + 1);
 
@@ -1193,13 +1193,13 @@ pub fn ObjectIterator(
                                 .commit => if (.commit != object.content) continue,
                             }
 
-                            var raw_object = try Object(repo_kind, repo_opts, .raw).init(state, self.io, self.allocator, &next_oid);
+                            var raw_object = try Object(repo_kind, repo_opts, .raw).init(state, self.io, allocator, &next_oid);
                             errdefer raw_object.deinit();
                             self.object = raw_object;
                             return &self.object;
                         },
                         .full => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, &next_oid);
+                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, allocator, &next_oid);
                             errdefer object.deinit();
                             try self.includeContent(object.content, node_depth + 1);
 
@@ -1312,7 +1312,7 @@ pub fn copyFromObjectIterator(
         }
     }
 
-    while (try obj_iter.next()) |object| {
+    while (try obj_iter.next(obj_iter.allocator)) |object| {
         defer object.deinit();
 
         var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);

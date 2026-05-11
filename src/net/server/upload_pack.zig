@@ -478,7 +478,7 @@ const UploadPack = struct {
                 try exclude_iter.include(oid);
             }
 
-            while (try exclude_iter.next()) |excluded_obj| {
+            while (try exclude_iter.next(allocator)) |excluded_obj| {
                 excluded_obj.deinit();
             }
 
@@ -505,7 +505,7 @@ const UploadPack = struct {
         var reachable_commits: std.ArrayList(ParentEntry) = .empty;
         defer reachable_commits.deinit(allocator);
 
-        while (try obj_iter.next()) |object| {
+        while (try obj_iter.next(allocator)) |object| {
             defer object.deinit();
 
             // skip commits older than deepen-since cutoff
@@ -601,7 +601,7 @@ const UploadPack = struct {
             for (reachable_shallows.items) |*oid| {
                 try depth_iter.includeAtDepth(oid, 0);
             }
-            while (try depth_iter.next()) |object| {
+            while (try depth_iter.next(allocator)) |object| {
                 defer object.deinit();
                 if (depth_iter.depth == depth) {
                     if (!shallow_oids.contains(object.oid) and !not_shallow_oids.contains(object.oid)) {
@@ -618,7 +618,7 @@ const UploadPack = struct {
             for (want_obj.items) |*item| {
                 try depth_iter.includeAtDepth(item, 0);
             }
-            while (try depth_iter.next()) |object| {
+            while (try depth_iter.next(allocator)) |object| {
                 defer object.deinit();
                 if (depth_iter.depth == max_depth) {
                     if (!shallow_oids.contains(object.oid) and !not_shallow_oids.contains(object.oid)) {
@@ -1789,7 +1789,7 @@ fn getReachableShallows(
         }
     }
 
-    while (try obj_iter.next()) |object| {
+    while (try obj_iter.next(allocator)) |object| {
         if (remaining.contains(object.oid)) {
             try reachable.append(allocator, object.oid);
             _ = remaining.remove(object.oid);
@@ -1935,7 +1935,7 @@ fn allReachableFromHaves(
         try obj_iter.include(item);
 
         var found = false;
-        while (try obj_iter.next()) |object| {
+        while (try obj_iter.next(allocator)) |object| {
             defer object.deinit();
             if (have_oids.contains(object.oid)) {
                 found = true;

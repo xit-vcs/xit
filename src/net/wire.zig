@@ -418,7 +418,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             var i: usize = 0;
             while (i < 256) {
-                const object = try obj_iter.next() orelse break;
+                const object = try obj_iter.next(allocator) orelse break;
                 defer object.deinit();
                 try net_pkt.bufferHave(repo_kind, repo_opts, allocator, &object.oid, &buffer);
 

@@ -620,7 +620,7 @@ fn writeBlobWithPatches(
 
         const source_path_to_patch_id_cursor_maybe = try source_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->patch-id"));
 
-        while (try iter.next()) |object| {
+        while (try iter.next(allocator)) |object| {
             defer object.deinit();
 
             if (std.mem.eql(u8, base_oid, &object.oid)) {
@@ -1896,7 +1896,7 @@ fn writePossiblePatches(
     var source_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer source_iter.deinit();
     try source_iter.include(source_oid);
-    while (try source_iter.next()) |commit_object| {
+    while (try source_iter.next(allocator)) |commit_object| {
         defer commit_object.deinit();
 
         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
@@ -1906,7 +1906,7 @@ fn writePossiblePatches(
     var target_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer target_iter.deinit();
     try target_iter.include(target_oid);
-    while (try target_iter.next()) |commit_object| {
+    while (try target_iter.next(allocator)) |commit_object| {
         defer commit_object.deinit();
 
         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);

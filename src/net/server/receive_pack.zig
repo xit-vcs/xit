@@ -319,7 +319,7 @@ const ReceivePack = struct {
                 }
 
                 while (true) {
-                    const maybe_obj = obj_iter.next() catch |err| switch (err) {
+                    const maybe_obj = obj_iter.next(allocator) catch |err| switch (err) {
                         error.ObjectNotFound => break :blk false,
                         else => return err,
                     };
@@ -345,7 +345,7 @@ const ReceivePack = struct {
                         try obj_iter.include(&update.new_oid);
 
                         while (true) {
-                            const maybe_obj = obj_iter.next() catch |err| switch (err) {
+                            const maybe_obj = obj_iter.next(allocator) catch |err| switch (err) {
                                 error.ObjectNotFound => break :per_update false,
                                 else => return err,
                             };

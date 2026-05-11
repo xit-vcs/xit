@@ -1277,7 +1277,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
                     defer patch_writer.deinit(ctx.io, ctx.allocator);
 
-                    while (try obj_iter.next()) |commit_object| {
+                    while (try obj_iter.next(ctx.allocator)) |commit_object| {
                         defer commit_object.deinit();
                         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
                         try patch_writer.add(state.readOnly(), ctx.io, ctx.allocator, &oid);
