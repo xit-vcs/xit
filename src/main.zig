@@ -807,7 +807,9 @@ pub fn main(init: std.process.Init) !u8 {
         _ = debug_allocator.deinit();
     };
 
-    var threaded = std.Io.Threaded.init(allocator, .{});
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .environ = init.minimal.environ,
+    });
     defer threaded.deinit();
     const io = threaded.io();
 
