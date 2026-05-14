@@ -257,15 +257,35 @@ fn Server(
                         }
 
                         // create sshd_config file
+                        const sshd_config_str = blk: {
+                            // SetEnv PATH=... allows us to propagate the test process's PATH
+                            // to the spawned login shell (in sshd).
+                            //
+                            // without it, shells that don't auto-resource PATH on startup (e.g. nushell
+                            // on NixOS) through /etc/set-environment will fail to find
+                            // git-upload-pack / git-receive-pack.
+                            const base_config =
+                                \\AuthenticationMethods publickey
+                                \\PubkeyAuthentication yes
+                                \\PasswordAuthentication no
+                                \\StrictModes no
+                                //SetEnv PATH={s} -- if we find $PATH defined.
+                            ;
+                            var env_map = try std.process.Environ.createMap(std.testing.io_instance.environ.process_environ, allocator);
+                            defer env_map.deinit();
+
+                            const config_str = if (env_map.get("PATH")) |path_str|
+                                try std.fmt.allocPrint(allocator, "{s}\n" ++ "SetEnv PATH={s}\n", .{ base_config, path_str })
+                            else
+                                try std.fmt.allocPrint(allocator, "{s}", .{base_config});
+
+                            break :blk config_str;
+                        };
+                        defer allocator.free(sshd_config_str);
+
                         const sshd_config_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd_config", .{});
                         defer sshd_config_file.close(io);
-                        try sshd_config_file.writeStreamingAll(io,
-                            \\AuthenticationMethods publickey
-                            \\PubkeyAuthentication yes
-                            \\PasswordAuthentication no
-                            \\StrictModes no
-                            \\
-                        );
+                        try sshd_config_file.writeStreamingAll(io, sshd_config_str);
                         if (.windows != builtin.os.tag) {
                             try sshd_config_file.setPermissions(io, @enumFromInt(0o600));
                         }
