@@ -7,6 +7,41 @@ const work = xit.workdir;
 const hash = xit.hash;
 const net = xit.net;
 
+/// Resolve a command name to its full path by searching `$PATH`,
+/// using a similar approach as std.Io.Threaded.processExecutablePath.
+///
+/// Without this, newly spawned shells may fail to locate the command/executable depending
+/// on the setup as they may not inherit $PATH env var.
+///
+/// NOTE:
+/// - Assumes we are in a testing environment.
+/// - Assumes a gpa--general purpose allocator--so it handles its own
+/// deinitilization.
+fn resolveCommand(gpa: std.mem.Allocator, command: []const u8) ![]const u8 {
+    const io = std.testing.io;
+    const io_instance = std.testing.io_instance;
+
+    var env_map = try std.process.Environ.createMap(io_instance.environ.process_environ, gpa);
+    defer env_map.deinit();
+
+    const path_env = env_map.get("PATH") orelse return error.FileNotFound;
+
+    var it = std.mem.tokenizeScalar(u8, path_env, std.fs.path.delimiter);
+    while (it.next()) |dir| {
+        // skip if directory does not exist
+        const d = std.Io.Dir.openDirAbsolute(io, dir, .{}) catch continue;
+        defer d.close(io);
+
+        // skip if file      does not exist
+        const file = d.openFile(io, command, .{}) catch continue;
+        file.close(io);
+
+        return try std.fs.path.join(gpa, &.{ dir, command });
+    }
+
+    return error.FileNotFound;
+}
+
 test "git fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -639,7 +674,7 @@ fn testFetch(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-upload-pack"),
+        .git => resolveCommand(allocator, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -812,12 +847,12 @@ fn testPush(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-upload-pack"),
+        .git => resolveCommand(allocator, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
     const receive_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-receive-pack"),
+        .git => resolveCommand(allocator, "git-receive-pack"),
     };
     defer allocator.free(receive_pack_command);
 
@@ -1091,7 +1126,7 @@ fn testClone(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-upload-pack"),
+        .git => resolveCommand(allocator, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -1397,7 +1432,7 @@ fn testFetchLarge(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-upload-pack"),
+        .git => resolveCommand(allocator, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -1636,7 +1671,7 @@ fn testPushLarge(
 
     const receive_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path}),
-        .git => allocator.dupe(u8, "git-receive-pack"),
+        .git => resolveCommand(allocator, "git-receive-pack"),
     };
     defer allocator.free(receive_pack_command);
 
