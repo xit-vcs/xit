@@ -984,8 +984,19 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                 // the value has already been set
                 if (value.len > 0) continue;
 
-                // if the value is a subset of the previous value, just get a slice of it
-                if (i > 0 and location.offset == keys[i - 1].offset and location.size < keys[i - 1].size) {
+                // if the value is a subset of the previous value, just get a slice of it.
+                // this is only valid between two copy_from_base chunks: their `offset` is a
+                // position in the base object, so a smaller copy at the same offset is a
+                // prefix of the larger one. add_new chunks also live in this cache (for
+                // stream-based pack readers) but their `offset` is a position in the delta
+                // instruction stream, an unrelated coordinate space, so they must never be
+                // used as the source of this slice.
+                if (i > 0 and
+                    location.kind == .copy_from_base and
+                    keys[i - 1].kind == .copy_from_base and
+                    location.offset == keys[i - 1].offset and
+                    location.size < keys[i - 1].size)
+                {
                     const last_buffer = values[i - 1];
                     value.* = last_buffer[0..location.size];
                     continue;
