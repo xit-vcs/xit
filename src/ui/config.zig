@@ -14,15 +14,15 @@ pub fn ConfigListItem(comptime Widget: type) type {
         box: wgt.Box(Widget),
 
         pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8) !ConfigListItem(Widget) {
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
 
-            var name_text_box = try wgt.TextBox(Widget).init(allocator, full_name, .single, .none);
+            var name_text_box = try wgt.TextBox(Widget).init(allocator, full_name, .{ .border_style = .single, .wrap_kind = .none });
             errdefer name_text_box.deinit();
             name_text_box.getFocus().focusable = true;
             try box.children.put(allocator, name_text_box.getFocus().id, .{ .widget = .{ .text_box = name_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
 
-            var value_text_box = try wgt.TextBox(Widget).init(allocator, value, .single, .none);
+            var value_text_box = try wgt.TextBox(Widget).init(allocator, value, .{ .border_style = .single, .wrap_kind = .none });
             errdefer value_text_box.deinit();
             value_text_box.getFocus().focusable = true;
             try box.children.put(allocator, value_text_box.getFocus().id, .{ .widget = .{ .text_box = value_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
@@ -41,7 +41,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
         pub fn build(self: *ConfigListItem(Widget), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *item| {
-                item.widget.text_box.border_style = if (self.getFocus().child_id == id)
+                item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                     (if (root_focus.grandchild_id == id) .double_dashed else .single_dashed)
                 else
                     .single_dashed;
@@ -87,7 +87,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
         }
 
         pub fn setBorder(self: *ConfigListItem(Widget), border_style: ?wgt.Box(Widget).BorderStyle) void {
-            self.box.children.values()[1].widget.text_box.border_style = border_style;
+            self.box.children.values()[1].widget.text_box.options.border_style = border_style;
         }
     };
 }
@@ -111,7 +111,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             }
 
             // init box
-            var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit();
 
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {

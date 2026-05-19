@@ -36,13 +36,13 @@ pub fn StatusListItem(comptime Widget: type) type {
                 },
                 .not_tracked => "?",
             };
-            var status_text = try wgt.TextBox(Widget).init(allocator, status_kind_sym, .hidden, .none);
+            var status_text = try wgt.TextBox(Widget).init(allocator, status_kind_sym, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer status_text.deinit();
 
-            var path_text = try wgt.TextBox(Widget).init(allocator, status.path, .hidden, .none);
+            var path_text = try wgt.TextBox(Widget).init(allocator, status.path, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer path_text.deinit();
 
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
             try box.children.put(allocator, status_text.getFocus().id, .{ .widget = .{ .text_box = status_text }, .rect = null, .min_size = null });
             try box.children.put(allocator, path_text.getFocus().id, .{ .widget = .{ .text_box = path_text }, .rect = null, .min_size = null });
@@ -80,7 +80,7 @@ pub fn StatusListItem(comptime Widget: type) type {
         }
 
         pub fn setBorder(self: *StatusListItem(Widget), border_style: ?wgt.BorderStyle) void {
-            self.box.children.values()[1].widget.text_box.border_style = border_style;
+            self.box.children.values()[1].widget.text_box.options.border_style = border_style;
         }
     };
 }
@@ -92,7 +92,7 @@ pub fn StatusList(comptime Widget: type) type {
 
         pub fn init(allocator: std.mem.Allocator, statuses: []StatusItem) !StatusList(Widget) {
             // init inner_box
-            var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit();
             for (statuses) |item| {
                 var list_item = try StatusListItem(Widget).init(allocator, item);
@@ -218,7 +218,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         const tab_count = @typeInfo(work.IndexStatusKind).@"enum".fields.len;
 
         pub fn init(allocator: std.mem.Allocator, status: *work.Status(repo_kind, repo_opts)) !StatusTabs(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -247,7 +247,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                     .not_tracked => "not tracked",
                 };
                 const label = try std.fmt.allocPrint(arena.allocator(), "{s} ({})", .{ name, counts[i] });
-                var text_box = try wgt.TextBox(Widget).init(allocator, label, .single, .none);
+                var text_box = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit();
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -271,7 +271,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         pub fn build(self: *StatusTabs(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
-                tab.widget.text_box.border_style = if (self.getFocus().child_id == id)
+                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                     (if (root_focus.grandchild_id == id) .double else .single)
                 else
                     .hidden;
@@ -376,7 +376,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 },
             }
 
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -551,7 +551,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
             status_ptr.* = status;
 
             // init box
-            var box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit();
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {

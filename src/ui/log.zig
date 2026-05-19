@@ -35,7 +35,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 var commit_iter = try repo.log(io, allocator, null);
                 errdefer commit_iter.deinit();
 
-                var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit();
 
                 // init scroll
@@ -73,7 +73,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             self.clearGrid();
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *commit| {
-                commit.widget.text_box.border_style = if (self.getFocus().child_id == id)
+                commit.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                     (if (root_focus.grandchild_id == id) .double else .single)
                 else
                     .hidden;
@@ -180,7 +180,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
 
                     const inner_box = &self.scroll.child.box;
                     const line = commit_object.content.commit.metadata.message orelse "(empty message)";
-                    var text_box = try wgt.TextBox(Widget).init(self.allocator, line, .hidden, .none);
+                    var text_box = try wgt.TextBox(Widget).init(self.allocator, line, .{ .border_style = .hidden, .wrap_kind = .none });
                     errdefer text_box.deinit();
                     text_box.getFocus().focusable = true;
                     try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -200,7 +200,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
         allocator: std.mem.Allocator,
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
 
             // add commit list

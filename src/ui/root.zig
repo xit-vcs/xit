@@ -19,7 +19,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         const FocusKind = enum { log, status, config, undo };
 
         pub fn init(allocator: std.mem.Allocator) !RootTabs(Widget, repo_kind) {
-            var box = try wgt.Box(Widget).init(allocator, null, .horiz);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit();
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -30,7 +30,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                     .config => "config",
                     .undo => if (repo_kind == .xit) "undo" else continue,
                 };
-                var text_box = try wgt.TextBox(Widget).init(allocator, name, .single, .none);
+                var text_box = try wgt.TextBox(Widget).init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit();
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -50,7 +50,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         pub fn build(self: *RootTabs(Widget, repo_kind), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
-                tab.widget.text_box.border_style = if (self.getFocus().child_id == id)
+                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
                     (if (root_focus.grandchild_id == id) .double else .single)
                 else
                     .hidden;
@@ -117,7 +117,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         const FocusKind = enum { tabs, stack };
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit();
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {

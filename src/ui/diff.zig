@@ -21,13 +21,13 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         bufs: std.ArrayList([]const u8),
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Diff(Widget, repo_kind, repo_opts) {
-            var inner_box = try wgt.Box(Widget).init(allocator, null, .vert);
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit();
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .both);
             errdefer scroll.deinit();
 
-            var outer_box = try wgt.Box(Widget).init(allocator, .single, .vert);
+            var outer_box = try wgt.Box(Widget).init(allocator, .{ .border_style = .single, .direction = .vert });
             errdefer outer_box.deinit();
             try outer_box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
 
@@ -53,7 +53,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         pub fn build(self: *Diff(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            self.box.border_style = if (root_focus.grandchild_id == self.getFocus().id) .double else .single;
+            self.box.options.border_style = if (root_focus.grandchild_id == self.getFocus().id) .double else .single;
             try self.box.build(constraint, root_focus);
 
             // add another diff if necessary
@@ -231,7 +231,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             }
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .hidden, .none);
+            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit();
             try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -284,7 +284,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             }
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .hidden, .none);
+            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit();
             try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
