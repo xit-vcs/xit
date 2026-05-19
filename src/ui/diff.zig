@@ -65,20 +65,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     const inner_box_height = inner_box_grid.size.height;
                     const min_scroll_remaining = 5;
                     if (inner_box_height -| (outer_box_height + u_scroll_y) <= min_scroll_remaining) {
-                        // add the next hunk
-                        if (self.hunk_iter) |*hunk_iter| {
-                            if (hunk_iter.header_lines.items.len > 0) {
-                                try self.addLines(hunk_iter.header_lines.items);
-                                hunk_iter.header_lines.clearAndFree(hunk_iter.arena.allocator());
-                            }
-                            if (try hunk_iter.next(self.iter_arena.allocator())) |*hunk_ptr| {
-                                try self.addHunk(hunk_iter, hunk_ptr);
-                            } else {
-                                self.hunk_iter = null;
-                            }
-                        }
-
-                        // get the next hunk iter
+                        // get the next file
                         if (self.hunk_iter == null) {
                             if (self.file_iter) |*file_iter| {
                                 if (try file_iter.next()) |line_iter_pair| {
@@ -92,6 +79,19 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                 } else {
                                     self.file_iter = null;
                                 }
+                            }
+                        }
+
+                        // add the next hunk
+                        if (self.hunk_iter) |*hunk_iter| {
+                            if (hunk_iter.header_lines.items.len > 0) {
+                                try self.addLines(hunk_iter.header_lines.items);
+                                hunk_iter.header_lines.clearAndFree(hunk_iter.arena.allocator());
+                            }
+                            if (try hunk_iter.next(self.iter_arena.allocator())) |*hunk_ptr| {
+                                try self.addHunk(hunk_iter, hunk_ptr);
+                            } else {
+                                self.hunk_iter = null;
                             }
                         }
                     }

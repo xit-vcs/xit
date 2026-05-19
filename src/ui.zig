@@ -163,17 +163,27 @@ pub fn start(
     var last_grid = try Grid.init(allocator, last_size);
     defer last_grid.deinit();
 
-    while (!term.quit) {
+    while (!term.quit.load(.monotonic)) {
         // render to tty
-        try terminal.render(&root, &last_grid, &last_size);
+        const grid_changed = try terminal.render(&root, &last_grid, &last_size);
 
-        // process any inputs
-        while (try terminal.readKey(io)) |key| {
+        // process any inputs.
+        //
+        // if the grid didn't change, then first do a blocking
+        // read, so the thread will sleep until further input.
+        // after that, all remaining reads are non-blocking so
+        // we can process the rest of the queued inputs.
+        //
+        // if the grid *did* change, then only do non-blocking
+        // reads. we do not want to sleep the thread because
+        // there may be an animation that requires more looping.
+        var blocking = !grid_changed;
+        while (try terminal.readKey(io, blocking)) |key| {
             switch (key) {
-                .codepoint => |cp| if (cp == 'q') return,
-                else => {},
+                .codepoint => |cp| if (cp == 'q') return else try root.input(key, root.getFocus()),
+                else => try root.input(key, root.getFocus()),
             }
-            try input(repo_kind, repo_opts, &root, key);
+            blocking = false;
         }
 
         // rebuild widget
@@ -181,8 +191,5 @@ pub fn start(
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, root.getFocus());
-
-        // TODO: do variable sleep with target frame rate
-        try std.Io.sleep(io, .fromMilliseconds(5), .real);
     }
 }
