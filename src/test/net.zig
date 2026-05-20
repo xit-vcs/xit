@@ -7,41 +7,6 @@ const work = xit.workdir;
 const hash = xit.hash;
 const net = xit.net;
 
-/// Resolve a command name to its full path by searching `$PATH`,
-/// using a similar approach as std.Io.Threaded.processExecutablePath.
-///
-/// Without this, newly spawned shells may fail to locate the command/executable depending
-/// on the setup as they may not inherit $PATH env var.
-///
-/// NOTE:
-/// - Assumes we are in a testing environment.
-/// - Assumes a gpa--general purpose allocator--so it handles its own
-/// deinitilization.
-fn resolveCommand(gpa: std.mem.Allocator, command: []const u8) ![]const u8 {
-    const io = std.testing.io;
-    const io_instance = std.testing.io_instance;
-
-    var env_map = try std.process.Environ.createMap(io_instance.environ.process_environ, gpa);
-    defer env_map.deinit();
-
-    const path_env = env_map.get("PATH") orelse return error.FileNotFound;
-
-    var it = std.mem.tokenizeScalar(u8, path_env, std.fs.path.delimiter);
-    while (it.next()) |dir| {
-        // skip if directory does not exist
-        const d = std.Io.Dir.openDirAbsolute(io, dir, .{}) catch continue;
-        defer d.close(io);
-
-        // skip if file      does not exist
-        const file = d.openFile(io, command, .{}) catch continue;
-        file.close(io);
-
-        return try std.fs.path.join(gpa, &.{ dir, command });
-    }
-
-    return error.FileNotFound;
-}
-
 test "git fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -292,15 +257,35 @@ fn Server(
                         }
 
                         // create sshd_config file
+                        const sshd_config_str = blk: {
+                            // SetEnv PATH=... allows us to propagate the test process's PATH
+                            // to the spawned login shell (in sshd).
+                            //
+                            // without it, shells that don't auto-resource PATH on startup (e.g. nushell
+                            // on NixOS) through /etc/set-environment will fail to find
+                            // git-upload-pack / git-receive-pack.
+                            const base_config =
+                                \\AuthenticationMethods publickey
+                                \\PubkeyAuthentication yes
+                                \\PasswordAuthentication no
+                                \\StrictModes no
+                                //SetEnv PATH={s} -- if we find $PATH defined.
+                            ;
+                            var env_map = try std.process.Environ.createMap(std.testing.io_instance.environ.process_environ, allocator);
+                            defer env_map.deinit();
+
+                            const config_str = if (env_map.get("PATH")) |path_str|
+                                try std.fmt.allocPrint(allocator, "{s}\n" ++ "SetEnv PATH={s}\n", .{ base_config, path_str })
+                            else
+                                try std.fmt.allocPrint(allocator, "{s}", .{base_config});
+
+                            break :blk config_str;
+                        };
+                        defer allocator.free(sshd_config_str);
+
                         const sshd_config_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd_config", .{});
                         defer sshd_config_file.close(io);
-                        try sshd_config_file.writeStreamingAll(io,
-                            \\AuthenticationMethods publickey
-                            \\PubkeyAuthentication yes
-                            \\PasswordAuthentication no
-                            \\StrictModes no
-                            \\
-                        );
+                        try sshd_config_file.writeStreamingAll(io, sshd_config_str);
                         if (.windows != builtin.os.tag) {
                             try sshd_config_file.setPermissions(io, @enumFromInt(0o600));
                         }
@@ -674,7 +659,7 @@ fn testFetch(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-upload-pack"),
+        .git => allocator.dupe(u8, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -847,12 +832,12 @@ fn testPush(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-upload-pack"),
+        .git => allocator.dupe(u8, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
     const receive_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-receive-pack"),
+        .git => allocator.dupe(u8, "git-receive-pack"),
     };
     defer allocator.free(receive_pack_command);
 
@@ -1126,7 +1111,7 @@ fn testClone(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-upload-pack"),
+        .git => allocator.dupe(u8, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -1432,7 +1417,7 @@ fn testFetchLarge(
 
     const upload_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit upload-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-upload-pack"),
+        .git => allocator.dupe(u8, "git-upload-pack"),
     };
     defer allocator.free(upload_pack_command);
 
@@ -1671,7 +1656,7 @@ fn testPushLarge(
 
     const receive_pack_command = try switch (server_repo_kind) {
         .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path}),
-        .git => resolveCommand(allocator, "git-receive-pack"),
+        .git => allocator.dupe(u8, "git-receive-pack"),
     };
     defer allocator.free(receive_pack_command);
 
