@@ -188,8 +188,21 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     const child = &self.box.children.values()[current_index].widget;
                     var index = current_index;
 
-                    switch (key) {
-                        .arrow_up => {
+                    // scroll wheel moves the selection across tab/stack just
+                    // like arrow up/down does
+                    const Direction = enum { up, down, none };
+                    const direction: Direction = switch (key) {
+                        .arrow_up => .up,
+                        .arrow_down => .down,
+                        .mouse => |mouse| if (mouse.action == .scroll)
+                            (if (mouse.action.scroll == .up) .up else .down)
+                        else
+                            .none,
+                        else => .none,
+                    };
+
+                    switch (direction) {
+                        .up => {
                             switch (child.*) {
                                 .ui_root_tabs => {
                                     try child.input(key, root_focus);
@@ -232,7 +245,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                 else => {},
                             }
                         },
-                        .arrow_down => {
+                        .down => {
                             switch (child.*) {
                                 .ui_root_tabs => {
                                     index = @intFromEnum(FocusKind.stack);
@@ -243,7 +256,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                 else => {},
                             }
                         },
-                        else => {
+                        .none => {
                             try child.input(key, root_focus);
                         },
                     }

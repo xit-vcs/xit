@@ -166,6 +166,15 @@ pub fn StatusList(comptime Widget: type) type {
                                     }
                                 }
                             },
+                            .mouse => |mouse| switch (mouse.action) {
+                                .scroll => |dir| switch (dir) {
+                                    .up => break :blk current_index -| 1,
+                                    .down => if (current_index + 1 < children.count()) {
+                                        break :blk current_index + 1;
+                                    },
+                                },
+                                else => {},
+                            },
                             else => {},
                         }
                         break :blk current_index;
@@ -336,6 +345,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         status: *work.Status(repo_kind, repo_opts),
         io: std.Io,
         allocator: std.mem.Allocator,
+        diffed_status_index: ?usize,
 
         const FocusKind = enum { status_list, diff };
 
@@ -403,9 +413,10 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 .status = status,
                 .io = io,
                 .allocator = allocator,
+                .diffed_status_index = null,
             };
             status_content.getFocus().child_id = box.children.keys()[0];
-            try status_content.updateDiff();
+            try status_content.refreshDiffIfNeeded();
             return status_content;
         }
 
@@ -417,6 +428,9 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         pub fn build(self: *StatusContent(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             if (self.filtered_statuses.items.len > 0) {
+                // regenerate the diff only when the selected status actually
+                // changed — keeps scroll-burst handling cheap.
+                try self.refreshDiffIfNeeded();
                 try self.box.build(constraint, root_focus);
             }
         }
@@ -458,9 +472,6 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                             else => {},
                         }
                         try child.input(key, root_focus);
-                        if (child.* == .ui_status_list) {
-                            try self.updateDiff();
-                        }
                         break :blk current_index;
                     };
 
@@ -505,6 +516,14 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 }
             }
             return true;
+        }
+
+        fn refreshDiffIfNeeded(self: *StatusContent(Widget, repo_kind, repo_opts)) !void {
+            const status_list = &self.box.children.values()[0].widget.ui_status_list;
+            const current = status_list.getSelectedIndex();
+            if (current == self.diffed_status_index) return;
+            try self.updateDiff();
+            self.diffed_status_index = current;
         }
 
         fn updateDiff(self: *StatusContent(Widget, repo_kind, repo_opts)) !void {
@@ -608,10 +627,23 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                 if (self.box.children.getIndex(child_id)) |current_index| {
                     const child = &self.box.children.values()[current_index].widget;
 
+                    // scroll wheel moves the selection across tabs/content just
+                    // like arrow up/down does
+                    const Direction = enum { up, down, none };
+                    const direction: Direction = switch (key) {
+                        .arrow_up => .up,
+                        .arrow_down => .down,
+                        .mouse => |mouse| if (mouse.action == .scroll)
+                            (if (mouse.action.scroll == .up) .up else .down)
+                        else
+                            .none,
+                        else => .none,
+                    };
+
                     var index = blk: {
                         switch (child.*) {
                             .ui_status_tabs => |*child_ui_status_tabs| {
-                                if (key == .arrow_down) {
+                                if (direction == .down) {
                                     break :blk @intFromEnum(FocusKind.status_content);
                                 } else {
                                     try child_ui_status_tabs.input(key, root_focus);
@@ -619,7 +651,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                             },
                             .stack => |*child_stack| {
                                 if (child_stack.getSelected()) |selected_widget| {
-                                    if (key == .arrow_up and selected_widget.ui_status_content.scrolledToTop()) {
+                                    if (direction == .up and selected_widget.ui_status_content.scrolledToTop()) {
                                         break :blk @intFromEnum(FocusKind.status_tabs);
                                     } else {
                                         try child_stack.input(key, root_focus);

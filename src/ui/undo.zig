@@ -126,6 +126,15 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                                 }
                             }
                         },
+                        .mouse => |mouse| switch (mouse.action) {
+                            .scroll => |dir| switch (dir) {
+                                .up => index -|= 1,
+                                .down => if (index + 1 < children.count()) {
+                                    index += 1;
+                                },
+                            },
+                            else => {},
+                        },
                         else => {},
                     }
 

@@ -180,7 +180,26 @@ pub fn start(
         var blocking = !grid_changed;
         while (try terminal.readKey(io, blocking)) |key| {
             switch (key) {
-                .codepoint => |cp| if (cp == 'q') return else try root.input(key, root.getFocus()),
+                .codepoint => |cp| if (cp == 'q') return,
+                .mouse => |mouse| {
+                    if (mouse.action == .press and mouse.action.press == .left) {
+                        const root_focus = root.getFocus();
+                        var iter = root_focus.children.iterator();
+                        while (iter.next()) |entry| {
+                            const child = entry.value_ptr.*;
+                            if (!child.focus.focusable) continue;
+                            const r = child.rect;
+                            if (mouse.x >= r.x and mouse.y >= r.y and
+                                mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
+                            {
+                                try root_focus.setFocus(entry.key_ptr.*);
+                                break;
+                            }
+                        }
+                    } else {
+                        try root.input(key, root.getFocus());
+                    }
+                },
                 else => try root.input(key, root.getFocus()),
             }
             blocking = false;

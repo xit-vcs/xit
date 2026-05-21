@@ -131,6 +131,15 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                                 }
                             }
                         },
+                        .mouse => |mouse| switch (mouse.action) {
+                            .scroll => |dir| switch (dir) {
+                                .up => index -|= 1,
+                                .down => if (index + 1 < children.count()) {
+                                    index += 1;
+                                },
+                            },
+                            else => {},
+                        },
                         else => {},
                     }
 
@@ -198,6 +207,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
         repo: *rp.Repo(repo_kind, repo_opts),
         io: std.Io,
         allocator: std.mem.Allocator,
+        diffed_commit_index: ?usize,
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -223,9 +233,10 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                 .repo = repo,
                 .io = io,
                 .allocator = allocator,
+                .diffed_commit_index = null,
             };
             git_log.getFocus().child_id = box.children.keys()[0];
-            try git_log.updateDiff();
+            try git_log.refreshDiffIfNeeded();
 
             return git_log;
         }
@@ -236,6 +247,10 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
 
         pub fn build(self: *Log(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
+            // regenerate the diff only when the selected commit actually changed.
+            // doing this here (instead of in input) means a burst of scroll
+            // events only triggers one diff computation, per render cycle.
+            try self.refreshDiffIfNeeded();
             try self.box.build(constraint, root_focus);
         }
 
@@ -276,9 +291,6 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                             else => {},
                         }
                         try child.input(key, root_focus);
-                        if (child.* == .ui_log_commit_list) {
-                            try self.updateDiff();
-                        }
                         break :blk current_index;
                     };
 
@@ -321,6 +333,14 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                 }
             }
             return true;
+        }
+
+        fn refreshDiffIfNeeded(self: *Log(Widget, repo_kind, repo_opts)) !void {
+            const commit_list = &self.box.children.values()[0].widget.ui_log_commit_list;
+            const current = commit_list.getSelectedIndex();
+            if (current == self.diffed_commit_index) return;
+            try self.updateDiff();
+            self.diffed_commit_index = current;
         }
 
         fn updateDiff(self: *Log(Widget, repo_kind, repo_opts)) !void {

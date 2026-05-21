@@ -186,6 +186,15 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                                 }
                             }
                         },
+                        .mouse => |mouse| switch (mouse.action) {
+                            .scroll => |dir| switch (dir) {
+                                .up => index -|= 1,
+                                .down => if (index + 1 < children.count()) {
+                                    index += 1;
+                                },
+                            },
+                            else => {},
+                        },
                         else => {
                             try children.values()[index].widget.input(key, root_focus);
                         },
