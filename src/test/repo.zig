@@ -2,14 +2,13 @@
 //! runs with both git and xit modes.
 
 const std = @import("std");
-const xit = @import("xit");
-const hash = xit.hash;
-const rp = xit.repo;
-const rf = xit.ref;
-const obj = xit.object;
-const mrg = xit.merge;
-const df = xit.diff;
-const ui = xit.ui;
+const hash = @import("../hash.zig");
+const rp = @import("../repo.zig");
+const rf = @import("../ref.zig");
+const obj = @import("../object.zig");
+const mrg = @import("../merge.zig");
+const df = @import("../diff.zig");
+const ui = @import("../ui.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,

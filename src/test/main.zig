@@ -4,15 +4,14 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const xit = @import("xit");
-const main = xit.main;
-const hash = xit.hash;
-const idx = xit.index;
-const obj = xit.object;
-const rf = xit.ref;
-const rp = xit.repo;
-const df = xit.diff;
-const mrg = xit.merge;
+const main = @import("../main.zig");
+const hash = @import("../hash.zig");
+const idx = @import("../index.zig");
+const obj = @import("../object.zig");
+const rf = @import("../ref.zig");
+const rp = @import("../repo.zig");
+const df = @import("../diff.zig");
+const mrg = @import("../merge.zig");
 
 const c = @cImport({
     @cInclude("git2.h");
