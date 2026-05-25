@@ -918,13 +918,14 @@ pub fn MyersDiffIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
 test "myers diff" {
     const repo_kind = rp.RepoKind.git;
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
     {
         const lines1 = "A\nB\nC\nA\nB\nB\nA";
         const lines2 = "C\nB\nA\nB\nA\nC";
-        var line_iter1 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, lines1);
+        var line_iter1 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, lines1);
         defer line_iter1.deinit();
-        var line_iter2 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, lines2);
+        var line_iter2 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, lines2);
         defer line_iter2.deinit();
         const expected_diff = [_]Edit{
             .{ .del = .{ .old_line = .{ .num = 0 } } },
@@ -952,9 +953,9 @@ test "myers diff" {
     {
         const lines1 = "hello, world!";
         const lines2 = "goodbye, world!";
-        var line_iter1 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, lines1);
+        var line_iter1 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, lines1);
         defer line_iter1.deinit();
-        var line_iter2 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, lines2);
+        var line_iter2 = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, lines2);
         defer line_iter2.deinit();
         const expected_diff = [_]Edit{
             .{ .del = .{ .old_line = .{ .num = 0 } } },
@@ -1145,6 +1146,7 @@ pub fn Diff3Iterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 test "diff3" {
     const repo_kind = rp.RepoKind.git;
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
+    const io = std.testing.io;
     const allocator = std.testing.allocator;
 
     const orig_lines =
@@ -1174,11 +1176,11 @@ test "diff3" {
         \\beer
     ;
 
-    var orig_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, orig_lines);
+    var orig_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, orig_lines);
     defer orig_iter.deinit();
-    var alice_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, alice_lines);
+    var alice_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, alice_lines);
     defer alice_iter.deinit();
-    var bob_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, bob_lines);
+    var bob_iter = try LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, bob_lines);
     defer bob_iter.deinit();
     var diff3_iter = try Diff3Iterator(repo_kind, repo_opts).init(allocator, &orig_iter, &alice_iter, &bob_iter);
     defer diff3_iter.deinit();
