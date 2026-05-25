@@ -18,9 +18,6 @@ pub fn build(b: *std.Build) !void {
         });
         exe.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
         exe.root_module.addImport("xitui", b.dependency("xitui", .{}).module("xitui"));
-        if (.windows == builtin.os.tag) {
-            exe.root_module.link_libc = true;
-        }
         exe.use_llvm = true;
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -57,9 +54,6 @@ pub fn build(b: *std.Build) !void {
             }),
         });
         exe.root_module.addImport("xit", xit);
-        if (.windows == builtin.os.tag) {
-            exe.root_module.link_libc = true;
-        }
         exe.use_llvm = true;
         b.installArtifact(exe);
 
@@ -116,9 +110,6 @@ pub fn build(b: *std.Build) !void {
             .filters = test_filters,
         });
         unit_tests.root_module.addImport("xit", xit);
-        if (.windows == builtin.os.tag) {
-            unit_tests.root_module.link_libc = true;
-        }
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
