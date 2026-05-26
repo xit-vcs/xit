@@ -137,7 +137,7 @@ receive-pack  receive what is pushed into the repository.
 http-backend  a CGI program forwarding receive-pack and upload-pack over HTTP.
 ```
 
-To launch the TUI, just run `xit` without arguments, and press `q` to quit it. In the repo created above, it'll look like this:
+To launch the TUI, just run `xit` without arguments, and press escape to quit it. In the repo created above, it'll look like this:
 
 ```
 ╔═══╗                                                               
