@@ -20,7 +20,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
 
         pub fn init(allocator: std.mem.Allocator) !RootTabs(Widget, repo_kind) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
                 const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
@@ -31,7 +31,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                     .undo => if (repo_kind == .xit) "undo" else continue,
                 };
                 var text_box = try wgt.TextBox(Widget).init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
-                errdefer text_box.deinit();
+                errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
@@ -43,11 +43,11 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
             return ui_root_tabs;
         }
 
-        pub fn deinit(self: *RootTabs(Widget, repo_kind)) void {
-            self.box.deinit();
+        pub fn deinit(self: *RootTabs(Widget, repo_kind), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *RootTabs(Widget, repo_kind), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *RootTabs(Widget, repo_kind), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
                 tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
@@ -55,10 +55,11 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                 else
                     .hidden;
             }
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *RootTabs(Widget, repo_kind), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *RootTabs(Widget, repo_kind), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -118,41 +119,41 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
                 const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
                 switch (focus_kind) {
                     .tabs => {
                         var ui_root_tabs = try RootTabs(Widget, repo_kind).init(allocator);
-                        errdefer ui_root_tabs.deinit();
+                        errdefer ui_root_tabs.deinit(allocator);
                         try box.children.put(allocator, ui_root_tabs.getFocus().id, .{ .widget = .{ .ui_root_tabs = ui_root_tabs }, .rect = null, .min_size = null });
                     },
                     .stack => {
                         var stack = wgt.Stack(Widget).init(allocator);
-                        errdefer stack.deinit();
+                        errdefer stack.deinit(allocator);
 
                         {
                             var log = Widget{ .ui_log = try ui_log.Log(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
-                            errdefer log.deinit();
+                            errdefer log.deinit(allocator);
                             try stack.children.put(allocator, log.getFocus().id, log);
                         }
 
                         {
                             var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
-                            errdefer status.deinit();
+                            errdefer status.deinit(allocator);
                             try stack.children.put(allocator, status.getFocus().id, status);
                         }
 
                         {
                             var config = Widget{ .ui_config_list = try ui_config.ConfigList(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
-                            errdefer config.deinit();
+                            errdefer config.deinit(allocator);
                             try stack.children.put(allocator, config.getFocus().id, config);
                         }
 
                         if (repo_kind == .xit) {
                             var undo = Widget{ .ui_undo = try ui_undo.Undo(Widget, repo_kind, repo_opts).init(allocator, repo) };
-                            errdefer undo.deinit();
+                            errdefer undo.deinit(allocator);
                             try stack.children.put(allocator, undo.getFocus().id, undo);
                         }
 
@@ -168,21 +169,21 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             return ui_root;
         }
 
-        pub fn deinit(self: *Root(Widget, repo_kind, repo_opts)) void {
-            self.box.deinit();
+        pub fn deinit(self: *Root(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *Root(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *Root(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             const ui_root_tabs = &self.box.children.values()[@intFromEnum(FocusKind.tabs)].widget.ui_root_tabs;
             const ui_root_stack = &self.box.children.values()[@intFromEnum(FocusKind.stack)].widget.stack;
             if (ui_root_tabs.getSelectedIndex()) |index| {
                 ui_root_stack.getFocus().child_id = ui_root_stack.children.keys()[index];
             }
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *Root(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Root(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             if (self.getFocus().child_id) |child_id| {
                 if (self.box.children.getIndex(child_id)) |current_index| {
                     const child = &self.box.children.values()[current_index].widget;
@@ -205,7 +206,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         .up => {
                             switch (child.*) {
                                 .ui_root_tabs => {
-                                    try child.input(key, root_focus);
+                                    try child.input(allocator, key, root_focus);
                                 },
                                 .stack => |stack| {
                                     if (stack.getSelected()) |selected_widget| {
@@ -214,28 +215,28 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                                 if (selected_widget.ui_log.scrolledToTop()) {
                                                     index = @intFromEnum(FocusKind.tabs);
                                                 } else {
-                                                    try child.input(key, root_focus);
+                                                    try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_status => {
                                                 if (selected_widget.ui_status.getSelectedIndex() == 0) {
                                                     index = @intFromEnum(FocusKind.tabs);
                                                 } else {
-                                                    try child.input(key, root_focus);
+                                                    try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_undo => {
                                                 if (selected_widget.ui_undo.scrolledToTop()) {
                                                     index = @intFromEnum(FocusKind.tabs);
                                                 } else {
-                                                    try child.input(key, root_focus);
+                                                    try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_config_list => {
                                                 if (selected_widget.ui_config_list.getSelectedIndex() == 0) {
                                                     index = @intFromEnum(FocusKind.tabs);
                                                 } else {
-                                                    try child.input(key, root_focus);
+                                                    try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             else => {},
@@ -251,13 +252,13 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                     index = @intFromEnum(FocusKind.stack);
                                 },
                                 .stack => {
-                                    try child.input(key, root_focus);
+                                    try child.input(allocator, key, root_focus);
                                 },
                                 else => {},
                             }
                         },
                         .none => {
-                            try child.input(key, root_focus);
+                            try child.input(allocator, key, root_focus);
                         },
                     }
 

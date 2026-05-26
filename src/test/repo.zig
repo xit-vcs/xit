@@ -72,7 +72,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .log);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -652,7 +652,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -743,7 +743,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -786,7 +786,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -926,7 +926,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -1021,7 +1021,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -1066,7 +1066,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -1453,7 +1453,7 @@ fn testMergeConflictModifyDelete(comptime repo_kind: rp.RepoKind, comptime repo_
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -1594,7 +1594,7 @@ fn testMergeConflictDeleteModify(comptime repo_kind: rp.RepoKind, comptime repo_
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -1737,7 +1737,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         {
             const grid = try root.getGrid().?.toString(allocator);
@@ -1770,8 +1770,8 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
             , grid_without_tabs);
         }
 
-        try ui.input(repo_kind, repo_opts, &root, .arrow_down);
-        try ui.input(repo_kind, repo_opts, &root, .arrow_right);
+        try ui.input(repo_kind, repo_opts, &root, allocator, .arrow_down);
+        try ui.input(repo_kind, repo_opts, &root, allocator, .arrow_right);
 
         {
             const grid = try root.getGrid().?.toString(allocator);
@@ -1792,7 +1792,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
             , grid_without_tabs);
         }
 
-        try ui.input(repo_kind, repo_opts, &root, .arrow_right);
+        try ui.input(repo_kind, repo_opts, &root, allocator, .arrow_right);
 
         {
             const grid = try root.getGrid().?.toString(allocator);
@@ -1948,7 +1948,7 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         {
             const grid = try root.getGrid().?.toString(allocator);
@@ -1969,8 +1969,8 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
             , grid_without_tabs);
         }
 
-        try ui.input(repo_kind, repo_opts, &root, .arrow_down);
-        try ui.input(repo_kind, repo_opts, &root, .arrow_right);
+        try ui.input(repo_kind, repo_opts, &root, allocator, .arrow_down);
+        try ui.input(repo_kind, repo_opts, &root, allocator, .arrow_right);
 
         {
             const grid = try root.getGrid().?.toString(allocator);
@@ -2146,7 +2146,7 @@ pub fn testMergeConflictBinary(comptime repo_kind: rp.RepoKind, comptime repo_op
 
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .status);
-        defer root.deinit();
+        defer root.deinit(allocator);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);

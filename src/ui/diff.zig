@@ -13,7 +13,6 @@ const df = @import("../diff.zig");
 pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         box: wgt.Box(Widget),
-        allocator: std.mem.Allocator,
         repo: *rp.Repo(repo_kind, repo_opts),
         iter_arena: std.heap.ArenaAllocator,
         file_iter: ?df.FileIterator(repo_kind, repo_opts),
@@ -22,18 +21,17 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Diff(Widget, repo_kind, repo_opts) {
             var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-            errdefer inner_box.deinit();
+            errdefer inner_box.deinit(allocator);
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .both);
-            errdefer scroll.deinit();
+            errdefer scroll.deinit(allocator);
 
             var outer_box = try wgt.Box(Widget).init(allocator, .{ .border_style = .single, .direction = .vert });
-            errdefer outer_box.deinit();
+            errdefer outer_box.deinit(allocator);
             try outer_box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
 
             return .{
                 .box = outer_box,
-                .allocator = allocator,
                 .repo = repo,
                 .iter_arena = std.heap.ArenaAllocator.init(allocator),
                 .file_iter = null,
@@ -42,19 +40,19 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             };
         }
 
-        pub fn deinit(self: *Diff(Widget, repo_kind, repo_opts)) void {
+        pub fn deinit(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             for (self.bufs.items) |buf| {
-                self.allocator.free(buf);
+                allocator.free(buf);
             }
             self.iter_arena.deinit();
-            self.bufs.deinit(self.allocator);
-            self.box.deinit();
+            self.bufs.deinit(allocator);
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *Diff(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             self.box.options.border_style = if (root_focus.grandchild_id == self.getFocus().id) .double else .single;
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
 
             // add another diff if necessary
             if (self.box.grid) |outer_box_grid| {
@@ -85,11 +83,11 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         // add the next hunk
                         if (self.hunk_iter) |*hunk_iter| {
                             if (hunk_iter.header_lines.items.len > 0) {
-                                try self.addLines(hunk_iter.header_lines.items);
+                                try self.addLines(allocator, hunk_iter.header_lines.items);
                                 hunk_iter.header_lines.clearAndFree(hunk_iter.arena.allocator());
                             }
                             if (try hunk_iter.next(self.iter_arena.allocator())) |*hunk_ptr| {
-                                try self.addHunk(hunk_iter, hunk_ptr);
+                                try self.addHunk(allocator, hunk_iter, hunk_ptr);
                             } else {
                                 self.hunk_iter = null;
                             }
@@ -99,7 +97,8 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             }
         }
 
-        pub fn input(self: *Diff(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             _ = root_focus;
             switch (key) {
                 .arrow_up => {
@@ -210,12 +209,12 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             return self.box.getFocus();
         }
 
-        pub fn clearDiffs(self: *Diff(Widget, repo_kind, repo_opts)) !void {
+        pub fn clearDiffs(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
             // clear buffers
             for (self.bufs.items) |buf| {
-                self.allocator.free(buf);
+                allocator.free(buf);
             }
-            self.bufs.clearAndFree(self.allocator);
+            self.bufs.clearAndFree(allocator);
 
             // reset the arena
             self.file_iter = null;
@@ -224,9 +223,9 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             // remove old diff widgets
             for (self.box.children.values()[0].widget.scroll.child.box.children.values()) |*child| {
-                child.widget.deinit();
+                child.widget.deinit(allocator);
             }
-            self.box.children.values()[0].widget.scroll.child.box.children.clearAndFree(self.allocator);
+            self.box.children.values()[0].widget.scroll.child.box.children.clearAndFree(allocator);
 
             // reset scroll position
             const widget = &self.box.children.values()[0].widget;
@@ -234,9 +233,9 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             widget.scroll.y = 0;
         }
 
-        pub fn addLines(self: *Diff(Widget, repo_kind, repo_opts), lines: []const []const u8) !void {
+        pub fn addLines(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, lines: []const []const u8) !void {
             const buf = blk: {
-                var writer = std.Io.Writer.Allocating.init(self.allocator);
+                var writer = std.Io.Writer.Allocating.init(allocator);
                 errdefer writer.deinit();
 
                 // add header
@@ -249,23 +248,24 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             // add buffer
             {
-                errdefer self.allocator.free(buf);
-                try self.bufs.append(self.allocator, buf);
+                errdefer allocator.free(buf);
+                try self.bufs.append(allocator, buf);
             }
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer text_box.deinit();
-            try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         pub fn addHunk(
             self: *Diff(Widget, repo_kind, repo_opts),
+            allocator: std.mem.Allocator,
             hunk_iter: *const df.HunkIterator(repo_kind, repo_opts),
             hunk: *const df.Hunk(repo_kind, repo_opts),
         ) !void {
             const buf = blk: {
-                var writer = std.Io.Writer.Allocating.init(self.allocator);
+                var writer = std.Io.Writer.Allocating.init(allocator);
                 errdefer writer.deinit();
 
                 // create buffer from hunk
@@ -302,14 +302,14 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             // add buffer
             {
-                errdefer self.allocator.free(buf);
-                try self.bufs.append(self.allocator, buf);
+                errdefer allocator.free(buf);
+                try self.bufs.append(allocator, buf);
             }
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(self.allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer text_box.deinit();
-            try self.box.children.values()[0].widget.scroll.child.box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+            var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            errdefer text_box.deinit(allocator);
+            try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
 
         pub fn getScrollX(self: Diff(Widget, repo_kind, repo_opts)) isize {

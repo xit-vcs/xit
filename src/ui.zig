@@ -38,21 +38,21 @@ pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         ui_config_list: ui_config.ConfigList(Widget(repo_kind, repo_opts), repo_kind, repo_opts),
         ui_config_list_item: ui_config.ConfigListItem(Widget(repo_kind, repo_opts)),
 
-        pub fn deinit(self: *Widget(repo_kind, repo_opts)) void {
+        pub fn deinit(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             switch (self.*) {
-                inline else => |*case| case.deinit(),
+                inline else => |*case| case.deinit(allocator),
             }
         }
 
-        pub fn build(self: *Widget(repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
+        pub fn build(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) anyerror!void {
             switch (self.*) {
-                inline else => |*case| try case.build(constraint, root_focus),
+                inline else => |*case| try case.build(allocator, constraint, root_focus),
             }
         }
 
-        pub fn input(self: *Widget(repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) anyerror!void {
+        pub fn input(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) anyerror!void {
             switch (self.*) {
-                inline else => |*case| try case.input(key, root_focus),
+                inline else => |*case| try case.input(allocator, key, root_focus),
             }
         }
 
@@ -85,10 +85,10 @@ pub fn rootWidget(
     cmd_kind_maybe: ?cmd.CommandKind,
 ) !Widget(repo_kind, repo_opts) {
     var root = Widget(repo_kind, repo_opts){ .ui_root = try ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts).init(io, allocator, repo) };
-    errdefer root.deinit();
+    errdefer root.deinit(allocator);
 
     // set initial focus for root widget
-    try root.build(.{
+    try root.build(allocator, .{
         .min_size = .{ .width = null, .height = null },
         .max_size = .{ .width = 10, .height = 10 },
     }, root.getFocus());
@@ -113,7 +113,7 @@ pub fn rootWidget(
     // to ensure that the content has a chance to load
     if (repo_opts.is_test) {
         for (0..5) |_| {
-            try root.build(.{
+            try root.build(allocator, .{
                 .min_size = .{ .width = null, .height = null },
                 .max_size = .{ .width = 100, .height = 50 },
             }, root.getFocus());
@@ -127,15 +127,16 @@ pub fn input(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     root: *Widget(repo_kind, repo_opts),
+    allocator: std.mem.Allocator,
     key: inp.Key,
 ) !void {
-    try root.input(key, root.getFocus());
+    try root.input(allocator, key, root.getFocus());
 
     // if we're using this for UI testing, build the root widget several more times
     // to ensure that the content has a chance to load
     if (repo_opts.is_test) {
         for (0..5) |_| {
-            try root.build(.{
+            try root.build(allocator, .{
                 .min_size = .{ .width = null, .height = null },
                 .max_size = .{ .width = 100, .height = 50 },
             }, root.getFocus());
@@ -153,7 +154,7 @@ pub fn start(
 ) !void {
     // init root widget
     var root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
-    defer root.deinit();
+    defer root.deinit(allocator);
 
     // init term
     var terminal = try term.Terminal.init(io, allocator);
@@ -197,16 +198,16 @@ pub fn start(
                             }
                         }
                     } else {
-                        try root.input(key, root.getFocus());
+                        try root.input(allocator, key, root.getFocus());
                     }
                 },
-                else => try root.input(key, root.getFocus()),
+                else => try root.input(allocator, key, root.getFocus()),
             }
             blocking = false;
         }
 
         // rebuild widget
-        try root.build(.{
+        try root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
             .max_size = .{ .width = last_size.width, .height = last_size.height },
         }, root.getFocus());

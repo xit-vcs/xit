@@ -37,13 +37,13 @@ pub fn StatusListItem(comptime Widget: type) type {
                 .not_tracked => "?",
             };
             var status_text = try wgt.TextBox(Widget).init(allocator, status_kind_sym, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer status_text.deinit();
+            errdefer status_text.deinit(allocator);
 
             var path_text = try wgt.TextBox(Widget).init(allocator, status.path, .{ .border_style = .hidden, .wrap_kind = .none });
-            errdefer path_text.deinit();
+            errdefer path_text.deinit(allocator);
 
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
             try box.children.put(allocator, status_text.getFocus().id, .{ .widget = .{ .text_box = status_text }, .rect = null, .min_size = null });
             try box.children.put(allocator, path_text.getFocus().id, .{ .widget = .{ .text_box = path_text }, .rect = null, .min_size = null });
 
@@ -52,17 +52,18 @@ pub fn StatusListItem(comptime Widget: type) type {
             };
         }
 
-        pub fn deinit(self: *StatusListItem(Widget)) void {
-            self.box.deinit();
+        pub fn deinit(self: *StatusListItem(Widget), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *StatusListItem(Widget), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *StatusListItem(Widget), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *StatusListItem(Widget), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *StatusListItem(Widget), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             _ = self;
+            _ = allocator;
             _ = key;
             _ = root_focus;
         }
@@ -93,17 +94,17 @@ pub fn StatusList(comptime Widget: type) type {
         pub fn init(allocator: std.mem.Allocator, statuses: []StatusItem) !StatusList(Widget) {
             // init inner_box
             var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-            errdefer inner_box.deinit();
+            errdefer inner_box.deinit(allocator);
             for (statuses) |item| {
                 var list_item = try StatusListItem(Widget).init(allocator, item);
-                errdefer list_item.deinit();
+                errdefer list_item.deinit(allocator);
                 list_item.getFocus().focusable = true;
                 try inner_box.children.put(allocator, list_item.getFocus().id, .{ .widget = .{ .ui_status_list_item = list_item }, .rect = null, .min_size = null });
             }
 
             // init scroll
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
-            errdefer scroll.deinit();
+            errdefer scroll.deinit(allocator);
             if (inner_box.children.count() > 0) {
                 scroll.getFocus().child_id = inner_box.children.keys()[0];
             }
@@ -114,11 +115,11 @@ pub fn StatusList(comptime Widget: type) type {
             };
         }
 
-        pub fn deinit(self: *StatusList(Widget)) void {
-            self.scroll.deinit();
+        pub fn deinit(self: *StatusList(Widget), allocator: std.mem.Allocator) void {
+            self.scroll.deinit(allocator);
         }
 
-        pub fn build(self: *StatusList(Widget), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *StatusList(Widget), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *item| {
@@ -127,10 +128,11 @@ pub fn StatusList(comptime Widget: type) type {
                 else
                     .hidden);
             }
-            try self.scroll.build(constraint, root_focus);
+            try self.scroll.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *StatusList(Widget), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *StatusList(Widget), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -222,13 +224,12 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
     return struct {
         box: wgt.Box(Widget),
         arena: *std.heap.ArenaAllocator,
-        allocator: std.mem.Allocator,
 
         const tab_count = @typeInfo(work.IndexStatusKind).@"enum".fields.len;
 
         pub fn init(allocator: std.mem.Allocator, status: *work.Status(repo_kind, repo_opts)) !StatusTabs(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -257,7 +258,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 };
                 const label = try std.fmt.allocPrint(arena.allocator(), "{s} ({})", .{ name, counts[i] });
                 var text_box = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .wrap_kind = .none });
-                errdefer text_box.deinit();
+                errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
@@ -265,19 +266,18 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){
                 .box = box,
                 .arena = arena,
-                .allocator = allocator,
             };
             ui_status_tabs.getFocus().child_id = box.children.keys()[@intFromEnum(selected_maybe orelse .added)];
             return ui_status_tabs;
         }
 
-        pub fn deinit(self: *StatusTabs(Widget, repo_kind, repo_opts)) void {
-            self.box.deinit();
+        pub fn deinit(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
             self.arena.deinit();
-            self.allocator.destroy(self.arena);
+            allocator.destroy(self.arena);
         }
 
-        pub fn build(self: *StatusTabs(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
                 tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
@@ -285,10 +285,11 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 else
                     .hidden;
             }
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *StatusTabs(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -344,7 +345,6 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
         repo: *rp.Repo(repo_kind, repo_opts),
         status: *work.Status(repo_kind, repo_opts),
         io: std.Io,
-        allocator: std.mem.Allocator,
         diffed_status_index: ?usize,
 
         const FocusKind = enum { status_list, diff };
@@ -387,19 +387,19 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             }
 
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
                 const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
                 switch (focus_kind) {
                     .status_list => {
                         var status_list = try StatusList(Widget).init(allocator, filtered_statuses.items);
-                        errdefer status_list.deinit();
+                        errdefer status_list.deinit(allocator);
                         try box.children.put(allocator, status_list.getFocus().id, .{ .widget = .{ .ui_status_list = status_list }, .rect = null, .min_size = .{ .width = 20, .height = null } });
                     },
                     .diff => {
                         var diff = try ui_diff.Diff(Widget, repo_kind, repo_opts).init(allocator, repo);
-                        errdefer diff.deinit();
+                        errdefer diff.deinit(allocator);
                         diff.getFocus().focusable = true;
                         try box.children.put(allocator, diff.getFocus().id, .{ .widget = .{ .ui_diff = diff }, .rect = null, .min_size = .{ .width = 60, .height = null } });
                     },
@@ -412,30 +412,29 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 .repo = repo,
                 .status = status,
                 .io = io,
-                .allocator = allocator,
                 .diffed_status_index = null,
             };
             status_content.getFocus().child_id = box.children.keys()[0];
-            try status_content.refreshDiffIfNeeded();
+            try status_content.refreshDiffIfNeeded(allocator);
             return status_content;
         }
 
-        pub fn deinit(self: *StatusContent(Widget, repo_kind, repo_opts)) void {
-            self.box.deinit();
-            self.filtered_statuses.deinit(self.allocator);
+        pub fn deinit(self: *StatusContent(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
+            self.filtered_statuses.deinit(allocator);
         }
 
-        pub fn build(self: *StatusContent(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *StatusContent(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             if (self.filtered_statuses.items.len > 0) {
                 // regenerate the diff only when the selected status actually
                 // changed — keeps scroll-burst handling cheap.
-                try self.refreshDiffIfNeeded();
-                try self.box.build(constraint, root_focus);
+                try self.refreshDiffIfNeeded(allocator);
+                try self.box.build(allocator, constraint, root_focus);
             }
         }
 
-        pub fn input(self: *StatusContent(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *StatusContent(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             const diff_scroll_x = self.box.children.values()[1].widget.ui_diff.getScrollX();
 
             if (self.getFocus().child_id) |child_id| {
@@ -471,7 +470,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                             },
                             else => {},
                         }
-                        try child.input(key, root_focus);
+                        try child.input(allocator, key, root_focus);
                         break :blk current_index;
                     };
 
@@ -518,22 +517,22 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             return true;
         }
 
-        fn refreshDiffIfNeeded(self: *StatusContent(Widget, repo_kind, repo_opts)) !void {
+        fn refreshDiffIfNeeded(self: *StatusContent(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
             const status_list = &self.box.children.values()[0].widget.ui_status_list;
             const current = status_list.getSelectedIndex();
             if (current == self.diffed_status_index) return;
-            try self.updateDiff();
+            try self.updateDiff(allocator);
             self.diffed_status_index = current;
         }
 
-        fn updateDiff(self: *StatusContent(Widget, repo_kind, repo_opts)) !void {
+        fn updateDiff(self: *StatusContent(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
             const status_list = &self.box.children.values()[0].widget.ui_status_list;
             if (status_list.getSelectedIndex()) |status_index| {
                 const status_item = status_list.statuses[status_index];
 
                 // get widget
                 var diff = &self.box.children.values()[1].widget.ui_diff;
-                try diff.clearDiffs();
+                try diff.clearDiffs(allocator);
 
                 const line_iter_pair = self.repo.filePair(self.io, diff.iter_arena.allocator(), status_item.path, status_item.kind, self.status) catch |err| switch (err) {
                     error.IsDir => return,
@@ -556,7 +555,6 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
     return struct {
         box: wgt.Box(Widget),
         status: *work.Status(repo_kind, repo_opts),
-        allocator: std.mem.Allocator,
 
         const FocusKind = enum { status_tabs, status_content };
 
@@ -571,24 +569,24 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
             // init box
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
                 const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
                 switch (focus_kind) {
                     .status_tabs => {
                         var status_tabs = try StatusTabs(Widget, repo_kind, repo_opts).init(allocator, status_ptr);
-                        errdefer status_tabs.deinit();
+                        errdefer status_tabs.deinit(allocator);
                         try box.children.put(allocator, status_tabs.getFocus().id, .{ .widget = .{ .ui_status_tabs = status_tabs }, .rect = null, .min_size = null });
                     },
                     .status_content => {
                         var stack = wgt.Stack(Widget).init(allocator);
-                        errdefer stack.deinit();
+                        errdefer stack.deinit(allocator);
 
                         inline for (@typeInfo(work.IndexStatusKind).@"enum".fields) |index_kind_field| {
                             const index_kind: work.IndexStatusKind = @enumFromInt(index_kind_field.value);
                             var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(io, allocator, repo, status_ptr, index_kind);
-                            errdefer status_content.deinit();
+                            errdefer status_content.deinit(allocator);
                             try stack.children.put(allocator, status_content.getFocus().id, .{ .ui_status_content = status_content });
                         }
 
@@ -600,29 +598,28 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
             var ui_status = Status(Widget, repo_kind, repo_opts){
                 .box = box,
                 .status = status_ptr,
-                .allocator = allocator,
             };
             ui_status.getFocus().child_id = box.children.keys()[0];
             return ui_status;
         }
 
-        pub fn deinit(self: *Status(Widget, repo_kind, repo_opts)) void {
-            self.box.deinit();
-            self.status.deinit(self.allocator);
-            self.allocator.destroy(self.status);
+        pub fn deinit(self: *Status(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
+            self.status.deinit(allocator);
+            allocator.destroy(self.status);
         }
 
-        pub fn build(self: *Status(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *Status(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             const status_tabs = &self.box.children.values()[@intFromEnum(FocusKind.status_tabs)].widget.ui_status_tabs;
             const stack = &self.box.children.values()[@intFromEnum(FocusKind.status_content)].widget.stack;
             if (status_tabs.getSelectedIndex()) |index| {
                 stack.getFocus().child_id = stack.children.keys()[index];
             }
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *Status(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Status(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             if (self.getFocus().child_id) |child_id| {
                 if (self.box.children.getIndex(child_id)) |current_index| {
                     const child = &self.box.children.values()[current_index].widget;
@@ -646,7 +643,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                                 if (direction == .down) {
                                     break :blk @intFromEnum(FocusKind.status_content);
                                 } else {
-                                    try child_ui_status_tabs.input(key, root_focus);
+                                    try child_ui_status_tabs.input(allocator, key, root_focus);
                                 }
                             },
                             .stack => |*child_stack| {
@@ -654,7 +651,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                                     if (direction == .up and selected_widget.ui_status_content.scrolledToTop()) {
                                         break :blk @intFromEnum(FocusKind.status_tabs);
                                     } else {
-                                        try child_stack.input(key, root_focus);
+                                        try child_stack.input(allocator, key, root_focus);
                                     }
                                 }
                             },

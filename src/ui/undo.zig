@@ -13,7 +13,6 @@ const tr = @import("../tree.zig");
 
 pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        allocator: std.mem.Allocator,
         scroll: wgt.Scroll(Widget),
         repo: *rp.Repo(repo_kind, repo_opts),
         txes: std.ArrayList(?[]const u8),
@@ -30,17 +29,16 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 const txes: std.ArrayList(?[]const u8) = .empty;
 
                 var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-                errdefer inner_box.deinit();
+                errdefer inner_box.deinit(allocator);
 
                 // init scroll
                 var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
-                errdefer scroll.deinit();
+                errdefer scroll.deinit(allocator);
 
                 const history = try rp.Repo(repo_kind, repo_opts).DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
                 const tx_count = try history.count();
 
                 break :blk UndoList(Widget, repo_kind, repo_opts){
-                    .allocator = allocator,
                     .scroll = scroll,
                     .repo = repo,
                     .txes = txes,
@@ -48,9 +46,9 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                     .arena = arena,
                 };
             };
-            errdefer self.deinit();
+            errdefer self.deinit(allocator);
 
-            try self.addTransactions(20);
+            try self.addTransactions(allocator, 20);
             if (self.scroll.child.box.children.count() > 0) {
                 self.scroll.getFocus().child_id = self.scroll.child.box.children.keys()[0];
             }
@@ -58,13 +56,13 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             return self;
         }
 
-        pub fn deinit(self: *UndoList(Widget, repo_kind, repo_opts)) void {
+        pub fn deinit(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.arena.deinit();
-            self.allocator.destroy(self.arena);
-            self.scroll.deinit();
+            allocator.destroy(self.arena);
+            self.scroll.deinit(allocator);
         }
 
-        pub fn build(self: *UndoList(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *commit| {
@@ -73,7 +71,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 else
                     .hidden;
             }
-            try self.scroll.build(constraint, root_focus);
+            try self.scroll.build(allocator, constraint, root_focus);
 
             // add more commits if necessary
             if (self.scroll.grid) |scroll_grid| {
@@ -83,13 +81,14 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                     const inner_box_height = inner_box_grid.size.height;
                     const min_scroll_remaining = 5;
                     if (inner_box_height -| (scroll_grid.size.height + u_scroll_y) <= min_scroll_remaining) {
-                        try self.addTransactions(20);
+                        try self.addTransactions(allocator, 20);
                     }
                 }
             }
         }
 
-        pub fn input(self: *UndoList(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -174,7 +173,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             }
         }
 
-        fn addTransactions(self: *UndoList(Widget, repo_kind, repo_opts), max_txes: usize) !void {
+        fn addTransactions(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, max_txes: usize) !void {
             if (repo_kind != .xit) return;
 
             const history = try rp.Repo(repo_kind, repo_opts).DB.ArrayList(.read_only).init(self.repo.core.db.rootCursor().readOnly());
@@ -189,19 +188,19 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 const moment = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(moment_cursor);
 
                 const msg_value = if (try moment.getCursor(hash.hashInt(repo_opts.hash, "undo-message"))) |msg_cursor|
-                    try msg_cursor.readBytesAlloc(self.allocator, repo_opts.max_read_size)
+                    try msg_cursor.readBytesAlloc(allocator, repo_opts.max_read_size)
                 else
-                    try self.allocator.dupe(u8, "(empty message)");
-                defer self.allocator.free(msg_value);
+                    try allocator.dupe(u8, "(empty message)");
+                defer allocator.free(msg_value);
 
                 const msg = try std.fmt.allocPrint(self.arena.allocator(), "{} - {s}", .{ ii, msg_value });
                 try self.txes.append(self.arena.allocator(), msg);
 
                 const inner_box = &self.scroll.child.box;
-                var text_box = try wgt.TextBox(Widget).init(self.allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
-                errdefer text_box.deinit();
+                var text_box = try wgt.TextBox(Widget).init(allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
+                errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
-                try inner_box.children.put(self.allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
         }
     };
@@ -211,30 +210,28 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
     return struct {
         box: wgt.Box(Widget),
         repo: *rp.Repo(repo_kind, repo_opts),
-        allocator: std.mem.Allocator,
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Undo(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             // add undo list
             {
                 var undo_list = try UndoList(Widget, repo_kind, repo_opts).init(allocator, repo);
-                errdefer undo_list.deinit();
+                errdefer undo_list.deinit(allocator);
                 try box.children.put(allocator, undo_list.getFocus().id, .{ .widget = .{ .ui_undo_list = undo_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
             }
 
             // add empty box
             {
                 var empty_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-                errdefer empty_box.deinit();
+                errdefer empty_box.deinit(allocator);
                 try box.children.put(allocator, empty_box.getFocus().id, .{ .widget = .{ .box = empty_box }, .rect = null, .min_size = .{ .width = 60, .height = null } });
             }
 
             var undo = Undo(Widget, repo_kind, repo_opts){
                 .box = box,
                 .repo = repo,
-                .allocator = allocator,
             };
             undo.getFocus().child_id = box.children.keys()[0];
             try undo.updateUndoContent();
@@ -242,16 +239,16 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             return undo;
         }
 
-        pub fn deinit(self: *Undo(Widget, repo_kind, repo_opts)) void {
-            self.box.deinit();
+        pub fn deinit(self: *Undo(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *Undo(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *Undo(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *Undo(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Undo(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             const diff_scroll_x = 0;
 
             if (self.getFocus().child_id) |child_id| {
@@ -287,7 +284,7 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                             },
                             else => {},
                         }
-                        try child.input(key, root_focus);
+                        try child.input(allocator, key, root_focus);
                         if (child.* == .ui_undo_list) {
                             try self.updateUndoContent();
                         }

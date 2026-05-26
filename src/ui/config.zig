@@ -15,15 +15,15 @@ pub fn ConfigListItem(comptime Widget: type) type {
 
         pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8) !ConfigListItem(Widget) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
-            errdefer box.deinit();
+            errdefer box.deinit(allocator);
 
             var name_text_box = try wgt.TextBox(Widget).init(allocator, full_name, .{ .border_style = .single, .wrap_kind = .none });
-            errdefer name_text_box.deinit();
+            errdefer name_text_box.deinit(allocator);
             name_text_box.getFocus().focusable = true;
             try box.children.put(allocator, name_text_box.getFocus().id, .{ .widget = .{ .text_box = name_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
 
             var value_text_box = try wgt.TextBox(Widget).init(allocator, value, .{ .border_style = .single, .wrap_kind = .none });
-            errdefer value_text_box.deinit();
+            errdefer value_text_box.deinit(allocator);
             value_text_box.getFocus().focusable = true;
             try box.children.put(allocator, value_text_box.getFocus().id, .{ .widget = .{ .text_box = value_text_box }, .rect = null, .min_size = .{ .width = 30, .height = null } });
 
@@ -34,11 +34,11 @@ pub fn ConfigListItem(comptime Widget: type) type {
             return self;
         }
 
-        pub fn deinit(self: *ConfigListItem(Widget)) void {
-            self.box.deinit();
+        pub fn deinit(self: *ConfigListItem(Widget), allocator: std.mem.Allocator) void {
+            self.box.deinit(allocator);
         }
 
-        pub fn build(self: *ConfigListItem(Widget), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *ConfigListItem(Widget), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *item| {
                 item.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
@@ -46,10 +46,11 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 else
                     .single_dashed;
             }
-            try self.box.build(constraint, root_focus);
+            try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *ConfigListItem(Widget), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *ConfigListItem(Widget), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+            _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -96,7 +97,6 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
     return struct {
         scroll: wgt.Scroll(Widget),
         config: cfg.Config(repo_kind, repo_opts),
-        allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !ConfigList(Widget, repo_kind, repo_opts) {
@@ -112,7 +112,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             // init box
             var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
-            errdefer inner_box.deinit();
+            errdefer inner_box.deinit(allocator);
 
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {
                 for (variables.keys(), variables.values()) |name, value| {
@@ -124,7 +124,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             // init scroll
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
-            errdefer scroll.deinit();
+            errdefer scroll.deinit(allocator);
             if (inner_box.children.count() > 0) {
                 scroll.getFocus().child_id = inner_box.children.keys()[0];
             }
@@ -132,24 +132,23 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             return ConfigList(Widget, repo_kind, repo_opts){
                 .scroll = scroll,
                 .config = config,
-                .allocator = allocator,
                 .arena = arena,
             };
         }
 
-        pub fn deinit(self: *ConfigList(Widget, repo_kind, repo_opts)) void {
-            self.scroll.deinit();
+        pub fn deinit(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+            self.scroll.deinit(allocator);
             self.config.deinit();
             self.arena.deinit();
-            self.allocator.destroy(self.arena);
+            allocator.destroy(self.arena);
         }
 
-        pub fn build(self: *ConfigList(Widget, repo_kind, repo_opts), constraint: layout.Constraint, root_focus: *Focus) !void {
+        pub fn build(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            try self.scroll.build(constraint, root_focus);
+            try self.scroll.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *ConfigList(Widget, repo_kind, repo_opts), key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
@@ -196,7 +195,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                             else => {},
                         },
                         else => {
-                            try children.values()[index].widget.input(key, root_focus);
+                            try children.values()[index].widget.input(allocator, key, root_focus);
                         },
                     }
 
