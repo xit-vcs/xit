@@ -21,6 +21,7 @@ pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         text: wgt.Text(Widget(repo_kind, repo_opts)),
         box: wgt.Box(Widget(repo_kind, repo_opts)),
         text_box: wgt.TextBox(Widget(repo_kind, repo_opts)),
+        text_input: wgt.TextInput(Widget(repo_kind, repo_opts)),
         scroll: wgt.Scroll(Widget(repo_kind, repo_opts)),
         stack: wgt.Stack(Widget(repo_kind, repo_opts)),
         ui_root: ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts),
@@ -37,6 +38,7 @@ pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         ui_undo_list: ui_undo.UndoList(Widget(repo_kind, repo_opts), repo_kind, repo_opts),
         ui_config_list: ui_config.ConfigList(Widget(repo_kind, repo_opts), repo_kind, repo_opts),
         ui_config_list_item: ui_config.ConfigListItem(Widget(repo_kind, repo_opts)),
+        ui_config_add_list_item: ui_config.ConfigAddListItem(Widget(repo_kind, repo_opts)),
 
         pub fn deinit(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             switch (self.*) {
@@ -197,9 +199,8 @@ pub fn start(
                                 break;
                             }
                         }
-                    } else {
-                        try root.input(allocator, key, root.getFocus());
                     }
+                    try root.input(allocator, key, root.getFocus());
                 },
                 else => try root.input(allocator, key, root.getFocus()),
             }

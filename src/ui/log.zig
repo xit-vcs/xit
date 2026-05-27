@@ -71,10 +71,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             self.clearGrid();
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *commit| {
-                commit.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
-                    (if (root_focus.grandchild_id == id) .double else .single)
-                else
-                    .hidden;
+                commit.widget.text_box.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
             }
             try self.scroll.build(allocator, constraint, root_focus);
 

@@ -50,10 +50,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         pub fn build(self: *RootTabs(Widget, repo_kind), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
-                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id)
-                    (if (root_focus.grandchild_id == id) .double else .single)
-                else
-                    .hidden;
+                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
             }
             try self.box.build(allocator, constraint, root_focus);
         }
