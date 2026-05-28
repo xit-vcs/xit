@@ -28,7 +28,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 // init txes
                 const txes: std.ArrayList(?[]const u8) = .empty;
 
-                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 // init scroll
@@ -209,7 +209,7 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         repo: *rp.Repo(repo_kind, repo_opts),
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Undo(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             // add undo list
@@ -221,7 +221,7 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             // add empty box
             {
-                var empty_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                var empty_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
                 errdefer empty_box.deinit(allocator);
                 try box.children.put(allocator, empty_box.getFocus().id, .{ .widget = .{ .box = empty_box }, .rect = null, .min_size = .{ .width = 60, .height = null } });
             }

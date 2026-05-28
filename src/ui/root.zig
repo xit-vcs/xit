@@ -19,7 +19,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         const FocusKind = enum { log, status, config, undo };
 
         pub fn init(allocator: std.mem.Allocator) !RootTabs(Widget, repo_kind) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -115,7 +115,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         const FocusKind = enum { tabs, stack };
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -127,7 +127,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         try box.children.put(allocator, ui_root_tabs.getFocus().id, .{ .widget = .{ .ui_root_tabs = ui_root_tabs }, .rect = null, .min_size = null });
                     },
                     .stack => {
-                        var stack = wgt.Stack(Widget).init(allocator);
+                        var stack = wgt.Stack(Widget).init();
                         errdefer stack.deinit(allocator);
 
                         {

@@ -42,7 +42,7 @@ pub fn StatusListItem(comptime Widget: type) type {
             var path_text = try wgt.TextBox(Widget).init(allocator, status.path, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer path_text.deinit(allocator);
 
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
             try box.children.put(allocator, status_text.getFocus().id, .{ .widget = .{ .text_box = status_text }, .rect = null, .min_size = null });
             try box.children.put(allocator, path_text.getFocus().id, .{ .widget = .{ .text_box = path_text }, .rect = null, .min_size = null });
@@ -93,7 +93,7 @@ pub fn StatusList(comptime Widget: type) type {
 
         pub fn init(allocator: std.mem.Allocator, statuses: []StatusItem) !StatusList(Widget) {
             // init inner_box
-            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit(allocator);
             for (statuses) |item| {
                 var list_item = try StatusListItem(Widget).init(allocator, item);
@@ -228,7 +228,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         const tab_count = @typeInfo(work.IndexStatusKind).@"enum".fields.len;
 
         pub fn init(allocator: std.mem.Allocator, status: *work.Status(repo_kind, repo_opts)) !StatusTabs(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -383,7 +383,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 },
             }
 
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -565,7 +565,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
             status_ptr.* = status;
 
             // init box
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
@@ -577,7 +577,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                         try box.children.put(allocator, status_tabs.getFocus().id, .{ .widget = .{ .ui_status_tabs = status_tabs }, .rect = null, .min_size = null });
                     },
                     .status_content => {
-                        var stack = wgt.Stack(Widget).init(allocator);
+                        var stack = wgt.Stack(Widget).init();
                         errdefer stack.deinit(allocator);
 
                         inline for (@typeInfo(work.IndexStatusKind).@"enum".fields) |index_kind_field| {
