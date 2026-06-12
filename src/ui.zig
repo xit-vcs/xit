@@ -182,6 +182,7 @@ pub fn start(
         // there may be an animation that requires more looping.
         var blocking = !grid_changed;
         while (try terminal.readKey(io, blocking)) |key| {
+            blocking = false;
             switch (key) {
                 .escape => return,
                 .mouse => |mouse| {
@@ -204,7 +205,6 @@ pub fn start(
                 },
                 else => try root.input(allocator, key, root.getFocus()),
             }
-            blocking = false;
         }
 
         // rebuild widget

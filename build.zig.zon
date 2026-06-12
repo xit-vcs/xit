@@ -7,8 +7,8 @@
             .hash = "xitdb-0.0.0-EEFkxpHJBABxnXvbX5oyeUufyiwNgOwkH03bayvWeYxw",
         },
         .xitui = .{
-            .url = "git+https://github.com/xit-vcs/xitui#fe56b0517f1e44e68baeb0db8489ac2710def9b0",
-            .hash = "xitui-0.0.0--YPVyDUPAgAiCZdAtRWWTnHLNyd0W-pRNSt6rn-J9IIU",
+            .url = "git+https://github.com/xit-vcs/xitui#edd4d8dbefa5c9f2bff6419110377af024783918",
+            .hash = "xitui-0.0.0--YPVyL8OAgDg3eXrpcARWSPvjcuyfC0TbcKDC9Wk0GQG",
         },
     },
     .paths = .{
