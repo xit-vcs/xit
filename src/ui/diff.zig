@@ -20,13 +20,13 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         bufs: std.ArrayList([]const u8),
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Diff(Widget, repo_kind, repo_opts) {
-            var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer inner_box.deinit(allocator);
 
-            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .both);
+            var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .{ .direction = .both });
             errdefer scroll.deinit(allocator);
 
-            var outer_box = wgt.Box(Widget).init(.{ .border_style = .single, .direction = .vert });
+            var outer_box = try wgt.Box(Widget).init(allocator, .{ .border_style = .single, .direction = .vert });
             errdefer outer_box.deinit(allocator);
             try outer_box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
 

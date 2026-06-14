@@ -7,6 +7,10 @@ const xit = @import("xit");
 const rp = xit.repo;
 const obj = xit.object;
 
+// cook the terminal before a panic/segfault trace is printed, so the trace
+// isn't mangled by raw mode and the alternate buffer
+pub const std_options_debug_io = xit.xitui.terminal.crash_debug_io;
+
 const COMMIT_COUNT = 5;
 
 fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {

@@ -162,6 +162,11 @@ pub fn start(
     var terminal = try term.Terminal.init(io, allocator);
     defer terminal.deinit(io);
 
+    // set term as active so it will be properly cooked
+    // when a panic/segfault happens
+    term.setActive(&terminal);
+    defer term.setActive(null);
+
     var last_size = layout.Size{ .width = 0, .height = 0 };
     var last_grid = try Grid.init(allocator, last_size);
     defer last_grid.deinit();

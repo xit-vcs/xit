@@ -34,11 +34,11 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 var commit_iter = try repo.log(io, allocator, null);
                 errdefer commit_iter.deinit();
 
-                var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 // init scroll
-                var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
+                var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .{ .direction = .vert });
                 errdefer scroll.deinit(allocator);
 
                 break :blk LogCommitList(Widget, repo_kind, repo_opts){
@@ -221,7 +221,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
         diffed_commit_index: ?usize,
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
-            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             // add commit list

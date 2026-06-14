@@ -11,6 +11,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const xitui = @import("xitui");
+const term = xitui.terminal;
 const cmd = @import("./command.zig");
 const rp = @import("./repo.zig");
 const ui = @import("./ui.zig");
@@ -24,6 +26,10 @@ const rf = @import("./ref.zig");
 const net_refspec = @import("./net/refspec.zig");
 const server_common = @import("./net/server/common.zig");
 const server_http_backend = @import("./net/server/http_backend.zig");
+
+// cook the terminal before a panic/segfault trace is printed, so the trace
+// isn't mangled by raw mode and the alternate buffer
+pub const std_options_debug_io = term.crash_debug_io;
 
 pub const RunOpts = struct {
     out: *std.Io.Writer,

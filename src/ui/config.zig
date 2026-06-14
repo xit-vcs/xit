@@ -29,7 +29,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
         const action_child_index: usize = 2;
 
         pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8) !ConfigListItem(Widget) {
-            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             var nav_ids: [2]usize = undefined;
@@ -42,7 +42,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
             }
 
             {
-                var value_input = wgt.TextInput(Widget).init(.{ .visible_width = 28 });
+                var value_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28 });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().focusable = true;
                 try value_input.setContent(allocator, value);
@@ -54,7 +54,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
             var remove_id: usize = undefined;
             var update_id: usize = undefined;
             {
-                var stack = wgt.Stack(Widget).init();
+                var stack = try wgt.Stack(Widget).init(allocator);
                 errdefer stack.deinit(allocator);
 
                 {
@@ -165,13 +165,13 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
         pub const action_index: usize = 2;
 
         pub fn init(allocator: std.mem.Allocator) !ConfigAddListItem(Widget) {
-            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             var nav_ids: [3]usize = undefined;
 
             {
-                var name_input = wgt.TextInput(Widget).init(.{ .visible_width = 28, .label = " name " });
+                var name_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28, .label = " name " });
                 errdefer name_input.deinit(allocator);
                 name_input.getFocus().focusable = true;
                 nav_ids[name_index] = name_input.getFocus().id;
@@ -179,7 +179,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             }
 
             {
-                var value_input = wgt.TextInput(Widget).init(.{ .visible_width = 28, .label = " value " });
+                var value_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28, .label = " value " });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().focusable = true;
                 nav_ids[value_index] = value_input.getFocus().id;
@@ -281,7 +281,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 allocator.destroy(arena);
             }
 
-            var box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             // add row at index 0 — always visible
@@ -293,12 +293,12 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             // scroll with the config items below
             {
-                var inner_box = wgt.Box(Widget).init(.{ .border_style = null, .direction = .vert });
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 try appendConfigItems(&inner_box, allocator, arena.allocator(), &config);
 
-                var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .vert);
+                var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .{ .direction = .vert });
                 errdefer scroll.deinit(allocator);
                 if (inner_box.children.count() > 0) {
                     scroll.getFocus().child_id = inner_box.children.keys()[0];
