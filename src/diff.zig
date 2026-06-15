@@ -1586,6 +1586,7 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
         diff_opts: DiffOptions(repo_kind, repo_opts),
         next_index: usize,
+        total_line_count: usize,
 
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
@@ -1600,10 +1601,24 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .moment = state.extra.moment.*,
                 .diff_opts = diff_opts,
                 .next_index = 0,
+                .total_line_count = 0,
             };
         }
 
         pub fn next(self: *FileIterator(repo_kind, repo_opts)) !?LineIteratorPair(repo_kind, repo_opts) {
+            var pair = try self.nextInternal() orelse return null;
+            errdefer pair.deinit();
+
+            // enforce the cumulative line budget across all files in this diff
+            self.total_line_count += pair.a.count() + pair.b.count();
+            if (self.total_line_count > repo_opts.max_total_line_count) {
+                return error.DiffTooLarge;
+            }
+
+            return pair;
+        }
+
+        fn nextInternal(self: *FileIterator(repo_kind, repo_opts)) !?LineIteratorPair(repo_kind, repo_opts) {
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
             var next_index = self.next_index;
             switch (self.diff_opts) {
@@ -1633,7 +1648,7 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         // there is no entry, so just skip it and call this method recursively
                         else {
                             self.next_index += 1;
-                            return try self.next();
+                            return try self.nextInternal();
                         }
                     } else {
                         next_index -= work_dir.status.unresolved_conflicts.count();
