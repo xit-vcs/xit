@@ -606,6 +606,7 @@ pub fn MyersDiffIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
         next_index: usize,
         x_index: usize,
         y_index: usize,
+        edit_count: usize,
 
         fn eq(self: *const MyersDiffIterator(repo_kind, repo_opts), i: usize, j: usize) !bool {
             const line_a = try self.line_iter_a.get(i);
@@ -805,6 +806,7 @@ pub fn MyersDiffIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
                 .next_index = 0,
                 .x_index = 0,
                 .y_index = 0,
+                .edit_count = 0,
             };
         }
 
@@ -824,6 +826,15 @@ pub fn MyersDiffIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
                 const ex: usize = @intCast(range.del_end);
                 const sy: usize = @intCast(range.ins_start);
                 const ey: usize = @intCast(range.ins_end);
+
+                // abort if the edit distance (inserted + deleted lines) exceeds
+                // the cutoff. checked before appending so we never allocate the
+                // batch that would blow the limit, bounding both the memory of
+                // the cache and the O(N*D) work spent searching for more edits.
+                self.edit_count += (ex - sx) + (ey - sy);
+                if (self.edit_count > repo_opts.max_edit_count) {
+                    return error.DiffTooLarge;
+                }
 
                 for (self.x_index..sx, self.y_index..sy) |old_idx, new_idx| {
                     const old_offset = self.line_iter_a.line_offsets[old_idx];

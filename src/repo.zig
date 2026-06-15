@@ -66,6 +66,7 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         max_read_size: usize = 4096,
         max_line_size: usize = 10_000,
         max_line_count: usize = 10_000_000,
+        max_edit_count: usize = 1_000_000, // max edit distance before a diff is aborted with error.DiffTooLarge
         is_test: bool = false,
         ProgressCtx: type = void,
         extra: Extra = .{},
