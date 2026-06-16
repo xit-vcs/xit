@@ -83,21 +83,21 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         }
 
         try std.testing.expectEqualStrings(
-            \\┌─┐                           ┌──────────────────────────────────────────────────────────┐
-            \\│c│                           │                                                          │
-            \\└─┘                           │ diff --git a/README.md b/README.md                       │
-            \\                              │ deleted file mode 100644                                 │
-            \\ b                            │ index 6b49ab7..0000000                                   │
-            \\                              │ --- a/README.md                                          │
-            \\                              │ +++ /dev/null                                            │
-            \\ a                            │                                                          │
-            \\                              │                                                          │
-            \\                              │                                                          │
-            \\                              │ @@ -0,1 +0,0 @@                                          │
-            \\                              │ - Goodbye, world!                                        │
-            \\                              │                                                          │
-            \\                              │                                                          │
-            \\                              └──────────────────────────────────────────────────────────┘
+            \\┌─┐                                     ┌──────────────────────────────────────────────────────────┐
+            \\│c│                                     │                                                          │
+            \\└─┘                                     │ diff --git a/README.md b/README.md                       │
+            \\                                        │ deleted file mode 100644                                 │
+            \\ b                                      │ index 6b49ab7..0000000                                   │
+            \\                                        │ --- a/README.md                                          │
+            \\                                        │ +++ /dev/null                                            │
+            \\ a                                      │                                                          │
+            \\                                        │                                                          │
+            \\                                        │                                                          │
+            \\                                        │ @@ -0,1 +0,0 @@                                          │
+            \\                                        │ - Goodbye, world!                                        │
+            \\                                        │                                                          │
+            \\                                        │                                                          │
+            \\                                        └──────────────────────────────────────────────────────────┘
         , grid_without_tabs);
     }
 

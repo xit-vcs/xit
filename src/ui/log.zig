@@ -220,6 +220,10 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
         io: std.Io,
         diffed_commit_index: ?usize,
 
+        const list_index: usize = 0;
+        const list_max_width: usize = 40;
+        const diff_min_width: usize = 60;
+
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
@@ -228,7 +232,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
             {
                 var commit_list = try LogCommitList(Widget, repo_kind, repo_opts).init(io, allocator, repo);
                 errdefer commit_list.deinit(allocator);
-                try box.children.put(allocator, commit_list.getFocus().id, .{ .widget = .{ .ui_log_commit_list = commit_list }, .rect = null, .min_size = .{ .width = 30, .height = null } });
+                try box.children.put(allocator, commit_list.getFocus().id, .{ .widget = .{ .ui_log_commit_list = commit_list }, .rect = null, .min_size = .{ .width = list_max_width, .height = null }, .max_size = .{ .width = list_max_width, .height = null } });
             }
 
             // add diff
@@ -236,7 +240,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                 var diff = Widget{ .ui_diff = try ui_diff.Diff(Widget, repo_kind, repo_opts).init(allocator, repo) };
                 errdefer diff.deinit(allocator);
                 diff.getFocus().focusable = true;
-                try box.children.put(allocator, diff.getFocus().id, .{ .widget = diff, .rect = null, .min_size = .{ .width = 60, .height = null } });
+                try box.children.put(allocator, diff.getFocus().id, .{ .widget = diff, .rect = null, .min_size = .{ .width = diff_min_width, .height = null } });
             }
 
             var git_log = Log(Widget, repo_kind, repo_opts){
@@ -261,6 +265,14 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
             // doing this here (instead of in input) means a burst of scroll
             // events only triggers one diff computation, per render cycle.
             try self.refreshDiffIfNeeded(allocator);
+
+            // cap the list at list_max_width only while the diff pane fits beside
+            // it. the box drops the diff when the width can't hold both minimums,
+            // so when it's that narrow we lift the cap and let the list fill the
+            // whole width.
+            const both_panes_fit = if (constraint.max_size.width) |w| w >= list_max_width + diff_min_width else true;
+            self.box.children.values()[list_index].max_size = if (both_panes_fit) .{ .width = list_max_width, .height = null } else null;
+
             try self.box.build(allocator, constraint, root_focus);
         }
 
