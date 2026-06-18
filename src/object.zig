@@ -439,7 +439,9 @@ pub fn writeCommit(
             try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "parent {s}", .{parent_oid}));
         }
 
-        const ts = if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
+        const ts: i64 = if (metadata.timestamp != 0)
+            @intCast(metadata.timestamp)
+        else if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
         const author = metadata.author orelse auth_blk: {
             if (repo_opts.is_test) break :auth_blk "radar <radar@roark>";
