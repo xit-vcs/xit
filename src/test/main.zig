@@ -1296,6 +1296,39 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         try std.testing.expect(names.contains("master"));
     }
 
+    // list branches starting from a key/index
+    if (repo_kind == .xit) {
+        var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
+        defer repo.deinit(io, allocator);
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+
+        // branches in sorted order: a/b/c, master, stuff
+
+        // start from a key
+        {
+            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).initFromKey(state, io, allocator, .head, "master");
+            defer ref_iter.deinit(io);
+            var names: std.ArrayList([]const u8) = .empty;
+            defer names.deinit(allocator);
+            while (try ref_iter.next(io)) |ref| try names.append(allocator, ref.name);
+            try std.testing.expectEqual(2, names.items.len);
+            try std.testing.expectEqualStrings("master", names.items[0]);
+            try std.testing.expectEqualStrings("stuff", names.items[1]);
+        }
+
+        // start from an index
+        {
+            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).initFromIndex(state, io, allocator, .head, 2);
+            defer ref_iter.deinit(io);
+            var names: std.ArrayList([]const u8) = .empty;
+            defer names.deinit(allocator);
+            while (try ref_iter.next(io)) |ref| try names.append(allocator, ref.name);
+            try std.testing.expectEqual(1, names.items.len);
+            try std.testing.expectEqualStrings("stuff", names.items[0]);
+        }
+    }
+
     // remove the branch
     try main.run(repo_kind, any_repo_opts, io, allocator, &.{ "branch", "rm", "a/b/c" }, work_path, run_opts);
 

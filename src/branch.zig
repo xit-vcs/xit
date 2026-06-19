@@ -83,28 +83,24 @@ pub fn add(
             }
         },
         .xit => {
-            const name_hash = hash.hashInt(repo_opts.hash, name);
-
-            // store ref name
-            const ref_name_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-name-set"));
-            const ref_name_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(ref_name_set_cursor);
-            var ref_name_cursor = try ref_name_set.putCursor(name_hash);
-            try ref_name_cursor.writeIfEmpty(.{ .bytes = name });
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
 
             // add ref name to refs/heads/{refname}
             const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(refs_cursor);
-            const heads_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "heads"));
-            const heads = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(heads_cursor);
-            try heads.putKey(name_hash, .{ .slot = ref_name_cursor.slot() });
+            const refs = try DB.SortedMap(.read_write).init(refs_cursor);
+            const heads_cursor = try refs.putCursor("heads");
+            const heads = try DB.SortedMap(.read_write).init(heads_cursor);
 
             // store ref content
             if (oid_maybe) |oid| {
                 const ref_content_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-content-set"));
-                const ref_content_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(ref_content_set_cursor);
+                const ref_content_set = try DB.HashSet(.read_write).init(ref_content_set_cursor);
                 var ref_content_cursor = try ref_content_set.putCursor(hash.hashInt(repo_opts.hash, &oid));
                 try ref_content_cursor.writeIfEmpty(.{ .bytes = &oid });
-                try heads.put(name_hash, .{ .slot = ref_content_cursor.slot() });
+                try heads.put(name, .{ .slot = ref_content_cursor.slot() });
+            } else {
+                // create an empty ref (a key with no content)
+                _ = try heads.putCursor(name);
             }
         },
     }
@@ -155,14 +151,14 @@ pub fn remove(
             }
         },
         .xit => {
-            const name_hash = hash.hashInt(repo_opts.hash, input.name);
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
 
             // remove from refs/heads/{name}
             const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(refs_cursor);
-            const heads_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "heads"));
-            const heads = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(heads_cursor);
-            _ = try heads.remove(name_hash);
+            const refs = try DB.SortedMap(.read_write).init(refs_cursor);
+            const heads_cursor = try refs.putCursor("heads");
+            const heads = try DB.SortedMap(.read_write).init(heads_cursor);
+            _ = try heads.remove(input.name);
         },
     }
 }

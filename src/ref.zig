@@ -194,11 +194,48 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
             },
         };
 
+        /// where the iterator should start
+        const Start = union(enum) {
+            beginning,
+            index: u64,
+            key: []const u8,
+        };
+
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
             ref_kind: RefKind,
+        ) !Self {
+            return initStart(state, io, allocator, ref_kind, .beginning);
+        }
+
+        pub fn initFromIndex(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            ref_kind: RefKind,
+            start_index: u64,
+        ) !Self {
+            return initStart(state, io, allocator, ref_kind, .{ .index = start_index });
+        }
+
+        pub fn initFromKey(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            ref_kind: RefKind,
+            start_key: []const u8,
+        ) !Self {
+            return initStart(state, io, allocator, ref_kind, .{ .key = start_key });
+        }
+
+        fn initStart(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            ref_kind: RefKind,
+            start: Start,
         ) !Self {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -217,6 +254,12 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
 
             const iter_state: IterState = switch (repo_kind) {
                 .git => blk: {
+                    // starting at an index or key relies on sorted maps, which
+                    // only the xit backend has
+                    switch (start) {
+                        .beginning => {},
+                        .index, .key => return error.NotImplemented,
+                    }
                     var stack: std.ArrayList(IterState.StackEntry) = .empty;
                     errdefer {
                         for (stack.items) |*entry| entry.dir.close(io);
@@ -239,9 +282,14 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                 .xit => blk: {
                     if (try state.extra.moment.cursor.readPath(void, &.{
                         .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "refs") } },
-                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, dir_name) } },
+                        .{ .sorted_map_get = .{ .value = dir_name } },
                     })) |heads_cursor| {
-                        break :blk .{ .iter = try heads_cursor.iterator() };
+                        const heads = try rp.Repo(repo_kind, repo_opts).DB.SortedMap(.read_only).init(heads_cursor);
+                        break :blk .{ .iter = switch (start) {
+                            .beginning => try heads.iterator(),
+                            .index => |start_index| try heads.iteratorFromIndex(start_index),
+                            .key => |start_key| try heads.iteratorFrom(start_key),
+                        } };
                     } else {
                         break :blk .{ .iter = null };
                     }
@@ -411,39 +459,52 @@ pub fn read(
             return error.RefNotFound;
         },
         .xit => {
-            var map = state.extra.moment.*;
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
             const ref = Ref.initFromPath(ref_path, null) orelse return error.InvalidRef;
-            const refs_cursor = (try map.getCursor(hash.hashInt(repo_opts.hash, "refs"))) orelse return error.RefNotFound;
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(refs_cursor);
 
-            switch (ref.kind) {
-                .none => {},
-                .head => {
-                    const heads_cursor = (try refs.getCursor(hash.hashInt(repo_opts.hash, "heads"))) orelse return error.RefNotFound;
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(heads_cursor);
-                },
-                .tag => {
-                    const tags_cursor = (try refs.getCursor(hash.hashInt(repo_opts.hash, "tags"))) orelse return error.RefNotFound;
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(tags_cursor);
-                },
-                .remote => |remote| {
-                    const remotes_cursor = (try refs.getCursor(hash.hashInt(repo_opts.hash, "remotes"))) orelse return error.RefNotFound;
-                    const remotes = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(remotes_cursor);
-                    const remote_cursor = (try remotes.getCursor(hash.hashInt(repo_opts.hash, remote))) orelse return error.RefNotFound;
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(remote_cursor);
-                },
-                .other => |other_name| {
-                    const other_cursor = (try refs.getCursor(hash.hashInt(repo_opts.hash, other_name))) orelse return error.RefNotFound;
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(other_cursor);
-                },
+            // unqualified refs (HEAD, etc.) are stored directly in the root map
+            if (ref.kind == .none) {
+                var map = state.extra.moment.*;
+                // if the ref's key hasn't been set, it doesn't exist
+                const kv_pair = (try map.getKeyValuePair(hash.hashInt(repo_opts.hash, ref.name))) orelse return error.RefNotFound;
+                // if the ref's content hasn't been set, it's an empty ref so just return null
+                if (kv_pair.value_cursor.slot().empty()) return null;
+                const ref_content = try kv_pair.value_cursor.readBytes(buffer);
+                return RefOrOid(repo_opts.hash).initFromDb(ref_content);
             }
 
+            // all other refs live in nested sorted maps under the "refs" key
+            const refs_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "refs"))) orelse return error.RefNotFound;
+            const refs = try DB.SortedMap(.read_only).init(refs_cursor);
+
+            const map = switch (ref.kind) {
+                .none => unreachable,
+                .head => blk: {
+                    const heads_cursor = (try refs.getCursor("heads")) orelse return error.RefNotFound;
+                    break :blk try DB.SortedMap(.read_only).init(heads_cursor);
+                },
+                .tag => blk: {
+                    const tags_cursor = (try refs.getCursor("tags")) orelse return error.RefNotFound;
+                    break :blk try DB.SortedMap(.read_only).init(tags_cursor);
+                },
+                .remote => |remote| blk: {
+                    const remotes_cursor = (try refs.getCursor("remotes")) orelse return error.RefNotFound;
+                    const remotes = try DB.SortedMap(.read_only).init(remotes_cursor);
+                    const remote_cursor = (try remotes.getCursor(remote)) orelse return error.RefNotFound;
+                    break :blk try DB.SortedMap(.read_only).init(remote_cursor);
+                },
+                .other => |other_name| blk: {
+                    const other_cursor = (try refs.getCursor(other_name)) orelse return error.RefNotFound;
+                    break :blk try DB.SortedMap(.read_only).init(other_cursor);
+                },
+            };
+
             // if the ref's key hasn't been set, it doesn't exist
-            _ = (try map.getKeyCursor(hash.hashInt(repo_opts.hash, ref.name))) orelse return error.RefNotFound;
+            const kv_pair = (try map.getKeyValuePair(ref.name)) orelse return error.RefNotFound;
 
             // if the ref's content hasn't been set, it's an empty ref so just return null
-            const ref_cursor = (try map.getCursor(hash.hashInt(repo_opts.hash, ref.name))) orelse return null;
-            const ref_content = try ref_cursor.readBytes(buffer);
+            if (kv_pair.value_cursor.slot().empty()) return null;
+            const ref_content = try kv_pair.value_cursor.readBytes(buffer);
             return RefOrOid(repo_opts.hash).initFromDb(ref_content);
         },
     }
@@ -516,44 +577,38 @@ pub fn write(
             lock.success = true;
         },
         .xit => {
-            var map = state.extra.moment.*;
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
             const ref = Ref.initFromPath(ref_path, null) orelse return error.InvalidRef;
-            const refs_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "refs"));
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(refs_cursor);
 
-            switch (ref.kind) {
-                .none => {},
-                .head => {
-                    const heads_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "heads"));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(heads_cursor);
-                },
-                .tag => {
-                    const tags_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "tags"));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(tags_cursor);
-                },
-                .remote => |remote_name| {
-                    const remotes_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "remotes"));
-                    const remotes = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(remotes_cursor);
-                    const remote_cursor = try remotes.putCursor(hash.hashInt(repo_opts.hash, remote_name));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(remote_cursor);
-                },
-                .other => |other_name| {
-                    const other_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, other_name));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(other_cursor);
-                },
-            }
-
-            const ref_name_hash = hash.hashInt(repo_opts.hash, ref.name);
-            const ref_name_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-name-set"));
-            const ref_name_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(ref_name_set_cursor);
-            var ref_name_cursor = try ref_name_set.putCursor(ref_name_hash);
-            try ref_name_cursor.writeIfEmpty(.{ .bytes = ref.name });
-            try map.putKey(ref_name_hash, .{ .slot = ref_name_cursor.slot() });
+            // store the ref content, deduplicated in a content set
             const ref_content_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-content-set"));
-            const ref_content_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(ref_content_set_cursor);
+            const ref_content_set = try DB.HashSet(.read_write).init(ref_content_set_cursor);
             var ref_content_cursor = try ref_content_set.putCursor(hash.hashInt(repo_opts.hash, content));
             try ref_content_cursor.writeIfEmpty(.{ .bytes = content });
-            try map.put(ref_name_hash, .{ .slot = ref_content_cursor.slot() });
+
+            // unqualified refs (HEAD, etc.) are stored directly in the root map
+            if (ref.kind == .none) {
+                var map = state.extra.moment.*;
+                try map.put(hash.hashInt(repo_opts.hash, ref.name), .{ .slot = ref_content_cursor.slot() });
+                return;
+            }
+
+            // all other refs live in nested sorted maps under the "refs" key
+            const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
+            const refs = try DB.SortedMap(.read_write).init(refs_cursor);
+
+            const map = switch (ref.kind) {
+                .none => unreachable,
+                .head => try DB.SortedMap(.read_write).init(try refs.putCursor("heads")),
+                .tag => try DB.SortedMap(.read_write).init(try refs.putCursor("tags")),
+                .remote => |remote_name| blk: {
+                    const remotes = try DB.SortedMap(.read_write).init(try refs.putCursor("remotes"));
+                    break :blk try DB.SortedMap(.read_write).init(try remotes.putCursor(remote_name));
+                },
+                .other => |other_name| try DB.SortedMap(.read_write).init(try refs.putCursor(other_name)),
+            };
+
+            try map.put(ref.name, .{ .slot = ref_content_cursor.slot() });
         },
     }
 }
@@ -601,35 +656,34 @@ pub fn remove(
             };
         },
         .xit => {
-            var map = state.extra.moment.*;
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
             const ref = Ref.initFromPath(ref_path, null) orelse return error.InvalidRef;
-            const refs_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "refs"));
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(refs_cursor);
 
-            switch (ref.kind) {
-                .none => {},
-                .head => {
-                    const heads_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "heads"));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(heads_cursor);
-                },
-                .tag => {
-                    const tags_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "tags"));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(tags_cursor);
-                },
-                .remote => |remote_name| {
-                    const remotes_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "remotes"));
-                    const remotes = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(remotes_cursor);
-                    const remote_cursor = try remotes.putCursor(hash.hashInt(repo_opts.hash, remote_name));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(remote_cursor);
-                },
-                .other => |other_name| {
-                    const other_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, other_name));
-                    map = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(other_cursor);
-                },
+            // unqualified refs (HEAD, etc.) are stored directly in the root map
+            if (ref.kind == .none) {
+                var map = state.extra.moment.*;
+                if (!try map.remove(hash.hashInt(repo_opts.hash, ref.name))) {
+                    return error.RefNotFound;
+                }
+                return;
             }
 
-            const ref_name_hash = hash.hashInt(repo_opts.hash, ref.name);
-            if (!try map.remove(ref_name_hash)) {
+            // all other refs live in nested sorted maps under the "refs" key
+            const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
+            const refs = try DB.SortedMap(.read_write).init(refs_cursor);
+
+            const map = switch (ref.kind) {
+                .none => unreachable,
+                .head => try DB.SortedMap(.read_write).init(try refs.putCursor("heads")),
+                .tag => try DB.SortedMap(.read_write).init(try refs.putCursor("tags")),
+                .remote => |remote_name| blk: {
+                    const remotes = try DB.SortedMap(.read_write).init(try refs.putCursor("remotes"));
+                    break :blk try DB.SortedMap(.read_write).init(try remotes.putCursor(remote_name));
+                },
+                .other => |other_name| try DB.SortedMap(.read_write).init(try refs.putCursor(other_name)),
+            };
+
+            if (!try map.remove(ref.name)) {
                 return error.RefNotFound;
             }
         },

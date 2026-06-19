@@ -72,14 +72,14 @@ pub fn remove(
             }
         },
         .xit => {
-            const name_hash = hash.hashInt(repo_opts.hash, input.name);
+            const DB = rp.Repo(repo_kind, repo_opts).DB;
 
             // remove from refs/tags/{name}
             const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
-            const refs = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(refs_cursor);
-            const tags_cursor = try refs.putCursor(hash.hashInt(repo_opts.hash, "tags"));
-            const tags = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(tags_cursor);
-            if (!try tags.remove(name_hash)) {
+            const refs = try DB.SortedMap(.read_write).init(refs_cursor);
+            const tags_cursor = try refs.putCursor("tags");
+            const tags = try DB.SortedMap(.read_write).init(tags_cursor);
+            if (!try tags.remove(input.name)) {
                 return error.TagNotFound;
             }
         },
