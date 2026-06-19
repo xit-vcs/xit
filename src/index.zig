@@ -664,8 +664,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     try lock_file.writeStreamingAll(io, &overall_sha1_buffer);
                 },
                 .xit => {
+                    const DB = rp.Repo(repo_kind, repo_opts).DB;
                     const index_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "index"));
-                    var index = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(index_cursor);
+                    var index = try DB.SortedMap(.read_write).init(index_cursor);
 
                     // remove items no longer in the index
                     var iter = try index.cursor.iterator();
@@ -675,7 +676,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         defer allocator.free(path);
 
                         if (!self.entries.contains(path)) {
-                            _ = try index.remove(hash.hashInt(repo_opts.hash, path));
+                            _ = try index.remove(path);
                         }
                     }
 
@@ -700,8 +701,8 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             }
                         }
 
-                        const path_hash = hash.hashInt(repo_opts.hash, path);
-                        if (try index.getKeyCursor(path_hash)) |existing_entry_cursor| {
+                        // skip rewriting if the stored entry buffer is unchanged
+                        if (try index.getCursor(path)) |existing_entry_cursor| {
                             const existing_entry = try existing_entry_cursor.readBytesAlloc(allocator, repo_opts.max_read_size);
                             defer allocator.free(existing_entry);
                             if (std.mem.eql(u8, entry_buffer_writer.written(), existing_entry)) {
@@ -709,17 +710,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             }
                         }
 
-                        const path_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "path-set"));
-                        const path_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(path_set_cursor);
-                        var path_cursor = try path_set.putCursor(path_hash);
-                        try path_cursor.writeIfEmpty(.{ .bytes = path });
-                        try index.putKey(path_hash, .{ .slot = path_cursor.slot() });
-
+                        // save the entry buffer, deduplicated in a buffer set
                         const entry_buffer_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "entry-buffer-set"));
-                        const entry_buffer_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(entry_buffer_set_cursor);
+                        const entry_buffer_set = try DB.HashSet(.read_write).init(entry_buffer_set_cursor);
                         var entry_buffer_cursor = try entry_buffer_set.putCursor(hash.hashInt(repo_opts.hash, entry_buffer_writer.written()));
                         try entry_buffer_cursor.writeIfEmpty(.{ .bytes = entry_buffer_writer.written() });
-                        try index.put(path_hash, .{ .slot = entry_buffer_cursor.slot() });
+                        try index.put(path, .{ .slot = entry_buffer_cursor.slot() });
                     }
                 },
             }
