@@ -197,7 +197,7 @@ const ReceivePack = struct {
 
         // heads
         {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
             defer heads.deinit(io);
 
             while (try heads.next(io)) |ref| {
@@ -211,7 +211,7 @@ const ReceivePack = struct {
 
         // tags
         {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
             defer tags.deinit(io);
 
             while (try tags.next(io)) |ref| {

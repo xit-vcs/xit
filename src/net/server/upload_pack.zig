@@ -148,7 +148,7 @@ fn uploadPack(
 
         // heads
         {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
             defer heads.deinit(io);
             while (try heads.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -161,7 +161,7 @@ fn uploadPack(
 
         // tags
         {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
             defer tags.deinit(io);
             while (try tags.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -184,7 +184,7 @@ fn uploadPack(
         }
         // mark heads
         {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
             defer heads.deinit(io);
             while (try heads.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -194,7 +194,7 @@ fn uploadPack(
         }
         // mark tags
         {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
             defer tags.deinit(io);
             while (try tags.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -577,7 +577,7 @@ const UploadPack = struct {
             }
             // heads
             {
-                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
                 defer heads.deinit(io);
                 while (try heads.next(io)) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -587,7 +587,7 @@ const UploadPack = struct {
             }
             // tags
             {
-                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
                 defer tags.deinit(io);
                 while (try tags.next(io)) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
@@ -1255,7 +1255,7 @@ fn lsRefs(
 
     // heads
     {
-        var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head);
+        var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
         defer heads.deinit(io);
         while (try heads.next(io)) |ref| {
             var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
@@ -1269,7 +1269,7 @@ fn lsRefs(
 
     // tags
     {
-        var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag);
+        var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
         defer tags.deinit(io);
         while (try tags.next(io)) |ref| {
             var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;

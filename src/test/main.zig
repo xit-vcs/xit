@@ -1203,7 +1203,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        var ref_iter = try repo.listBranches(io, allocator);
+        var ref_iter = try repo.listBranches(io, allocator, .beginning);
         defer ref_iter.deinit(io);
         var count: usize = 0;
         while (try ref_iter.next(io)) |_| count += 1;
@@ -1285,7 +1285,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        var ref_iter = try repo.listBranches(io, allocator);
+        var ref_iter = try repo.listBranches(io, allocator, .beginning);
         defer ref_iter.deinit(io);
         var names: std.StringArrayHashMapUnmanaged(void) = .empty;
         defer names.deinit(allocator);
@@ -1307,7 +1307,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
 
         // start from a key
         {
-            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).initFromKey(state, io, allocator, .head, "master");
+            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, .head, .{ .key = "master" });
             defer ref_iter.deinit(io);
             var names: std.ArrayList([]const u8) = .empty;
             defer names.deinit(allocator);
@@ -1319,7 +1319,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
 
         // start from an index
         {
-            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).initFromIndex(state, io, allocator, .head, 2);
+            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, .head, .{ .index = 2 });
             defer ref_iter.deinit(io);
             var names: std.ArrayList([]const u8) = .empty;
             defer names.deinit(allocator);

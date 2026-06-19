@@ -163,6 +163,12 @@ pub fn RefOrOid(comptime hash_kind: hash.HashKind) type {
     };
 }
 
+pub const RefIteratorStart = union(enum) {
+    beginning,
+    index: u64,
+    key: []const u8,
+};
+
 pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         iter_state: IterState,
@@ -194,48 +200,12 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
             },
         };
 
-        /// where the iterator should start
-        const Start = union(enum) {
-            beginning,
-            index: u64,
-            key: []const u8,
-        };
-
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
             ref_kind: RefKind,
-        ) !Self {
-            return initStart(state, io, allocator, ref_kind, .beginning);
-        }
-
-        pub fn initFromIndex(
-            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            ref_kind: RefKind,
-            start_index: u64,
-        ) !Self {
-            return initStart(state, io, allocator, ref_kind, .{ .index = start_index });
-        }
-
-        pub fn initFromKey(
-            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            ref_kind: RefKind,
-            start_key: []const u8,
-        ) !Self {
-            return initStart(state, io, allocator, ref_kind, .{ .key = start_key });
-        }
-
-        fn initStart(
-            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            ref_kind: RefKind,
-            start: Start,
+            start: RefIteratorStart,
         ) !Self {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);

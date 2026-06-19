@@ -291,14 +291,14 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 try self.addHead(state, io, allocator, .{ .kind = .none, .name = "HEAD" });
             }
 
-            var tags = try rf.RefIterator(.git, remote_repo_opts).init(state, io, allocator, .tag);
+            var tags = try rf.RefIterator(.git, remote_repo_opts).init(state, io, allocator, .tag, .beginning);
             defer tags.deinit(io);
 
             while (try tags.next(io)) |ref| {
                 try self.addHead(state, io, allocator, ref);
             }
 
-            var heads = try rf.RefIterator(.git, remote_repo_opts).init(state, io, allocator, .head);
+            var heads = try rf.RefIterator(.git, remote_repo_opts).init(state, io, allocator, .head, .beginning);
             defer heads.deinit(io);
 
             while (try heads.next(io)) |ref| {

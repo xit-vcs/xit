@@ -331,7 +331,7 @@ fn runCommand(
         .commit => |commit_cmd| _ = try repo.commit(io, allocator, commit_cmd),
         .tag => |tag_cmd| switch (tag_cmd) {
             .list => {
-                var ref_iter = try repo.listTags(io, allocator);
+                var ref_iter = try repo.listTags(io, allocator, .beginning);
                 defer ref_iter.deinit(io);
 
                 while (try ref_iter.next(io)) |ref| {
@@ -494,7 +494,7 @@ fn runCommand(
                         .oid => "",
                     };
 
-                    var ref_iter = try repo.listBranches(io, allocator);
+                    var ref_iter = try repo.listBranches(io, allocator, .beginning);
                     defer ref_iter.deinit(io);
 
                     while (try ref_iter.next(io)) |ref| {
