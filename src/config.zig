@@ -327,31 +327,16 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             switch (repo_kind) {
                 .git => try self.write(state, io),
                 .xit => {
-                    const config_name_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config-name-set"));
-                    const config_name_set = try rp.Repo(repo_kind, repo_opts).DB.HashSet(.read_write).init(config_name_set_cursor);
-
-                    // store section name
-                    const section_name_hash = hash.hashInt(repo_opts.hash, section_name);
-                    var section_name_cursor = try config_name_set.putCursor(section_name_hash);
-                    try section_name_cursor.writeIfEmpty(.{ .bytes = section_name });
+                    const DB = rp.Repo(repo_kind, repo_opts).DB;
 
                     // add section name to config
                     const config_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config"));
-                    const config = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(config_cursor);
-                    try config.putKey(section_name_hash, .{ .slot = section_name_cursor.slot() });
+                    const config = try DB.SortedMap(.read_write).init(config_cursor);
 
-                    // store variable name
-                    const var_name_hash = hash.hashInt(repo_opts.hash, var_name);
-                    var var_name_cursor = try config_name_set.putCursor(var_name_hash);
-                    try var_name_cursor.writeIfEmpty(.{ .bytes = var_name });
-
-                    // add var name to config
-                    const section_cursor = try config.putCursor(section_name_hash);
-                    const section = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(section_cursor);
-                    try section.putKey(var_name_hash, .{ .slot = var_name_cursor.slot() });
-
-                    // save the variable
-                    try section.put(var_name_hash, .{ .bytes = var_value });
+                    // save the variable in the section
+                    const section_cursor = try config.putCursor(section_name);
+                    const section = try DB.SortedMap(.read_write).init(section_cursor);
+                    try section.put(var_name, .{ .bytes = var_value });
                 },
             }
         }
@@ -378,14 +363,15 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             switch (repo_kind) {
                 .git => try self.write(state, io),
                 .xit => {
+                    const DB = rp.Repo(repo_kind, repo_opts).DB;
                     const config_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "config"));
-                    const config = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(config_cursor);
+                    const config = try DB.SortedMap(.read_write).init(config_cursor);
                     if (!self.sections.contains(section_name)) {
-                        _ = try config.remove(hash.hashInt(repo_opts.hash, section_name));
+                        _ = try config.remove(section_name);
                     } else {
-                        const section_cursor = try config.putCursor(hash.hashInt(repo_opts.hash, section_name));
-                        const section = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(section_cursor);
-                        _ = try section.remove(hash.hashInt(repo_opts.hash, var_name));
+                        const section_cursor = try config.putCursor(section_name);
+                        const section = try DB.SortedMap(.read_write).init(section_cursor);
+                        _ = try section.remove(var_name);
                     }
                 },
             }
