@@ -183,7 +183,7 @@ pub fn StatusList(comptime Widget: type) type {
                     };
 
                     if (index != current_index) {
-                        try root_focus.setFocus(children.keys()[index]);
+                        root_focus.setFocus(children.keys()[index]);
                         self.updateScroll(index);
                     }
                 }
@@ -306,7 +306,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                     };
 
                     if (index != current_index) {
-                        try root_focus.setFocus(children.keys()[index]);
+                        root_focus.setFocus(children.keys()[index]);
                     }
                 }
             }
@@ -476,7 +476,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     }
 
                     if (index != current_index) {
-                        try root_focus.setFocus(self.box.children.keys()[index]);
+                        root_focus.setFocus(self.box.children.keys()[index]);
                     }
                 }
             }
@@ -666,7 +666,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                     }
 
                     if (index != current_index) {
-                        try root_focus.setFocus(self.box.children.keys()[index]);
+                        root_focus.setFocus(self.box.children.keys()[index]);
                     }
                 }
             }

@@ -151,7 +151,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     }
 
                     if (index != current_index) {
-                        try root_focus.setFocus(children.keys()[index]);
+                        root_focus.setFocus(children.keys()[index]);
                         self.updateScroll(index);
                     }
                 }
@@ -317,7 +317,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
                     };
 
                     if (index != current_index) {
-                        try root_focus.setFocus(self.box.children.keys()[index]);
+                        root_focus.setFocus(self.box.children.keys()[index]);
                     }
                 }
             }

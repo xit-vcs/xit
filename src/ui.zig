@@ -89,14 +89,11 @@ pub fn rootWidget(
     var root = Widget(repo_kind, repo_opts){ .ui_root = try ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts).init(io, allocator, repo) };
     errdefer root.deinit(allocator);
 
-    // set initial focus for root widget
+    // build once so the root settles focus onto its initial child
     try root.build(allocator, .{
         .min_size = .{ .width = null, .height = null },
         .max_size = .{ .width = 10, .height = 10 },
     }, root.getFocus());
-    if (root.getFocus().child_id) |child_id| {
-        try root.getFocus().setFocus(child_id);
-    }
 
     // focus on the correct tab if sub command is provided
     if (cmd_kind_maybe) |cmd_kind| {
@@ -107,7 +104,7 @@ pub fn rootWidget(
             else => null,
         };
         if (child_id_maybe) |child_id| {
-            try root.getFocus().setFocus(child_id);
+            root.getFocus().setFocus(child_id);
         }
     }
 
@@ -201,7 +198,7 @@ pub fn start(
                             if (mouse.x >= r.x and mouse.y >= r.y and
                                 mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
                             {
-                                try root_focus.setFocus(entry.key_ptr.*);
+                                root_focus.setFocus(entry.key_ptr.*);
                                 break;
                             }
                         }

@@ -351,7 +351,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
                 // focus on the add row
                 const add_item = self.addItemPtr();
-                try root_focus.setFocus(add_item.nav_ids[ConfigAddListItem(Widget).name_index]);
+                root_focus.setFocus(add_item.nav_ids[ConfigAddListItem(Widget).name_index]);
 
                 const scroll = &self.box.children.values()[scroll_idx].widget.scroll;
                 scroll.x = 0;
@@ -488,7 +488,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             if (new_row != current_row or new_col != cell.col) {
                 if (self.rowChildIdAt(new_row, new_col)) |target_id| {
-                    try root_focus.setFocus(target_id);
+                    root_focus.setFocus(target_id);
                     // only scroll items need updateScroll; the add row is fixed
                     if (new_row != current_row and new_row > 0) self.updateScroll(new_row - 1);
                 }

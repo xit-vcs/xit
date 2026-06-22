@@ -135,7 +135,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                     }
 
                     if (index != current_index) {
-                        try root_focus.setFocus(children.keys()[index]);
+                        root_focus.setFocus(children.keys()[index]);
                         self.updateScroll(index);
                     }
                 }
@@ -289,7 +289,7 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     };
 
                     if (index != current_index) {
-                        try root_focus.setFocus(self.box.children.keys()[index]);
+                        root_focus.setFocus(self.box.children.keys()[index]);
                     }
                 }
             }
