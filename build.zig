@@ -79,10 +79,10 @@ pub fn build(b: *std.Build) !void {
         });
         exe.root_module.addImport("xit", xit);
         exe.use_llvm = true;
-        b.installArtifact(exe);
+        const try_install = b.addInstallArtifact(exe, .{});
 
         const run_cmd = b.addRunArtifact(exe);
-        run_cmd.step.dependOn(b.getInstallStep());
+        run_cmd.step.dependOn(&try_install.step);
         if (b.args) |args| {
             run_cmd.addArgs(args);
         }
