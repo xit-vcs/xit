@@ -286,7 +286,9 @@ const ReceivePack = struct {
             }
         }
 
-        if (!self.use_sideband) return error.SidebandProtocolNotSupported;
+        // capabilities (including side-band) only ride along on the first ref
+        // update command, so an up-to-date push sends none and needs no sideband
+        if (ref_updates.items.len != 0 and !self.use_sideband) return error.SidebandProtocolRequired;
 
         return ref_updates;
     }

@@ -260,7 +260,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             self.caps = try Capabilities.init(allocator, if (first_ref.capabilities) |caps| caps else null, &symrefs);
 
             if (!self.caps.side_band and !self.caps.side_band_64k) {
-                return error.SideBandProtocolNotSupported;
+                return error.SidebandProtocolRequired;
             }
 
             if (1 == self.refs.items.len and
