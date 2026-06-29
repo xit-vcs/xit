@@ -13,7 +13,8 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
-                .optimize = optimize,
+                // default to ReleaseSafe unless an explicit -Doptimize is passed
+                .optimize = if (b.user_input_options.contains("optimize")) optimize else .ReleaseSafe,
             }),
         });
         exe.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
