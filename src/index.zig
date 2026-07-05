@@ -243,6 +243,24 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // remove entries that are children of this path (file replaces directory)
                     try self.removeChildren(path, null);
 
+                    // if an existing entry matches the file's stat info exactly,
+                    // the file is unchanged, so skip re-hashing and re-writing it
+                    if (self.entries.getPtr(path)) |entries_for_path| {
+                        if (entries_for_path[0]) |*existing_entry| {
+                            if (meta.size == existing_entry.file_size and
+                                meta.mode.eql(existing_entry.mode) and
+                                meta.times.eql(.{
+                                    .ctime_secs = existing_entry.ctime_secs,
+                                    .ctime_nsecs = existing_entry.ctime_nsecs,
+                                    .mtime_secs = existing_entry.mtime_secs,
+                                    .mtime_nsecs = existing_entry.mtime_nsecs,
+                                }))
+                            {
+                                return;
+                            }
+                        }
+                    }
+
                     // open file
                     const file = try state.core.work_dir.openFile(io, path, .{ .mode = .read_only });
                     defer file.close(io);
