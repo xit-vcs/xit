@@ -492,7 +492,7 @@ pub fn loadChunk(
     defer chunk_file.close(io);
 
     // make reader
-    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+    var reader_buffer = [_]u8{0} ** (repo_opts.extra.chunk_opts.max_size + @sizeOf(CompressKind) + @sizeOf(u32));
     var chunk_reader = chunk_file.reader(io, &reader_buffer);
 
     // read chunk, decompressing if necessary
