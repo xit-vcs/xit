@@ -12,6 +12,10 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         // TODO: maybe store pointers to save space,
         // since usually only the first slot is used
         entries: std.StringArrayHashMapUnmanaged([4]?Entry),
+        // paths added/modified and removed since the index was loaded,
+        // so the .xit backend can write only the entries that changed
+        dirty_paths: std.StringArrayHashMapUnmanaged(void),
+        removed_paths: std.StringArrayHashMapUnmanaged(void),
         dir_to_paths: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
         dir_to_children: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
         root_children: std.StringArrayHashMapUnmanaged(void),
@@ -63,6 +67,8 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             var self = Index(repo_kind, repo_opts){
                 .version = 2,
                 .entries = .empty,
+                .dirty_paths = .empty,
+                .removed_paths = .empty,
                 .dir_to_paths = .empty,
                 .dir_to_children = .empty,
                 .root_children = .empty,
@@ -185,6 +191,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 },
             }
 
+            // the entries loaded above are not dirty
+            self.dirty_paths.clearRetainingCapacity();
+
             return self;
         }
 
@@ -192,6 +201,8 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             self.arena.deinit();
             self.allocator.destroy(self.arena);
             self.entries.deinit(self.allocator);
+            self.dirty_paths.deinit(self.allocator);
+            self.removed_paths.deinit(self.allocator);
             for (self.dir_to_paths.values()) |*paths| {
                 paths.deinit(self.allocator);
             }
@@ -360,6 +371,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         }
 
         fn addEntry(self: *Index(repo_kind, repo_opts), entry: Entry) !void {
+            try self.dirty_paths.put(self.allocator, entry.path, {});
+            _ = self.removed_paths.swapRemove(entry.path);
+
             if (self.entries.getEntry(entry.path)) |map_entry| {
                 // there is an existing slot for the given path,
                 // so evict entries to ensure zero and non-zero stages don't coexist
@@ -494,6 +508,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             const removed = self.entries.orderedRemove(path);
 
             if (removed) {
+                // dupe the path since the caller may not keep it alive
+                const path_dupe = try self.arena.allocator().dupe(u8, path);
+                try self.removed_paths.put(self.allocator, path_dupe, {});
+                _ = self.dirty_paths.swapRemove(path);
+
                 if (removed_paths_maybe) |removed_paths| {
                     try removed_paths.put(self.allocator, path, {});
                 }
@@ -668,19 +687,14 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     const index_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "index"));
                     var index = try DB.SortedMap(.read_write).init(index_cursor);
 
-                    // remove items no longer in the index
-                    var iter = try index.cursor.iterator();
-                    while (try iter.next()) |*next_cursor| {
-                        const kv_pair = try next_cursor.readKeyValuePair();
-                        const path = try kv_pair.key_cursor.readBytesAlloc(allocator, repo_opts.max_read_size);
-                        defer allocator.free(path);
-
-                        if (!self.entries.contains(path)) {
-                            _ = try index.remove(path);
-                        }
+                    // remove paths that have been removed since the index was loaded
+                    for (self.removed_paths.keys()) |path| {
+                        _ = try index.remove(path);
                     }
 
-                    for (self.entries.keys(), self.entries.values()) |path, *entries_for_path| {
+                    // write paths that have been added or modified since the index was loaded
+                    for (self.dirty_paths.keys()) |path| {
+                        const entries_for_path = self.entries.getPtr(path) orelse continue;
                         var entry_buffer_writer = std.Io.Writer.Allocating.init(allocator);
                         defer entry_buffer_writer.deinit();
 
@@ -717,6 +731,10 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         try entry_buffer_cursor.writeIfEmpty(.{ .bytes = entry_buffer_writer.written() });
                         try index.put(path, .{ .slot = entry_buffer_cursor.slot() });
                     }
+
+                    // the db now matches the in-memory index
+                    self.removed_paths.clearRetainingCapacity();
+                    self.dirty_paths.clearRetainingCapacity();
                 },
             }
         }
