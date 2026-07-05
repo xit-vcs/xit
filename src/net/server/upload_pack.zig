@@ -1774,10 +1774,20 @@ fn peelToNonTag(
 ) !bool {
     const orig = oid.*;
     for (0..64) |_| {
-        var object = obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, oid) catch |err| switch (err) {
-            error.ObjectNotFound => return false,
-            else => |e| return e,
-        };
+        // check the object kind with a plain reader first, so non-tags
+        // (the common case) don't pay for a full object parse
+        {
+            var obj_rdr = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, oid) catch |err| switch (err) {
+                error.ObjectNotFound => return false,
+                else => |e| return e,
+            };
+            defer obj_rdr.deinit();
+            if (.tag != obj_rdr.header().kind) {
+                return !std.mem.eql(u8, &orig, oid);
+            }
+        }
+
+        var object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, oid);
         defer object.deinit();
         switch (object.content) {
             .tag => |tag| oid.* = tag.target,
