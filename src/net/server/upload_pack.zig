@@ -216,12 +216,12 @@ fn uploadPack(
                 .eof => {},
                 .data => |line| {
                     try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj);
+                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
                     try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj);
+                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
                 },
                 .delim => return error.UnexpectedDelim,
                 .response_end => return error.UnexpectedResponseEnd,
@@ -238,9 +238,14 @@ fn writePack(
     allocator: std.mem.Allocator,
     writer: *std.Io.Writer,
     want_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
+    have_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
 ) !void {
     var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
+
+    for (have_obj.items) |*item| {
+        try obj_iter.exclude(item);
+    }
 
     for (want_obj.items) |*item| {
         try obj_iter.include(item);
@@ -257,6 +262,21 @@ fn writePack(
             if (size == 0) break;
             try pkt.writePktLineSB(writer, 1, read_buffer[0..size]);
         }
+    } else {
+        // the client already has everything it asked for,
+        // but the protocol still requires a (empty) pack
+        var header = [_]u8{0} ** 12;
+        @memcpy(header[0..4], "PACK");
+        std.mem.writeInt(u32, header[4..8], 2, .big);
+        std.mem.writeInt(u32, header[8..12], 0, .big);
+
+        var hasher = hash.Hasher(repo_opts.hash).init();
+        hasher.update(&header);
+        var checksum = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        hasher.final(&checksum);
+
+        try pkt.writePktLineSB(writer, 1, &header);
+        try pkt.writePktLineSB(writer, 1, &checksum);
     }
 
     try pkt.writePktFlush(writer);
@@ -1445,7 +1465,7 @@ fn uploadPackV2(
             try upload_pack.sendShallowInfo(hex_len, writer, repo_kind, repo_opts, state, io, allocator, &our_refs, &shallow_oids, &deepen_not, &want_obj);
 
             try writePktResponse(writer, upload_pack.writer_use_sideband, "packfile\n", .{});
-            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj);
+            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
             break :upload_pack;
         },
     }

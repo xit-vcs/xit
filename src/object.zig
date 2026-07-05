@@ -1275,7 +1275,12 @@ pub fn ObjectIterator(
                 .tree => |tree| switch (self.options.kind) {
                     .all => for (tree.entries.values()) |entry| {
                         if (entry.mode.content.object_type == .gitlink) continue;
-                        try self.exclude(&std.fmt.bytesToHex(entry.oid, .lower));
+                        const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
+                        // an already-excluded tree or blob has had its whole
+                        // subtree excluded, so there is no need to recurse
+                        if (!self.oid_excludes.contains(entry_oid)) {
+                            try self.exclude(&entry_oid);
+                        }
                     },
                     .commit => {},
                 },
@@ -1286,7 +1291,9 @@ pub fn ObjectIterator(
                         }
                     }
                     switch (self.options.kind) {
-                        .all => try self.exclude(&commit.tree),
+                        .all => if (!self.oid_excludes.contains(commit.tree)) {
+                            try self.exclude(&commit.tree);
+                        },
                         .commit => {},
                     }
                 },
