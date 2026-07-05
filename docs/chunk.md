@@ -10,7 +10,7 @@ The above issues were very straight-forward to solve in xit:
 
 1. When an object is added to xit, it immediately splits it into chunks using FastCDC, a content-defined chunking algorithm. By chunking files, they are immediately being deduplicated because only the chunks that changed need to be saved internally. This is pretty much what every backup program on the planet does, so there is no innovation going on here, but that won't stop me from pretending there is.
 
-2. A chunk with binary data is always stored uncompressed. Chunks mark their compression type with a special byte at the beginning of the chunk. If the first byte is 0, it is uncompressed; if it is 1, it is zlib-compressed. Other algorithms can be accomodated later.
+2. A chunk is only stored with compression if it helps. Chunks mark their compression type with a special byte at the beginning of the chunk. If the first byte is 0, it is uncompressed; if it is 1, it is zlib-compressed. Other algorithms can be accomodated later.
 
 Currently, the the max chunk size is 64k. It is likely that xit will eventually vary max chunk size based on the size of the file, so really large files can be stored with larger chunk sizes.
 

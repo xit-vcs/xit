@@ -26,7 +26,7 @@ You're looking at xit, a new version control system. It's pronounced like "zit" 
   * [read more](docs/tui.md) about the TUI
 * store large/binary files efficiently
   * uses a modern chunking algorithm (FastCDC) to deltify large files
-  * doesn't compress binary files...it has no benefit and can even make them larger
+  * doesn't compress files that don't benefit from it
   * status: complete
   * [read more](docs/chunk.md) about chunking
 * universal undo

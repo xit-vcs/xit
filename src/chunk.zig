@@ -230,72 +230,6 @@ test "fastcdc sekien 64k chunks" {
     try std.testing.expectEqual(0, iter.remaining);
 }
 
-/// trims bytes from the beginning and end of the given text
-/// if they appear to be part of multi-byte utf8 characters
-/// that have been truncated. this is important because we
-/// use utf8 validation to decide whether to compress a chunk,
-/// and if we don't trim these invalid bytes out beforehand,
-/// those chunks will fail validation and won't be compressed.
-fn trimTruncatedCodepoints(text: []const u8) []const u8 {
-    if (text.len < 6) {
-        return text;
-    }
-
-    // count continuation bytes at the start
-    var start_cont_bytes: u2 = 0;
-    for (0..3) |i| {
-        if (text[i] & 0b1100_0000 == 0b1000_0000) {
-            start_cont_bytes += 1;
-        } else {
-            break;
-        }
-    }
-
-    // count continuation bytes at the end
-    var end_cont_bytes: u2 = 0;
-    for (0..3) |i| {
-        if (text[text.len - 1 - i] & 0b1100_0000 == 0b1000_0000) {
-            end_cont_bytes += 1;
-        } else {
-            break;
-        }
-    }
-
-    const skip_end: u2 = switch (end_cont_bytes) {
-        // if there are no continuation bytes at the end, but the last
-        // byte appears to be the start of a multi-byte character, skip it
-        0 => blk: {
-            const last_byte = text[text.len - 1];
-            break :blk if (last_byte & 0b1110_0000 == 0b1100_0000 or
-                last_byte & 0b1111_0000 == 0b1110_0000 or
-                last_byte & 0b1111_1000 == 0b1111_0000) 1 else 0;
-        },
-        // if the byte before the continuation bytes doesn't appear
-        // to be the correct start of the multi-byte character, skip it
-        1 => if (text[text.len - 2] & 0b1110_0000 != 0b1100_0000) 2 else 0,
-        2 => if (text[text.len - 3] & 0b1111_0000 != 0b1110_0000) 3 else 0,
-        // if there are 3 continuation bytes at the end, then there is
-        // no truncated utf8 character
-        3 => 0,
-    };
-
-    return text[start_cont_bytes .. text.len - skip_end];
-}
-
-test "trimTruncatedCodepoints" {
-    const text = "六四天安門";
-    try std.testing.expect(!std.unicode.utf8ValidateSlice(text[1..]));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(text[1..])));
-    try std.testing.expect(!std.unicode.utf8ValidateSlice(text[2..]));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(text[2..])));
-    try std.testing.expect(!std.unicode.utf8ValidateSlice(text[0 .. text.len - 1]));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(text[0 .. text.len - 1])));
-    try std.testing.expect(!std.unicode.utf8ValidateSlice(text[0 .. text.len - 2]));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(text[0 .. text.len - 2])));
-    try std.testing.expect(!std.unicode.utf8ValidateSlice(text[1 .. text.len - 1]));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(text[1 .. text.len - 1])));
-}
-
 pub fn writeChunks(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
@@ -331,11 +265,9 @@ pub fn writeChunks(
                 var lock = try fs.LockFile.init(io, chunks_dir, &chunk_hash_hex);
                 defer lock.deinit(io);
 
-                // if it's utf8 text, try compressing it
-                // since the beginning and end could have truncated unicode codepoints,
-                // we must first trim them. if we don't do this, non-English text will
-                // sometimes fail to validate as utf8 and thus won't get compressed.
-                if (repo_opts.extra.compress_chunks and std.unicode.utf8ValidateSlice(trimTruncatedCodepoints(chunk))) {
+                // try compressing the chunk. the result is only kept
+                // if it comes out smaller than the original.
+                if (repo_opts.extra.compress_chunks) {
                     var wbuf = [_]u8{0} ** repo_opts.buffer_size;
                     var file_writer = lock.lock_file.writer(io, &wbuf);
                     try file_writer.interface.writeByte(@intFromEnum(CompressKind.zlib));
