@@ -222,12 +222,12 @@ fn uploadPack(
                 .eof => {},
                 .data => |line| {
                     try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
+                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
                     try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
+                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
                 },
                 .delim => return error.UnexpectedDelim,
                 .response_end => return error.UnexpectedResponseEnd,
@@ -245,6 +245,7 @@ fn writePack(
     writer: *std.Io.Writer,
     want_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     have_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
+    use_ofs_delta: bool,
 ) !void {
     var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
@@ -257,7 +258,7 @@ fn writePack(
         try obj_iter.include(item);
     }
 
-    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &obj_iter);
+    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = use_ofs_delta });
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
@@ -300,6 +301,7 @@ const UploadPack = struct {
     multi_ack: MultiAck = .none,
     use_sideband: bool = false,
     writer_use_sideband: bool = false,
+    use_ofs_delta: bool = false,
     no_done: bool = false,
     is_stateless: bool = false,
     filter_capability_requested: bool = false,
@@ -764,7 +766,10 @@ const UploadPack = struct {
                     }
 
                     if (std.mem.eql(u8, arg, "thin-pack")) continue;
-                    if (std.mem.eql(u8, arg, "ofs-delta")) continue;
+                    if (std.mem.eql(u8, arg, "ofs-delta")) {
+                        self.use_ofs_delta = true;
+                        continue;
+                    }
                     if (std.mem.eql(u8, arg, "no-progress")) continue;
                     if (std.mem.eql(u8, arg, "include-tag")) continue;
                     if (std.mem.eql(u8, arg, "done")) {
@@ -999,6 +1004,9 @@ const UploadPack = struct {
                 common.hasFeature(features, "side-band"))
             {
                 self.use_sideband = true;
+            }
+            if (common.hasFeature(features, "ofs-delta")) {
+                self.use_ofs_delta = true;
             }
             if (self.allow_filter and common.hasFeature(features, "filter")) {
                 self.filter_capability_requested = true;
@@ -1474,7 +1482,7 @@ fn uploadPackV2(
             try upload_pack.sendShallowInfo(hex_len, writer, repo_kind, repo_opts, state, io, allocator, &our_refs, &shallow_oids, &deepen_not, &want_obj);
 
             try writePktResponse(writer, upload_pack.writer_use_sideband, "packfile\n", .{});
-            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj);
+            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
             break :upload_pack;
         },
     }

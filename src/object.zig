@@ -1124,6 +1124,18 @@ pub const ObjectIteratorOptions = struct {
     max_depth: ?usize = null,
 };
 
+// same name hash git uses when sorting objects for delta compression
+// (pack_name_hash in git's pack-objects.h): the last few characters of
+// the name dominate, so files with the same extension/name hash together
+fn nameHash(name: []const u8) u32 {
+    var name_hash: u32 = 0;
+    for (name) |c| {
+        if (std.ascii.isWhitespace(c)) continue;
+        name_hash = (name_hash >> 2) +% (@as(u32, c) << 24);
+    }
+    return name_hash;
+}
+
 pub fn ObjectIterator(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -1138,11 +1150,16 @@ pub fn ObjectIterator(
         oid_excludes: std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void),
         object: Object(repo_kind, repo_opts, load_kind),
         depth: usize,
+        // hash of the tree entry name the current object was found under
+        // (zero for commits and root objects). used by the pack writer to
+        // group different versions of the same file when finding deltas.
+        name_hash: u32,
         options: ObjectIteratorOptions,
 
         const OidAndNode = struct {
             oid: [hash.hexLen(repo_opts.hash)]u8,
             depth: usize,
+            name_hash: u32,
             node: std.DoublyLinkedList.Node,
         };
 
@@ -1161,6 +1178,7 @@ pub fn ObjectIterator(
                 .oid_excludes = std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void).init(allocator),
                 .object = undefined,
                 .depth = 0,
+                .name_hash = 0,
                 .options = options,
             };
         }
@@ -1179,11 +1197,13 @@ pub fn ObjectIterator(
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
                 const next_oid = oid_and_node.oid;
                 const node_depth = oid_and_node.depth;
+                const node_name_hash = oid_and_node.name_hash;
                 self.allocator.destroy(oid_and_node);
 
                 if (!self.oid_excludes.contains(next_oid)) {
                     try self.oid_excludes.put(next_oid, {});
                     self.depth = node_depth;
+                    self.name_hash = node_name_hash;
                     switch (load_kind) {
                         .raw => {
                             var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, allocator, &next_oid);
@@ -1226,10 +1246,10 @@ pub fn ObjectIterator(
             switch (content) {
                 .blob => {},
                 .tree => |tree_content| switch (self.options.kind) {
-                    .all => for (tree_content.entries.values()) |entry| {
+                    .all => for (tree_content.entries.keys(), tree_content.entries.values()) |name, entry| {
                         if (entry.mode.content.object_type == .gitlink) continue;
                         const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
-                        try self.includeAtDepth(&entry_oid, child_depth);
+                        try self.includeWithName(&entry_oid, child_depth, nameHash(name));
                     },
                     .commit => {},
                 },
@@ -1253,12 +1273,17 @@ pub fn ObjectIterator(
         }
 
         pub fn includeAtDepth(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize) !void {
+            try self.includeWithName(oid, item_depth, 0);
+        }
+
+        fn includeWithName(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize, name_hash: u32) !void {
             if (self.options.max_depth) |max| if (item_depth > max) return;
             if (!self.oid_excludes.contains(oid.*)) {
                 var oid_and_node = try self.allocator.create(OidAndNode);
                 errdefer self.allocator.free(oid_and_node);
                 oid_and_node.oid = oid.*;
                 oid_and_node.depth = item_depth;
+                oid_and_node.name_hash = name_hash;
                 oid_and_node.node = .{};
                 self.oid_queue.append(&oid_and_node.node);
             }

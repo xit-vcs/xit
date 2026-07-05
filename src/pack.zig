@@ -1272,13 +1272,207 @@ pub fn LooseOrPackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_op
     };
 }
 
+// append an offset in the big endian variable length format used by
+// ofs_delta pack entries (note the +1 per continuation "offset encoding",
+// mirroring the decoder above)
+fn writeOfsVarint(writer: *std.Io.Writer, value: u64) !void {
+    var buf = [_]u8{0} ** 10;
+    var pos: usize = buf.len - 1;
+    var remaining = value;
+    buf[pos] = @truncate(remaining & 0x7f);
+    while (remaining >> 7 != 0) {
+        remaining = (remaining >> 7) - 1;
+        pos -= 1;
+        buf[pos] = 0x80 | @as(u8, @truncate(remaining & 0x7f));
+    }
+    try writer.writeAll(buf[pos..]);
+}
+
+// the base object is indexed in blocks of this size when creating a delta.
+// smaller finds more matches but makes the index bigger; git uses 16.
+const delta_block_size = 16;
+
+fn deltaBlockHash(block: *const [delta_block_size]u8) u64 {
+    return std.hash.Wyhash.hash(0, block);
+}
+
+// append a size in the little endian variable length format used by
+// the header of a delta object
+fn writeDeltaSizeVarint(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
+    var remaining = value;
+    while (true) {
+        const next_byte: packed struct {
+            value: u7,
+            extra: bool,
+        } = .{
+            .value = @truncate(remaining),
+            .extra = (remaining >> 7) != 0,
+        };
+        try delta.append(allocator, @bitCast(next_byte));
+        remaining >>= 7;
+        if (remaining == 0) break;
+    }
+}
+
+// append an "add new data" instruction: one length byte (1 to 127,
+// high bit clear) followed by the literal bytes
+fn writeInsertCommand(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
+    if (bytes.len == 0) return;
+    try delta.append(allocator, @intCast(bytes.len));
+    try delta.appendSlice(allocator, bytes);
+}
+
+// append a "copy from base" instruction: a command byte whose high bit is
+// set and whose low bits say which of the 4 offset bytes and 3 size bytes
+// follow (zero bytes are omitted). a size of 0x10000 is encoded with no
+// size bytes at all, since decoders treat a size of zero as 0x10000.
+fn writeCopyCommand(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, offset: usize, size: usize) !void {
+    var vals = [_]u8{0} ** 7;
+    std.mem.writeInt(u32, vals[0..4], @intCast(offset), .little);
+    std.mem.writeInt(u24, vals[4..], if (size == 0x10000) 0 else @intCast(size), .little);
+
+    var mask: u7 = 0;
+    for (vals, 0..) |val, i| {
+        if (val != 0) {
+            mask |= @as(u7, 1) << @intCast(i);
+        }
+    }
+
+    const cmd: packed struct {
+        value: u7,
+        high_bit: u1,
+    } = .{
+        .value = mask,
+        .high_bit = 1,
+    };
+    try delta.append(allocator, @bitCast(cmd));
+
+    for (vals) |val| {
+        if (val != 0) {
+            try delta.append(allocator, val);
+        }
+    }
+}
+
+/// try to create a delta object that reconstructs `target` from `base`,
+/// in the format described in https://git-scm.com/docs/pack-format
+/// (and decoded by PackObjectReader above). returns null if no delta
+/// smaller than `max_size` could be produced.
+pub fn createDelta(allocator: std.mem.Allocator, base: []const u8, target: []const u8, max_size: usize) !?[]u8 {
+    var delta: std.ArrayList(u8) = .empty;
+    defer delta.deinit(allocator);
+
+    // the header contains the sizes of the base and reconstructed objects
+    try writeDeltaSizeVarint(&delta, allocator, base.len);
+    try writeDeltaSizeVarint(&delta, allocator, target.len);
+
+    // index the base in fixed-size blocks. when multiple blocks have the
+    // same hash, the first one wins.
+    var block_index = std.AutoHashMap(u64, u32).init(allocator);
+    defer block_index.deinit();
+    if (base.len >= delta_block_size) {
+        try block_index.ensureTotalCapacity(@intCast(base.len / delta_block_size + 1));
+        var i: usize = 0;
+        while (i + delta_block_size <= base.len) : (i += delta_block_size) {
+            const entry = block_index.getOrPutAssumeCapacity(deltaBlockHash(base[i..][0..delta_block_size]));
+            if (!entry.found_existing) {
+                entry.value_ptr.* = @intCast(i);
+            }
+        }
+    }
+
+    var insert_buffer = [_]u8{0} ** 127;
+    var insert_len: usize = 0;
+
+    var pos: usize = 0;
+    while (pos < target.len) {
+        // find a match in the base for the bytes at the current position
+        var match_offset: usize = 0;
+        var match_len: usize = 0;
+        if (pos + delta_block_size <= target.len) {
+            if (block_index.get(deltaBlockHash(target[pos..][0..delta_block_size]))) |base_offset_u32| {
+                var base_offset: usize = base_offset_u32;
+                var len: usize = 0;
+                while (base_offset + len < base.len and pos + len < target.len and
+                    base[base_offset + len] == target[pos + len])
+                {
+                    len += 1;
+                }
+                // the hash could have collided, so only accept the match if
+                // a full block actually compared equal
+                if (len >= delta_block_size) {
+                    // extend the match backward through pending insert bytes
+                    while (base_offset > 0 and insert_len > 0 and
+                        base[base_offset - 1] == target[pos - 1])
+                    {
+                        base_offset -= 1;
+                        pos -= 1;
+                        len += 1;
+                        insert_len -= 1;
+                    }
+                    match_offset = base_offset;
+                    match_len = len;
+                }
+            }
+        }
+
+        if (match_len == 0) {
+            insert_buffer[insert_len] = target[pos];
+            insert_len += 1;
+            pos += 1;
+            if (insert_len == insert_buffer.len) {
+                try writeInsertCommand(&delta, allocator, insert_buffer[0..insert_len]);
+                insert_len = 0;
+            }
+        } else {
+            try writeInsertCommand(&delta, allocator, insert_buffer[0..insert_len]);
+            insert_len = 0;
+            // long matches are split because a single copy instruction
+            // can cover at most 0x10000 bytes
+            var remaining = match_len;
+            var offset = match_offset;
+            while (remaining > 0) {
+                const size = @min(remaining, 0x10000);
+                try writeCopyCommand(&delta, allocator, offset, size);
+                offset += size;
+                remaining -= size;
+            }
+            pos += match_len;
+        }
+
+        if (delta.items.len + insert_len >= max_size) {
+            return null;
+        }
+    }
+    try writeInsertCommand(&delta, allocator, insert_buffer[0..insert_len]);
+
+    if (delta.items.len >= max_size) {
+        return null;
+    }
+    return try delta.toOwnedSlice(allocator);
+}
+
 pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         allocator: std.mem.Allocator,
-        objects: std.ArrayList(obj.Object(repo_kind, repo_opts, .raw)),
-        object_index: usize,
+        io: std.Io,
+        core: *rp.Repo(repo_kind, repo_opts).Core,
+        moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
+        allow_ofs_delta: bool,
+        entries: std.ArrayList(Entry),
+        entry_index: usize,
+        // where the current entry's data is streamed from: a reader over the
+        // object store for full objects, or the cached delta instructions
+        source: union(enum) {
+            none,
+            object_reader: obj.ObjectReader(repo_kind, repo_opts),
+            delta: std.Io.Reader,
+        },
         out_bytes: std.Io.Writer.Allocating,
         out_index: usize,
+        // total bytes handed to the caller so far; used to record each
+        // entry's offset in the pack for ofs_delta encoding
+        bytes_produced: u64,
         stream_buffer: [std.compress.flate.max_window_len]u8,
         hasher: hash.Hasher(repo_opts.hash),
         mode: union(enum) {
@@ -1290,13 +1484,48 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             finished,
         },
 
-        pub fn init(allocator: std.mem.Allocator, obj_iter: *obj.ObjectIterator(repo_kind, repo_opts, .raw)) !?PackWriter(repo_kind, repo_opts) {
+        pub const InitOptions = struct {
+            allow_ofs_delta: bool = false,
+        };
+
+        const Entry = struct {
+            oid: [hash.hexLen(repo_opts.hash)]u8,
+            kind: obj.ObjectKind,
+            size: u64,
+            name_hash: u32,
+            // delta chain length (zero for full objects)
+            depth: usize,
+            pack_offset: u64,
+            repr: union(enum) {
+                full,
+                delta: struct {
+                    base_index: usize,
+                    bytes: []u8,
+                },
+            },
+        };
+
+        // stop finding new deltas once this many bytes of delta instructions
+        // are cached in memory
+        const max_delta_cache_size = 256 * 1024 * 1024;
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            obj_iter: *obj.ObjectIterator(repo_kind, repo_opts, .raw),
+            options: InitOptions,
+        ) !?PackWriter(repo_kind, repo_opts) {
             var self = PackWriter(repo_kind, repo_opts){
                 .allocator = allocator,
-                .objects = .empty,
-                .object_index = 0,
+                .io = obj_iter.io,
+                .core = obj_iter.core,
+                .moment = obj_iter.moment,
+                .allow_ofs_delta = options.allow_ofs_delta,
+                .entries = .empty,
+                .entry_index = 0,
+                .source = .none,
                 .out_bytes = try .initCapacity(allocator, repo_opts.buffer_size),
                 .out_index = 0,
+                .bytes_produced = 0,
                 .stream_buffer = [_]u8{0} ** std.compress.flate.max_window_len,
                 .hasher = hash.Hasher(repo_opts.hash).init(),
                 .mode = .header,
@@ -1304,29 +1533,134 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             errdefer self.deinit();
 
             while (try obj_iter.next(allocator)) |object| {
-                errdefer object.deinit();
-                try self.objects.append(allocator, object.*);
+                defer object.deinit();
+                try self.entries.append(allocator, .{
+                    .oid = object.oid,
+                    .kind = object.content,
+                    .size = object.len,
+                    .name_hash = obj_iter.name_hash,
+                    .depth = 0,
+                    .pack_offset = 0,
+                    .repr = .full,
+                });
             }
 
-            if (self.objects.items.len == 0) {
+            if (self.entries.items.len == 0) {
                 return null;
             }
 
+            // sort so that similar objects are near each other: by kind, then
+            // by the name the object was found under, then largest first
+            // (deltas from a larger base tend to be smaller)
+            std.mem.sort(Entry, self.entries.items, {}, struct {
+                fn lessThan(_: void, a: Entry, b: Entry) bool {
+                    if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+                    if (a.name_hash != b.name_hash) return a.name_hash < b.name_hash;
+                    return a.size > b.size;
+                }
+            }.lessThan);
+
+            try self.findDeltas();
+
             _ = try self.out_bytes.writer.write("PACK");
             try self.out_bytes.writer.writeInt(u32, 2, .big); // version
-            try self.out_bytes.writer.writeInt(u32, @intCast(self.objects.items.len), .big);
+            try self.out_bytes.writer.writeInt(u32, @intCast(self.entries.items.len), .big);
 
-            try self.writeObjectHeader();
+            try self.writeEntryHeader();
 
             return self;
         }
 
         pub fn deinit(self: *PackWriter(repo_kind, repo_opts)) void {
-            for (self.objects.items) |*object| {
-                object.deinit();
+            switch (self.source) {
+                .object_reader => |*object_reader| object_reader.deinit(),
+                .none, .delta => {},
             }
-            self.objects.deinit(self.allocator);
+            for (self.entries.items) |*entry| {
+                switch (entry.repr) {
+                    .full => {},
+                    .delta => |d| self.allocator.free(d.bytes),
+                }
+            }
+            self.entries.deinit(self.allocator);
             self.out_bytes.deinit();
+        }
+
+        // slide a window over the sorted entries, trying to represent each
+        // one as a delta against a nearby earlier entry
+        fn findDeltas(self: *PackWriter(repo_kind, repo_opts)) !void {
+            const window_size = repo_opts.delta_window_size;
+            if (window_size == 0 or self.entries.items.len < 2) return;
+
+            const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
+
+            const WindowEntry = struct {
+                index: usize,
+                bytes: []u8,
+            };
+            var window: std.ArrayList(WindowEntry) = .empty;
+            defer {
+                for (window.items) |window_entry| {
+                    self.allocator.free(window_entry.bytes);
+                }
+                window.deinit(self.allocator);
+            }
+
+            var cache_size: usize = 0;
+
+            for (self.entries.items, 0..) |*entry, i| {
+                if (entry.size == 0 or entry.size > repo_opts.delta_big_file_threshold) continue;
+                if (cache_size > max_delta_cache_size) break;
+
+                // read the whole object into memory
+                const target = try self.allocator.alloc(u8, @intCast(entry.size));
+                errdefer self.allocator.free(target);
+                {
+                    var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &entry.oid);
+                    defer object_reader.deinit();
+                    try object_reader.interface.readSliceAll(target);
+                }
+
+                // try a delta against each window entry, newest first,
+                // keeping the smallest result
+                var best_bytes: ?[]u8 = null;
+                errdefer if (best_bytes) |bytes| self.allocator.free(bytes);
+                var best_base: usize = 0;
+
+                var window_i = window.items.len;
+                while (window_i > 0) {
+                    window_i -= 1;
+                    const candidate = window.items[window_i];
+                    const base_entry = &self.entries.items[candidate.index];
+                    if (base_entry.kind != entry.kind) continue;
+                    if (base_entry.depth + 1 > repo_opts.delta_max_depth) continue;
+
+                    // a delta is only worth using if it's less than half the
+                    // object's size, and only worth keeping if it beats the best
+                    const max_size: usize = if (best_bytes) |bytes| bytes.len else @intCast(entry.size / 2);
+                    if (max_size == 0) break;
+
+                    if (try createDelta(self.allocator, candidate.bytes, target, max_size)) |delta_bytes| {
+                        if (best_bytes) |bytes| self.allocator.free(bytes);
+                        best_bytes = delta_bytes;
+                        best_base = candidate.index;
+                    }
+                }
+
+                if (best_bytes) |delta_bytes| {
+                    entry.repr = .{ .delta = .{ .base_index = best_base, .bytes = delta_bytes } };
+                    entry.depth = self.entries.items[best_base].depth + 1;
+                    cache_size += delta_bytes.len;
+                }
+
+                // add this object to the window (even if it became a delta,
+                // it can still be the base of later entries)
+                if (window.items.len == window_size) {
+                    const oldest = window.orderedRemove(0);
+                    self.allocator.free(oldest.bytes);
+                }
+                try window.append(self.allocator, .{ .index = i, .bytes = target });
+            }
         }
 
         pub fn read(self: *PackWriter(repo_kind, repo_opts), buffer: []u8) !usize {
@@ -1343,6 +1677,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                     @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
                     self.hasher.update(buffer[0..size]);
+                    self.bytes_produced += size;
                     if (size < buffer.len) {
                         self.out_bytes.deinit();
                         self.out_bytes = try .initCapacity(self.allocator, repo_opts.buffer_size);
@@ -1362,6 +1697,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                         @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
                         self.hasher.update(buffer[0..size]);
+                        self.bytes_produced += size;
                         self.out_index += size;
                         return size;
                     } else {
@@ -1371,8 +1707,11 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         self.out_index = 0;
 
                         if (o.stream) |*stream| {
-                            const object = &self.objects.items[self.object_index];
-                            const size = object.object_reader.interface.stream(&stream.writer, @enumFromInt(buffer.len)) catch |err| switch (err) {
+                            const size = switch (self.source) {
+                                .none => unreachable,
+                                .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, @enumFromInt(buffer.len)),
+                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, @enumFromInt(buffer.len)),
+                            } catch |err| switch (err) {
                                 error.EndOfStream => 0,
                                 else => |e| return e,
                             };
@@ -1392,10 +1731,15 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         }
 
                         // there is nothing more to write, so move on to the next object
-                        self.object_index += 1;
-                        if (self.object_index < self.objects.items.len) {
+                        switch (self.source) {
+                            .object_reader => |*object_reader| object_reader.deinit(),
+                            .none, .delta => {},
+                        }
+                        self.source = .none;
+                        self.entry_index += 1;
+                        if (self.entry_index < self.entries.items.len) {
                             self.mode = .header;
-                            try self.writeObjectHeader();
+                            try self.writeEntryHeader();
                         } else {
                             self.mode = .footer;
                             var hash_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
@@ -1408,6 +1752,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 .footer => {
                     const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                     @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
+                    self.bytes_produced += size;
                     if (size < buffer.len) {
                         self.out_bytes.deinit();
                         self.out_bytes = try .initCapacity(self.allocator, repo_opts.buffer_size);
@@ -1422,9 +1767,28 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             }
         }
 
-        fn writeObjectHeader(self: *PackWriter(repo_kind, repo_opts)) !void {
-            const object = self.objects.items[self.object_index];
-            const size = object.len;
+        fn writeEntryHeader(self: *PackWriter(repo_kind, repo_opts)) !void {
+            const entry = &self.entries.items[self.entry_index];
+
+            // the entry begins after everything already handed to the caller
+            // plus anything still sitting in out_bytes
+            entry.pack_offset = self.bytes_produced + self.out_bytes.written().len;
+
+            const kind: PackObjectKind = switch (entry.repr) {
+                .full => switch (entry.kind) {
+                    .blob => .blob,
+                    .tree => .tree,
+                    .commit => .commit,
+                    .tag => .tag,
+                },
+                .delta => if (self.allow_ofs_delta) .ofs_delta else .ref_delta,
+            };
+            // for delta entries, the header size field is the size of the
+            // delta instructions, not the reconstructed object
+            const size: u64 = switch (entry.repr) {
+                .full => entry.size,
+                .delta => |d| d.bytes.len,
+            };
 
             const first_size_parts: packed struct {
                 low_bits: u4,
@@ -1433,12 +1797,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
             const obj_header = PackObjectHeader{
                 .size = first_size_parts.low_bits,
-                .kind = switch (object.content) {
-                    .blob => .blob,
-                    .tree => .tree,
-                    .commit => .commit,
-                    .tag => .tag,
-                },
+                .kind = kind,
                 .extra = first_size_parts.high_bits > 0,
             };
 
@@ -1460,6 +1819,30 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 };
                 try self.out_bytes.writer.writeByte(@bitCast(next_byte));
                 next_size = size_parts.high_bits;
+            }
+
+            // delta entries name their base object before the compressed data
+            switch (entry.repr) {
+                .full => {},
+                .delta => |d| {
+                    const base_entry = &self.entries.items[d.base_index];
+                    if (self.allow_ofs_delta) {
+                        try writeOfsVarint(&self.out_bytes.writer, entry.pack_offset - base_entry.pack_offset);
+                    } else {
+                        var base_oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                        _ = try std.fmt.hexToBytes(&base_oid_bytes, &base_entry.oid);
+                        try self.out_bytes.writer.writeAll(&base_oid_bytes);
+                    }
+                },
+            }
+
+            // set up the source that the entry's data will be streamed from
+            switch (entry.repr) {
+                .full => {
+                    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
+                    self.source = .{ .object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &entry.oid) };
+                },
+                .delta => |d| self.source = .{ .delta = std.Io.Reader.fixed(d.bytes) },
             }
         }
     };

@@ -5,6 +5,27 @@ const obj = @import("../object.zig");
 const pack = @import("../pack.zig");
 const rf = @import("../ref.zig");
 
+// createDelta's output bytes are validated end-to-end in the
+// "write pack file" test below, which reads the deltas back with
+// PackObjectReader. this test just checks its compression behavior.
+test "create delta" {
+    const allocator = std.testing.allocator;
+
+    // an edit in the middle of similar content should produce a delta
+    // much smaller than the content itself
+    const base = "the quick brown fox jumps over the lazy dog. " ** 50;
+    const target = base[0..1000] ++ "EDITED!" ++ base[1000..];
+    const delta = (try pack.createDelta(allocator, base, target, target.len / 2)) orelse return error.NoDelta;
+    defer allocator.free(delta);
+    try std.testing.expect(delta.len < 100);
+
+    // unrelated content can't be delta-compressed within the size budget
+    var random_bytes: [1000]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(123);
+    prng.random().bytes(&random_bytes);
+    try std.testing.expectEqual(null, try pack.createDelta(allocator, base, &random_bytes, random_bytes.len / 2));
+}
+
 test "create and read pack" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
@@ -97,7 +118,7 @@ test "create and read pack" {
         defer obj_iter.deinit();
         try obj_iter.include(&head_oid);
 
-        var pack_writer = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter) orelse return error.PackWriterIsEmpty;
+        var pack_writer = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = true }) orelse return error.PackWriterIsEmpty;
         defer pack_writer.deinit();
 
         var pack_file = try temp_dir.createFile(io, "test.pack", .{});
@@ -204,7 +225,7 @@ test "write pack file" {
     try obj_iter.include(&commit2);
 
     // write pack file
-    var pack_writer_maybe = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter);
+    var pack_writer_maybe = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = true });
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
@@ -229,11 +250,56 @@ test "write pack file" {
         var server_repo = try rp.Repo(.git, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
         defer server_repo.deinit(io, allocator);
 
-        var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
-        defer pack_reader.deinit();
+        {
+            var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
+            defer pack_reader.deinit();
 
-        var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
-        try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &server_repo.core, .extra = .{} }, io, allocator, &pack_iter, null);
+            var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
+            try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &server_repo.core, .extra = .{} }, io, allocator, &pack_iter, null);
+        }
+
+        // since the second commit only edited existing files, the pack
+        // should contain delta objects
+        var object_count: usize = 0;
+        {
+            var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
+            defer pack_reader.deinit();
+
+            var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
+
+            var delta_count: usize = 0;
+            while (try pack_iter.next(.{ .core = &server_repo.core, .extra = .{} }, null)) |pack_obj_rdr| {
+                defer pack_obj_rdr.deinit(io, allocator);
+
+                object_count += 1;
+                switch (pack_obj_rdr.internal) {
+                    .basic => {},
+                    .delta => delta_count += 1,
+                }
+
+                // drain the object so the iterator can advance
+                var drain_buffer = [_]u8{0} ** 1024;
+                while (0 != try pack_obj_rdr.read(&drain_buffer)) {}
+            }
+            try std.testing.expect(delta_count > 0);
+        }
+
+        // walking the copied objects verifies that every delta was
+        // reconstructed correctly: a corrupted object would have been
+        // stored under a different oid than the one its parent refers to,
+        // so the walk would fail to find it
+        {
+            var walk_iter = try obj.ObjectIterator(.git, repo_opts, .raw).init(.{ .core = &server_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
+            defer walk_iter.deinit();
+            try walk_iter.include(&commit2);
+
+            var walk_count: usize = 0;
+            while (try walk_iter.next(allocator)) |object| {
+                object.deinit();
+                walk_count += 1;
+            }
+            try std.testing.expectEqual(object_count, walk_count);
+        }
     }
 }
 
