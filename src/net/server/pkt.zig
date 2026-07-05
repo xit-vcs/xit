@@ -11,11 +11,15 @@ pub fn pktLineHeader(len: usize) [4]u8 {
     return header;
 }
 
+// note: pkt-line writes are buffered. the writer is flushed by
+// writePktFlush/writePktDelim (which mark the protocol boundaries where
+// the client gets control) and at the end of each service, so callers
+// that write pkt-lines and then wait for client input without sending a
+// flush-pkt or delim-pkt must flush the writer themselves.
 pub fn writePktLine(writer: *std.Io.Writer, data: []const u8) std.Io.Writer.Error!void {
     const len = data.len + PKT_LEN_SIZE;
     try writer.writeAll(&pktLineHeader(len));
     try writer.writeAll(data);
-    try writer.flush();
 }
 
 pub fn writePktLineFmt(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) std.Io.Writer.Error!void {
@@ -40,7 +44,6 @@ pub fn writePktLineSB(writer: *std.Io.Writer, band: u8, data: []const u8) std.Io
     try writer.writeAll(&pktLineHeader(len));
     try writer.writeByte(band);
     try writer.writeAll(data);
-    try writer.flush();
 }
 
 pub fn writePktLineSBFmt(writer: *std.Io.Writer, band: u8, comptime fmt: []const u8, args: anytype) std.Io.Writer.Error!void {
@@ -60,7 +63,6 @@ pub fn sendSideband(writer: *std.Io.Writer, band: u8, data: []const u8) std.Io.W
         try writer.writeAll(&pktLineHeader(n + 5));
         try writer.writeByte(band);
         try writer.writeAll(remaining[0..n]);
-        try writer.flush();
         remaining = remaining[n..];
     }
 }

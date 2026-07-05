@@ -28,6 +28,10 @@ pub fn run(
     writer: *std.Io.Writer,
     options: Options,
 ) !void {
+    // pkt-line writes are buffered, so make sure any error message
+    // is sent before an error unwinds past this point
+    errdefer writer.flush() catch {};
+
     var receive_pack = ReceivePack{};
 
     try receive_pack.readConfig(repo_kind, repo_opts, state.readOnly(), io, allocator);

@@ -25,6 +25,10 @@ pub fn run(
     writer: *std.Io.Writer,
     options: Options,
 ) !void {
+    // pkt-line writes are buffered, so make sure any error message
+    // is sent before an error unwinds past this point
+    errdefer writer.flush() catch {};
+
     switch (options.protocol_version) {
         .v2 => {
             var v2_config = V2Config{};
@@ -89,6 +93,8 @@ pub fn run(
             try uploadPack(writer, repo_kind, repo_opts, state, io, allocator, options, reader);
         },
     }
+
+    try writer.flush();
 }
 
 fn uploadPack(
@@ -1053,6 +1059,9 @@ const UploadPack = struct {
                 if (have_obj.items.len == 0 or self.multi_ack != .none) {
                     try pkt.writePktLineFmt(writer, "NAK\n", .{});
                 }
+
+                // the client waits for our response after each batch of haves
+                try writer.flush();
 
                 if (self.no_done and sent_ready) {
                     try pkt.writePktLineFmt(writer, "ACK {s}\n", .{&last_hex});
