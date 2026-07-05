@@ -394,57 +394,33 @@ pub fn writeChunks(
     _ = try state.extra.moment.remove(hash.hashInt(repo_opts.hash, "object.temp"));
 }
 
+// find the index of the chunk covering `position` in the object, or null if
+// the position is past the last chunk. `chunk_info` holds fixed-size entries
+// of (chunk hash, end offset), so this is a binary search for the first
+// chunk whose end offset is greater than the position.
 fn findChunkIndex(
     comptime repo_opts: rp.RepoOpts(.xit),
-    chunk_info_reader: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only).Reader,
+    chunk_info: []const u8,
     position: u64,
-) !?usize {
+) ?usize {
     const chunk_hash_size = comptime hash.byteLen(repo_opts.hash);
     const chunk_offset_size = @sizeOf(u64);
     const chunk_info_size = chunk_hash_size + chunk_offset_size;
-    const chunk_count = chunk_info_reader.size / chunk_info_size;
-    if (chunk_count == 0) {
-        return null;
-    }
+    const chunk_count = chunk_info.len / chunk_info_size;
 
     var left: usize = 0;
-    var right: usize = chunk_count - 1;
-
-    // binary search for the chunk
+    var right: usize = chunk_count;
     while (left < right) {
         const mid = left + ((right - left) / 2);
-
-        // note: we are storing the *end* offsets of each chunk
-        try chunk_info_reader.seekTo(mid * chunk_info_size + chunk_hash_size);
-        const end_offset = try chunk_info_reader.interface.takeInt(u64, .big);
-
+        const end_offset = std.mem.readInt(u64, chunk_info[mid * chunk_info_size + chunk_hash_size ..][0..chunk_offset_size], .big);
         if (position < end_offset) {
-            if (mid > 0) {
-                // since we store end offsets, the offset of the previous
-                // chunk is the actual offset of `mid`
-                try chunk_info_reader.seekTo((mid - 1) * chunk_info_size + chunk_hash_size);
-                const mid_offset = try chunk_info_reader.interface.takeInt(u64, .big);
-
-                if (position >= mid_offset) {
-                    return mid;
-                } else {
-                    right = mid - 1;
-                }
-            } else {
-                return mid;
-            }
+            right = mid;
         } else {
             left = mid + 1;
         }
     }
 
-    try chunk_info_reader.seekTo(right * chunk_info_size + chunk_hash_size);
-    const right_offset = try chunk_info_reader.interface.takeInt(u64, .big);
-    if (position < right_offset) {
-        return right;
-    }
-
-    return null;
+    return if (left < chunk_count) left else null;
 }
 
 // where a chunk lives in the object: it starts at `object_offset` and is `len`
@@ -454,21 +430,19 @@ pub const ChunkSpan = struct {
     len: usize,
 };
 
-// decompress the whole chunk containing `object_position` into `buf` (which must
+// decompress the whole chunk at `chunk_index` into `buf` (which must
 // be at least one byte larger than the object's largest chunk, so at most
-// chunk_opts.max_size + 1 bytes) and return its span, or null if the
-// position is past the last chunk. callers cache the result so a chunk is only
-// read and decompressed once even when the object is scanned line by line.
+// chunk_opts.max_size + 1 bytes) and return its span. callers cache the
+// result so a chunk is only read and decompressed once even when the
+// object is scanned line by line.
 pub fn loadChunk(
     comptime repo_opts: rp.RepoOpts(.xit),
-    chunk_info_reader: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only).Reader,
+    chunk_info: []const u8,
     io: std.Io,
     chunks_dir: std.Io.Dir,
-    object_position: u64,
+    chunk_index: usize,
     buf: []u8,
-) !?ChunkSpan {
-    // find the chunk info position
-    const chunk_index = (try findChunkIndex(repo_opts, chunk_info_reader, object_position)) orelse return null;
+) !ChunkSpan {
     const chunk_hash_size = comptime hash.byteLen(repo_opts.hash);
     const chunk_offset_size = @sizeOf(u64);
     const chunk_info_size = chunk_hash_size + chunk_offset_size;
@@ -477,14 +451,13 @@ pub fn loadChunk(
     // find the chunk info
     // the offset is where the chunk is located in the object.
     // the hash is the hash of the uncompressed chunk data.
-    const object_offset = if (chunk_index == 0) blk: {
-        try chunk_info_reader.seekTo(chunk_info_position);
-        break :blk 0;
-    } else blk: {
-        try chunk_info_reader.seekTo(chunk_info_position - chunk_offset_size);
-        break :blk try chunk_info_reader.interface.takeInt(u64, .big);
-    };
-    const chunk_hash_bytes = try chunk_info_reader.interface.takeArray(chunk_hash_size);
+    // since entries store *end* offsets, the offset of this chunk is the
+    // end offset of the previous one.
+    const object_offset = if (chunk_index == 0)
+        0
+    else
+        std.mem.readInt(u64, chunk_info[chunk_info_position - chunk_offset_size ..][0..chunk_offset_size], .big);
+    const chunk_hash_bytes = chunk_info[chunk_info_position..][0..chunk_hash_size];
     const chunk_hash_hex = std.fmt.bytesToHex(chunk_hash_bytes, .lower);
 
     // open the chunk file (the caller keeps the chunks dir open across reads)
@@ -525,9 +498,13 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         io: std.Io,
         repo_dir: std.Io.Dir,
-        cursor: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-        chunk_info_reader: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only).Reader,
-        read_buffer: []u8,
+        allocator: std.mem.Allocator,
+        chunk_info_cursor: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
+        // the object's chunk info entries (chunk hash + end offset pairs),
+        // read into memory on the first read so that finding chunks never
+        // has to touch the db again. it's tiny compared to the object
+        // (one entry per chunk, and chunks are thousands of bytes).
+        chunk_info: ?[]u8,
         position: u64,
         header: obj.ObjectHeader,
         // the chunks dir, opened on first read and reused for every chunk
@@ -567,9 +544,6 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 }
             };
 
-            const read_buffer = try allocator.alloc(u8, repo_opts.buffer_size);
-            errdefer allocator.free(read_buffer);
-
             // no chunk can be larger than the object itself, so small objects
             // (the common case for trees and commits) get a small cache.
             // add 1 so streamRemaining can drain a full-sized chunk
@@ -577,17 +551,12 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const chunk_cache = try allocator.alloc(u8, max_chunk_size + 1);
             errdefer allocator.free(chunk_cache);
 
-            // put cursor on the heap so the pointer is stable (the reader uses it internally)
-            const chunk_info_ptr = try allocator.create(rp.Repo(.xit, repo_opts).DB.Cursor(.read_only));
-            errdefer allocator.destroy(chunk_info_ptr);
-            chunk_info_ptr.* = chunk_info_kv_pair.value_cursor;
-
             return .{
                 .io = io,
                 .repo_dir = state.core.repo_dir,
-                .cursor = chunk_info_ptr,
-                .chunk_info_reader = try chunk_info_ptr.reader(read_buffer),
-                .read_buffer = read_buffer,
+                .allocator = allocator,
+                .chunk_info_cursor = chunk_info_kv_pair.value_cursor,
+                .chunk_info = null,
                 .position = 0,
                 .header = .{
                     .kind = try obj.ObjectKind.init(object_kind_name),
@@ -602,9 +571,8 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
         pub fn deinit(self: *ChunkObjectReader(repo_opts), _: std.Io, allocator: std.mem.Allocator) void {
             if (self.chunks_dir) |*dir| dir.close(self.io);
+            if (self.chunk_info) |chunk_info| allocator.free(chunk_info);
             allocator.free(self.chunk_cache);
-            allocator.destroy(self.cursor);
-            allocator.free(self.read_buffer);
         }
 
         pub fn read(self: *ChunkObjectReader(repo_opts), buf: []u8) !usize {
@@ -629,7 +597,20 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 if (self.chunks_dir == null) {
                     self.chunks_dir = try self.repo_dir.openDir(self.io, "chunks", .{});
                 }
-                const span = (try loadChunk(repo_opts, &self.chunk_info_reader, self.io, self.chunks_dir.?, self.position, self.chunk_cache)) orelse return 0;
+
+                // read the chunk info into memory the first time it's needed
+                const chunk_info = self.chunk_info orelse blk: {
+                    var read_buffer: [repo_opts.buffer_size]u8 = undefined;
+                    var reader = try self.chunk_info_cursor.reader(&read_buffer);
+                    const chunk_info = try self.allocator.alloc(u8, @intCast(reader.size));
+                    errdefer self.allocator.free(chunk_info);
+                    try reader.interface.readSliceAll(chunk_info);
+                    self.chunk_info = chunk_info;
+                    break :blk chunk_info;
+                };
+
+                const chunk_index = findChunkIndex(repo_opts, chunk_info, self.position) orelse return 0;
+                const span = try loadChunk(repo_opts, chunk_info, self.io, self.chunks_dir.?, chunk_index, self.chunk_cache);
                 self.cache_start = span.object_offset;
                 self.cache_end = span.object_offset + span.len;
                 if (self.position < self.cache_start or self.position >= self.cache_end) return 0;
