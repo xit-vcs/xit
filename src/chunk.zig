@@ -455,7 +455,8 @@ pub const ChunkSpan = struct {
 };
 
 // decompress the whole chunk containing `object_position` into `buf` (which must
-// be at least chunk_opts.max_size + 1 bytes) and return its span, or null if the
+// be at least one byte larger than the object's largest chunk, so at most
+// chunk_opts.max_size + 1 bytes) and return its span, or null if the
 // position is past the last chunk. callers cache the result so a chunk is only
 // read and decompressed once even when the object is scanned line by line.
 pub fn loadChunk(
@@ -569,8 +570,11 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const read_buffer = try allocator.alloc(u8, repo_opts.buffer_size);
             errdefer allocator.free(read_buffer);
 
-            // add 1 so streamRemaining can drain a full max_size chunk
-            const chunk_cache = try allocator.alloc(u8, repo_opts.extra.chunk_opts.max_size + 1);
+            // no chunk can be larger than the object itself, so small objects
+            // (the common case for trees and commits) get a small cache.
+            // add 1 so streamRemaining can drain a full-sized chunk
+            const max_chunk_size: usize = @intCast(@min(object_size, repo_opts.extra.chunk_opts.max_size));
+            const chunk_cache = try allocator.alloc(u8, max_chunk_size + 1);
             errdefer allocator.free(chunk_cache);
 
             // put cursor on the heap so the pointer is stable (the reader uses it internally)
