@@ -401,7 +401,7 @@ pub fn writeCommit(
                     return error.EmptyCommit;
                 }
             } else if (parent_oids.len == 1) {
-                var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
+                var first_parent = try Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &parent_oids[0]);
                 defer first_parent.deinit();
                 if (std.mem.eql(u8, &first_parent.content.commit.tree, &hash_hex)) {
                     return error.EmptyCommit;
@@ -419,7 +419,7 @@ pub fn writeCommit(
         break :blk std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
     } else blk: {
         // use the first parent's tree hash
-        var first_parent = try Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &parent_oids[0]);
+        var first_parent = try Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &parent_oids[0]);
         defer first_parent.deinit();
         break :blk first_parent.content.commit.tree;
     };
@@ -564,9 +564,9 @@ pub fn writeTag(
         var metadata_lines: std.ArrayList([]const u8) = .empty;
 
         const kind = kind_blk: {
-            var obj = try Object(repo_kind, repo_opts, .raw).init(state.readOnly(), io, allocator, target_oid);
-            defer obj.deinit();
-            break :kind_blk obj.content;
+            var obj_rdr = try ObjectReader(repo_kind, repo_opts).init(state.readOnly(), io, allocator, target_oid);
+            defer obj_rdr.deinit();
+            break :kind_blk obj_rdr.header().kind;
         };
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "object {s}", .{target_oid}));
@@ -809,22 +809,11 @@ pub fn ObjectContent(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const ObjectLoadKind = enum {
-    // only load the header to determine the object kind,
-    // but not any of the remaining content
-    raw,
-    // read the entire content of the object
-    full,
-};
-
-pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), comptime load_kind: ObjectLoadKind) type {
+pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
-        content: switch (load_kind) {
-            .raw => ObjectKind,
-            .full => ObjectContent(repo_opts.hash),
-        },
+        content: ObjectContent(repo_opts.hash),
         oid: [hash.hexLen(repo_opts.hash)]u8,
         len: u64,
         object_reader: ObjectReader(repo_kind, repo_opts),
@@ -834,7 +823,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
-        ) !Object(repo_kind, repo_opts, load_kind) {
+        ) !Object(repo_kind, repo_opts) {
             var obj_rdr = try ObjectReader(repo_kind, repo_opts).init(state, io, allocator, oid);
             errdefer obj_rdr.deinit();
 
@@ -851,239 +840,206 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 .blob => return .{
                     .allocator = allocator,
                     .arena = arena,
-                    .content = switch (load_kind) {
-                        .raw => .blob,
-                        .full => .{ .blob = {} },
-                    },
+                    .content = .{ .blob = {} },
                     .oid = oid.*,
                     .len = header.size,
                     .object_reader = obj_rdr,
                 },
-                .tree => switch (load_kind) {
-                    .raw => return .{
+                .tree => {
+                    var entries: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
+
+                    while (obj_rdr.interface.peekByte()) |_| {
+                        var entry_mode_buffer = [_]u8{0} ** 6;
+                        var entry_mode_writer = std.Io.Writer.fixed(&entry_mode_buffer);
+                        const entry_mode_size = try obj_rdr.interface.streamDelimiter(&entry_mode_writer, ' ');
+                        obj_rdr.interface.toss(1); // skip delimiter
+                        const entry_mode_str = entry_mode_buffer[0..entry_mode_size];
+                        const entry_mode: fs.Mode = @bitCast(try std.fmt.parseInt(u32, entry_mode_str, 8));
+
+                        var entry_name_writer = std.Io.Writer.Allocating.init(arena.allocator());
+                        _ = try obj_rdr.interface.streamDelimiterLimit(&entry_name_writer.writer, 0, .limited(repo_opts.max_read_size));
+                        obj_rdr.interface.toss(1); // skip delimiter
+
+                        const entry_name = entry_name_writer.written();
+                        var entry_oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                        try obj_rdr.interface.readSliceAll(&entry_oid);
+                        try entries.put(arena.allocator(), entry_name, .{ .oid = entry_oid, .mode = entry_mode });
+                    } else |err| switch (err) {
+                        error.EndOfStream => {},
+                        else => |e| return e,
+                    }
+
+                    return .{
                         .allocator = allocator,
                         .arena = arena,
-                        .content = .tree,
+                        .content = ObjectContent(repo_opts.hash){ .tree = .{ .entries = entries } },
                         .oid = oid.*,
                         .len = header.size,
                         .object_reader = obj_rdr,
-                    },
-                    .full => {
-                        var entries: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
+                    };
+                },
+                .commit => {
+                    var position: u64 = 0;
 
-                        while (obj_rdr.interface.peekByte()) |_| {
-                            var entry_mode_buffer = [_]u8{0} ** 6;
-                            var entry_mode_writer = std.Io.Writer.fixed(&entry_mode_buffer);
-                            const entry_mode_size = try obj_rdr.interface.streamDelimiter(&entry_mode_writer, ' ');
-                            obj_rdr.interface.toss(1); // skip delimiter
-                            const entry_mode_str = entry_mode_buffer[0..entry_mode_size];
-                            const entry_mode: fs.Mode = @bitCast(try std.fmt.parseInt(u32, entry_mode_str, 8));
+                    // read the content kind
+                    var content_kind_writer = std.Io.Writer.Allocating.init(allocator);
+                    defer content_kind_writer.deinit();
+                    _ = try obj_rdr.interface.streamDelimiterLimit(&content_kind_writer.writer, ' ', .limited(repo_opts.max_read_size));
+                    obj_rdr.interface.toss(1); // skip delimiter
+                    const content_kind = content_kind_writer.written();
+                    if (!std.mem.eql(u8, "tree", content_kind)) {
+                        return error.InvalidObject;
+                    }
+                    position += content_kind.len + 1;
 
-                            var entry_name_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                            _ = try obj_rdr.interface.streamDelimiterLimit(&entry_name_writer.writer, 0, .limited(repo_opts.max_read_size));
-                            obj_rdr.interface.toss(1); // skip delimiter
+                    // read the tree hash
+                    var tree_hash = [_]u8{0} ** hash.hexLen(repo_opts.hash);
+                    var tree_hash_writer = std.Io.Writer.fixed(&tree_hash);
+                    const tree_hash_size = try obj_rdr.interface.streamDelimiter(&tree_hash_writer, '\n');
+                    obj_rdr.interface.toss(1); // skip delimiter
+                    if (tree_hash_size != tree_hash.len) {
+                        return error.InvalidObject;
+                    }
+                    position += tree_hash.len + 1;
 
-                            const entry_name = entry_name_writer.written();
-                            var entry_oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                            try obj_rdr.interface.readSliceAll(&entry_oid);
-                            try entries.put(arena.allocator(), entry_name, .{ .oid = entry_oid, .mode = entry_mode });
-                        } else |err| switch (err) {
-                            error.EndOfStream => {},
+                    var parent_oids: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+                    var metadata = CommitMetadata(repo_opts.hash){};
+
+                    // read the metadata
+                    while (true) {
+                        var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
+                        _ = try obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_read_size));
+                        obj_rdr.interface.toss(1); // skip delimiter
+
+                        const line = line_writer.written();
+                        position += line.len + 1;
+                        if (line.len == 0) {
+                            break;
+                        }
+                        if (std.mem.indexOf(u8, line, " ")) |line_idx| {
+                            if (line_idx == line.len) {
+                                break;
+                            }
+                            const key = line[0..line_idx];
+                            const value = line[line_idx + 1 ..];
+
+                            if (std.mem.eql(u8, "parent", key)) {
+                                if (value.len != hash.hexLen(repo_opts.hash)) {
+                                    return error.InvalidObject;
+                                }
+                                try parent_oids.append(arena.allocator(), value[0..comptime hash.hexLen(repo_opts.hash)].*);
+                            } else if (std.mem.eql(u8, "author", key)) {
+                                metadata.author = value;
+                            } else if (std.mem.eql(u8, "committer", key)) {
+                                metadata.committer = value;
+                                var iter = std.mem.splitBackwardsScalar(u8, value, ' ');
+                                _ = iter.next(); // timezone
+                                if (iter.next()) |timestamp_str| {
+                                    metadata.timestamp = try std.fmt.parseInt(u64, timestamp_str, 0);
+                                }
+                            }
+                        }
+                    }
+
+                    metadata.parent_oids = parent_oids.items;
+
+                    // read only the first line
+                    {
+                        var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
+                        const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
+                            error.StreamTooLong => null,
                             else => |e| return e,
+                        };
+
+                        // skip delimiter
+                        if (obj_rdr.interface.bufferedLen() > 0) {
+                            obj_rdr.interface.toss(1);
                         }
 
-                        return .{
-                            .allocator = allocator,
-                            .arena = arena,
-                            .content = ObjectContent(repo_opts.hash){ .tree = .{ .entries = entries } },
-                            .oid = oid.*,
-                            .len = header.size,
-                            .object_reader = obj_rdr,
-                        };
-                    },
-                },
-                .commit => switch (load_kind) {
-                    .raw => return .{
+                        metadata.message = if (line_size_maybe != null) line_writer.written() else null;
+                    }
+
+                    return .{
                         .allocator = allocator,
                         .arena = arena,
-                        .content = .commit,
-                        .oid = oid.*,
-                        .len = header.size,
-                        .object_reader = obj_rdr,
-                    },
-                    .full => {
-                        var position: u64 = 0;
-
-                        // read the content kind
-                        var content_kind_writer = std.Io.Writer.Allocating.init(allocator);
-                        defer content_kind_writer.deinit();
-                        _ = try obj_rdr.interface.streamDelimiterLimit(&content_kind_writer.writer, ' ', .limited(repo_opts.max_read_size));
-                        obj_rdr.interface.toss(1); // skip delimiter
-                        const content_kind = content_kind_writer.written();
-                        if (!std.mem.eql(u8, "tree", content_kind)) {
-                            return error.InvalidObject;
-                        }
-                        position += content_kind.len + 1;
-
-                        // read the tree hash
-                        var tree_hash = [_]u8{0} ** hash.hexLen(repo_opts.hash);
-                        var tree_hash_writer = std.Io.Writer.fixed(&tree_hash);
-                        const tree_hash_size = try obj_rdr.interface.streamDelimiter(&tree_hash_writer, '\n');
-                        obj_rdr.interface.toss(1); // skip delimiter
-                        if (tree_hash_size != tree_hash.len) {
-                            return error.InvalidObject;
-                        }
-                        position += tree_hash.len + 1;
-
-                        var parent_oids: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
-                        var metadata = CommitMetadata(repo_opts.hash){};
-
-                        // read the metadata
-                        while (true) {
-                            var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                            _ = try obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_read_size));
-                            obj_rdr.interface.toss(1); // skip delimiter
-
-                            const line = line_writer.written();
-                            position += line.len + 1;
-                            if (line.len == 0) {
-                                break;
-                            }
-                            if (std.mem.indexOf(u8, line, " ")) |line_idx| {
-                                if (line_idx == line.len) {
-                                    break;
-                                }
-                                const key = line[0..line_idx];
-                                const value = line[line_idx + 1 ..];
-
-                                if (std.mem.eql(u8, "parent", key)) {
-                                    if (value.len != hash.hexLen(repo_opts.hash)) {
-                                        return error.InvalidObject;
-                                    }
-                                    try parent_oids.append(arena.allocator(), value[0..comptime hash.hexLen(repo_opts.hash)].*);
-                                } else if (std.mem.eql(u8, "author", key)) {
-                                    metadata.author = value;
-                                } else if (std.mem.eql(u8, "committer", key)) {
-                                    metadata.committer = value;
-                                    var iter = std.mem.splitBackwardsScalar(u8, value, ' ');
-                                    _ = iter.next(); // timezone
-                                    if (iter.next()) |timestamp_str| {
-                                        metadata.timestamp = try std.fmt.parseInt(u64, timestamp_str, 0);
-                                    }
-                                }
-                            }
-                        }
-
-                        metadata.parent_oids = parent_oids.items;
-
-                        // read only the first line
-                        {
-                            var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                            const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
-                                error.StreamTooLong => null,
-                                else => |e| return e,
-                            };
-
-                            // skip delimiter
-                            if (obj_rdr.interface.bufferedLen() > 0) {
-                                obj_rdr.interface.toss(1);
-                            }
-
-                            metadata.message = if (line_size_maybe != null) line_writer.written() else null;
-                        }
-
-                        return .{
-                            .allocator = allocator,
-                            .arena = arena,
-                            .content = .{
-                                .commit = .{
-                                    .tree = tree_hash,
-                                    .metadata = metadata,
-                                    .message_position = position,
-                                },
-                            },
-                            .oid = oid.*,
-                            .len = header.size,
-                            .object_reader = obj_rdr,
-                        };
-                    },
-                },
-                .tag => switch (load_kind) {
-                    .raw => return .{
-                        .allocator = allocator,
-                        .arena = arena,
-                        .content = .tag,
-                        .oid = oid.*,
-                        .len = header.size,
-                        .object_reader = obj_rdr,
-                    },
-                    .full => {
-                        var position: u64 = 0;
-
-                        // read the fields
-                        var fields: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
-                        defer fields.deinit(allocator);
-                        while (true) {
-                            var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                            _ = try obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_read_size));
-                            obj_rdr.interface.toss(1); // skip delimiter
-
-                            const line = line_writer.written();
-                            position += line.len + 1;
-                            if (line.len == 0) {
-                                break;
-                            }
-                            if (std.mem.indexOf(u8, line, " ")) |line_idx| {
-                                if (line_idx == line.len) {
-                                    break;
-                                }
-                                const key = line[0..line_idx];
-                                const value = line[line_idx + 1 ..];
-                                try fields.put(allocator, key, value);
-                            }
-                        }
-
-                        // init the content
-                        const target = fields.get("object") orelse return error.InvalidObject;
-                        if (target.len != hash.hexLen(repo_opts.hash)) {
-                            return error.InvalidObject;
-                        }
-                        var content = ObjectContent(repo_opts.hash){
-                            .tag = .{
-                                .target = target[0..comptime hash.hexLen(repo_opts.hash)].*,
-                                .kind = try ObjectKind.init(fields.get("type") orelse return error.InvalidObject),
-                                .name = fields.get("tag") orelse return error.InvalidObject,
-                                .tagger = fields.get("tagger") orelse return error.InvalidObject,
-                                .message = null,
+                        .content = .{
+                            .commit = .{
+                                .tree = tree_hash,
+                                .metadata = metadata,
                                 .message_position = position,
                             },
+                        },
+                        .oid = oid.*,
+                        .len = header.size,
+                        .object_reader = obj_rdr,
+                    };
+                },
+                .tag => {
+                    var position: u64 = 0;
+
+                    // read the fields
+                    var fields: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+                    defer fields.deinit(allocator);
+                    while (true) {
+                        var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
+                        _ = try obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_read_size));
+                        obj_rdr.interface.toss(1); // skip delimiter
+
+                        const line = line_writer.written();
+                        position += line.len + 1;
+                        if (line.len == 0) {
+                            break;
+                        }
+                        if (std.mem.indexOf(u8, line, " ")) |line_idx| {
+                            if (line_idx == line.len) {
+                                break;
+                            }
+                            const key = line[0..line_idx];
+                            const value = line[line_idx + 1 ..];
+                            try fields.put(allocator, key, value);
+                        }
+                    }
+
+                    // init the content
+                    const target = fields.get("object") orelse return error.InvalidObject;
+                    if (target.len != hash.hexLen(repo_opts.hash)) {
+                        return error.InvalidObject;
+                    }
+                    var content = ObjectContent(repo_opts.hash){
+                        .tag = .{
+                            .target = target[0..comptime hash.hexLen(repo_opts.hash)].*,
+                            .kind = try ObjectKind.init(fields.get("type") orelse return error.InvalidObject),
+                            .name = fields.get("tag") orelse return error.InvalidObject,
+                            .tagger = fields.get("tagger") orelse return error.InvalidObject,
+                            .message = null,
+                            .message_position = position,
+                        },
+                    };
+
+                    // read only the first line
+                    {
+                        var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
+                        const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
+                            error.StreamTooLong => null,
+                            else => |e| return e,
                         };
 
-                        // read only the first line
-                        {
-                            var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                            const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
-                                error.StreamTooLong => null,
-                                else => |e| return e,
-                            };
-
-                            // skip delimiter
-                            if (obj_rdr.interface.bufferedLen() > 0) {
-                                obj_rdr.interface.toss(1);
-                            }
-
-                            content.tag.message = if (line_size_maybe != null) line_writer.written() else null;
+                        // skip delimiter
+                        if (obj_rdr.interface.bufferedLen() > 0) {
+                            obj_rdr.interface.toss(1);
                         }
 
-                        return .{
-                            .allocator = allocator,
-                            .arena = arena,
-                            .content = content,
-                            .oid = oid.*,
-                            .len = header.size,
-                            .object_reader = obj_rdr,
-                        };
-                    },
+                        content.tag.message = if (line_size_maybe != null) line_writer.written() else null;
+                    }
+
+                    return .{
+                        .allocator = allocator,
+                        .arena = arena,
+                        .content = content,
+                        .oid = oid.*,
+                        .len = header.size,
+                        .object_reader = obj_rdr,
+                    };
                 },
             }
         }
@@ -1093,8 +1049,8 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
-        ) !Object(repo_kind, repo_opts, load_kind) {
-            var object = try Object(repo_kind, repo_opts, load_kind).init(state, io, allocator, oid);
+        ) !Object(repo_kind, repo_opts) {
+            var object = try Object(repo_kind, repo_opts).init(state, io, allocator, oid);
             errdefer object.deinit();
 
             switch (object.content) {
@@ -1108,7 +1064,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        pub fn deinit(self: *Object(repo_kind, repo_opts, load_kind)) void {
+        pub fn deinit(self: *Object(repo_kind, repo_opts)) void {
             self.arena.deinit();
             self.allocator.destroy(self.arena);
             self.object_reader.deinit();
@@ -1139,7 +1095,6 @@ fn nameHash(name: []const u8) u32 {
 pub fn ObjectIterator(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    comptime load_kind: ObjectLoadKind,
 ) type {
     return struct {
         io: std.Io,
@@ -1148,7 +1103,7 @@ pub fn ObjectIterator(
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
         oid_queue: std.DoublyLinkedList,
         oid_excludes: std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void),
-        object: Object(repo_kind, repo_opts, load_kind),
+        object: Object(repo_kind, repo_opts),
         depth: usize,
         // hash of the tree entry name the current object was found under
         // (zero for commits and root objects). used by the pack writer to
@@ -1168,7 +1123,7 @@ pub fn ObjectIterator(
             io: std.Io,
             allocator: std.mem.Allocator,
             options: ObjectIteratorOptions,
-        ) !ObjectIterator(repo_kind, repo_opts, load_kind) {
+        ) !ObjectIterator(repo_kind, repo_opts) {
             return .{
                 .io = io,
                 .allocator = allocator,
@@ -1183,7 +1138,7 @@ pub fn ObjectIterator(
             };
         }
 
-        pub fn deinit(self: *ObjectIterator(repo_kind, repo_opts, load_kind)) void {
+        pub fn deinit(self: *ObjectIterator(repo_kind, repo_opts)) void {
             while (self.oid_queue.popFirst()) |node| {
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
                 self.allocator.destroy(oid_and_node);
@@ -1191,7 +1146,7 @@ pub fn ObjectIterator(
             self.oid_excludes.deinit();
         }
 
-        pub fn next(self: *ObjectIterator(repo_kind, repo_opts, load_kind), allocator: std.mem.Allocator) !?*Object(repo_kind, repo_opts, load_kind) {
+        pub fn next(self: *ObjectIterator(repo_kind, repo_opts), allocator: std.mem.Allocator) !?*Object(repo_kind, repo_opts) {
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
             while (self.oid_queue.popFirst()) |node| {
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
@@ -1204,45 +1159,27 @@ pub fn ObjectIterator(
                     try self.oid_excludes.put(next_oid, {});
                     self.depth = node_depth;
                     self.name_hash = node_name_hash;
-                    switch (load_kind) {
-                        .raw => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, allocator, &next_oid);
-                            defer object.deinit();
-                            try self.includeContent(object.content, node_depth + 1);
 
-                            switch (self.options.kind) {
-                                .all => {},
-                                .commit => if (.commit != object.content) continue,
-                            }
+                    var object = try Object(repo_kind, repo_opts).init(state, self.io, allocator, &next_oid);
+                    errdefer object.deinit();
+                    try self.includeContent(object.content, node_depth + 1);
 
-                            var raw_object = try Object(repo_kind, repo_opts, .raw).init(state, self.io, allocator, &next_oid);
-                            errdefer raw_object.deinit();
-                            self.object = raw_object;
-                            return &self.object;
-                        },
-                        .full => {
-                            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, allocator, &next_oid);
-                            errdefer object.deinit();
-                            try self.includeContent(object.content, node_depth + 1);
-
-                            switch (self.options.kind) {
-                                .all => {},
-                                .commit => if (.commit != object.content) {
-                                    object.deinit();
-                                    continue;
-                                },
-                            }
-
-                            self.object = object;
-                            return &self.object;
+                    switch (self.options.kind) {
+                        .all => {},
+                        .commit => if (.commit != object.content) {
+                            object.deinit();
+                            continue;
                         },
                     }
+
+                    self.object = object;
+                    return &self.object;
                 }
             }
             return null;
         }
 
-        fn includeContent(self: *ObjectIterator(repo_kind, repo_opts, load_kind), content: ObjectContent(repo_opts.hash), child_depth: usize) !void {
+        fn includeContent(self: *ObjectIterator(repo_kind, repo_opts), content: ObjectContent(repo_opts.hash), child_depth: usize) !void {
             switch (content) {
                 .blob => {},
                 .tree => |tree_content| switch (self.options.kind) {
@@ -1268,15 +1205,15 @@ pub fn ObjectIterator(
             }
         }
 
-        pub fn include(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
+        pub fn include(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
             try self.includeAtDepth(oid, 0);
         }
 
-        pub fn includeAtDepth(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize) !void {
+        pub fn includeAtDepth(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize) !void {
             try self.includeWithName(oid, item_depth, 0);
         }
 
-        fn includeWithName(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize, name_hash: u32) !void {
+        fn includeWithName(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize, name_hash: u32) !void {
             if (self.options.max_depth) |max| if (item_depth > max) return;
             if (!self.oid_excludes.contains(oid.*)) {
                 var oid_and_node = try self.allocator.create(OidAndNode);
@@ -1289,11 +1226,11 @@ pub fn ObjectIterator(
             }
         }
 
-        pub fn exclude(self: *ObjectIterator(repo_kind, repo_opts, load_kind), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
+        pub fn exclude(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
             try self.oid_excludes.put(oid.*, {});
 
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
-            var object = try Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, oid);
+            var object = try Object(repo_kind, repo_opts).init(state, self.io, self.allocator, oid);
             defer object.deinit();
             switch (object.content) {
                 .blob, .tag => {},
@@ -1333,7 +1270,7 @@ pub fn copyFromObjectIterator(
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
     comptime source_repo_kind: rp.RepoKind,
     comptime source_repo_opts: rp.RepoOpts(source_repo_kind),
-    obj_iter: *ObjectIterator(source_repo_kind, source_repo_opts, .raw),
+    obj_iter: *ObjectIterator(source_repo_kind, source_repo_opts),
     io: std.Io,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
@@ -1348,6 +1285,10 @@ pub fn copyFromObjectIterator(
 
     while (try obj_iter.next(obj_iter.allocator)) |object| {
         defer object.deinit();
+
+        // parsing the object during iteration may have consumed the reader,
+        // so rewind it before streaming the object's content
+        try object.object_reader.reset();
 
         var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
         try writeObject(

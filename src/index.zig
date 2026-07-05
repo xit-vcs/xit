@@ -462,7 +462,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             path_parts: []const []const u8,
         ) !void {
             const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
-            var object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &oid_hex);
+            var object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             defer object.deinit();
 
             switch (object.content) {

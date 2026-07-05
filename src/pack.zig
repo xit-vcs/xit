@@ -1511,7 +1511,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
         pub fn init(
             allocator: std.mem.Allocator,
-            obj_iter: *obj.ObjectIterator(repo_kind, repo_opts, .raw),
+            obj_iter: *obj.ObjectIterator(repo_kind, repo_opts),
             options: InitOptions,
         ) !?PackWriter(repo_kind, repo_opts) {
             var self = PackWriter(repo_kind, repo_opts){

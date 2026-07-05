@@ -13,7 +13,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
     return struct {
         remote: *net.Remote(repo_kind, repo_opts),
         unpack_ok: bool,
-        obj_iter: obj.ObjectIterator(repo_kind, repo_opts, .raw),
+        obj_iter: obj.ObjectIterator(repo_kind, repo_opts),
 
         specs: std.ArrayList(PushSpec(repo_kind, repo_opts)),
 
@@ -23,7 +23,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !Push(repo_kind, repo_opts) {
-            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
+            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
             errdefer obj_iter.deinit();
 
             return Push(repo_kind, repo_opts){

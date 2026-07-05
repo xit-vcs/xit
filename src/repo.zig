@@ -1009,10 +1009,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             io: std.Io,
             allocator: std.mem.Allocator,
             start_oids_maybe: ?[]const [hash.hexLen(repo_opts.hash)]u8,
-        ) !obj.ObjectIterator(repo_kind, repo_opts, .full) {
+        ) !obj.ObjectIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            var iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit });
+            var iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
             errdefer iter.deinit();
 
             const start_oids = start_oids_maybe orelse if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |head_oid| &.{head_oid} else &.{};
@@ -1028,10 +1028,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             io: std.Io,
             allocator: std.mem.Allocator,
             opts: obj.ObjectIteratorOptions,
-        ) !obj.ObjectIterator(repo_kind, repo_opts, .raw) {
+        ) !obj.ObjectIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            return try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, opts);
+            return try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, opts);
         }
 
         pub fn merge(
@@ -1250,7 +1250,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         try config.add(state, ctx.io, .{ .name = "merge.algorithm", .value = "patch" });
                     }
 
-                    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state.readOnly(), ctx.io, ctx.allocator, .{ .kind = .commit });
+                    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator, .{ .kind = .commit });
                     defer obj_iter.deinit();
 
                     // add heads
@@ -1413,7 +1413,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             self: *Repo(repo_kind, repo_opts),
             comptime source_repo_kind: RepoKind,
             comptime source_repo_opts: RepoOpts(source_repo_kind),
-            obj_iter: *obj.ObjectIterator(source_repo_kind, source_repo_opts, .raw),
+            obj_iter: *obj.ObjectIterator(source_repo_kind, source_repo_opts),
             io: std.Io,
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !void {
@@ -1433,7 +1433,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 .xit => {
                     const Ctx = struct {
                         core: *Repo(repo_kind, repo_opts).Core,
-                        obj_iter: *obj.ObjectIterator(source_repo_kind, source_repo_opts, .raw),
+                        obj_iter: *obj.ObjectIterator(source_repo_kind, source_repo_opts),
                         io: std.Io,
                         progress_ctx_maybe: ?repo_opts.ProgressCtx,
 

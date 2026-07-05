@@ -1115,12 +1115,12 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         const state = rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
 
         // read commit
-        var commit_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts(), .full).init(state, io, allocator, &commit2);
+        var commit_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &commit2);
         defer commit_object.deinit();
         try std.testing.expectEqualStrings("second commit", commit_object.content.commit.metadata.message.?);
 
         // read tree
-        var tree_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts(), .full).init(state, io, allocator, &commit_object.content.commit.tree);
+        var tree_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &commit_object.content.commit.tree);
         defer tree_object.deinit();
         try std.testing.expectEqual(7, tree_object.content.tree.entries.count());
     }
@@ -1625,7 +1625,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             const state = rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
 
             const tag_oid = (try rf.readRecur(repo_kind, any_repo_opts.toRepoOpts(), state, io, .{ .ref = .{ .kind = .tag, .name = "ann" } })) orelse return error.TagNotFound;
-            var tag_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts(), .full).init(state, io, allocator, &tag_oid);
+            var tag_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &tag_oid);
             defer tag_object.deinit();
 
             try tag_object.object_reader.seekTo(tag_object.content.tag.message_position);

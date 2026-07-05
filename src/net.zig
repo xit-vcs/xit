@@ -292,9 +292,9 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         ) !void {
             for (self.heads.values()) |*head| {
                 var obj_exists = true;
-                var object_or_err = obj.Object(repo_kind, repo_opts, .raw).init(state, io, allocator, &head.oid);
-                if (object_or_err) |*object| {
-                    defer object.deinit();
+                var object_reader_or_err = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &head.oid);
+                if (object_reader_or_err) |*object_reader| {
+                    defer object_reader.deinit();
                 } else |err| switch (err) {
                     error.ObjectNotFound => obj_exists = false,
                     else => |e| return e,
@@ -419,11 +419,11 @@ pub fn resolveRef(
     ref: rf.Ref,
 ) !?[hash.hexLen(repo_opts.hash)]u8 {
     const oid = try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref }) orelse return null;
-    var object = obj.Object(repo_kind, repo_opts, .raw).init(state, io, allocator, &oid) catch |err| switch (err) {
+    var object_reader = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid) catch |err| switch (err) {
         error.ObjectNotFound => return null,
         else => |e| return e,
     };
-    defer object.deinit();
+    defer object_reader.deinit();
     return oid;
 }
 

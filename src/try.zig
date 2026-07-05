@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
             };
         }
 
-        var commits: std.ArrayList(obj.Object(.git, .{}, .full)) = .empty;
+        var commits: std.ArrayList(obj.Object(.git, .{})) = .empty;
         defer {
             for (commits.items) |*commit| {
                 commit.deinit();

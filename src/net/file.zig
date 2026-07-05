@@ -121,7 +121,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 var any_repo = try rp.AnyRepo(.git, .{ .hash = null, .ProgressCtx = repo_opts.ProgressCtx }).open(io, allocator, .{ .path = work_path });
                 defer any_repo.deinit(io, allocator);
 
-                const obj_iter: *obj.ObjectIterator(repo_kind, repo_opts, .raw) = &git_push.obj_iter;
+                const obj_iter: *obj.ObjectIterator(repo_kind, repo_opts) = &git_push.obj_iter;
 
                 switch (any_repo) {
                     inline else => |*repo| try repo.copyObjects(repo_kind, repo_opts, obj_iter, io, self.opts.progress_ctx),
@@ -256,7 +256,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 return;
             }
 
-            var object = try obj.Object(.git, remote_repo_opts, .full).init(state, io, allocator, &head.oid);
+            var object = try obj.Object(.git, remote_repo_opts).init(state, io, allocator, &head.oid);
             defer object.deinit();
 
             if (object.content != .tag or self.direction != .fetch) {

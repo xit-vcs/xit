@@ -114,7 +114,7 @@ test "create and read pack" {
 
         const head_oid = try rf.readHeadRecur(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io);
 
-        var obj_iter = try obj.ObjectIterator(.git, repo_opts, .raw).init(.{ .core = &r.core, .extra = .{} }, io, allocator, .{ .kind = .all });
+        var obj_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &r.core, .extra = .{} }, io, allocator, .{ .kind = .all });
         defer obj_iter.deinit();
         try obj_iter.include(&head_oid);
 
@@ -219,7 +219,7 @@ test "write pack file" {
     var pack_file = try temp_dir.createFile(io, "test.pack", .{});
     defer pack_file.close(io);
 
-    var obj_iter = try obj.ObjectIterator(.git, repo_opts, .raw).init(.{ .core = &client_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
+    var obj_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &client_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
 
     try obj_iter.include(&commit2);
@@ -289,7 +289,7 @@ test "write pack file" {
         // stored under a different oid than the one its parent refers to,
         // so the walk would fail to find it
         {
-            var walk_iter = try obj.ObjectIterator(.git, repo_opts, .raw).init(.{ .core = &server_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
+            var walk_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &server_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
             defer walk_iter.deinit();
             try walk_iter.include(&commit2);
 

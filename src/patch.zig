@@ -36,7 +36,7 @@ pub fn writeAndApplyPatches(
     commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
 ) !void {
     const parent_commit_oid_maybe = blk: {
-        var commit_object = try obj.Object(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, commit_oid);
+        var commit_object = try obj.Object(.xit, repo_opts).init(state.readOnly(), io, allocator, commit_oid);
         defer commit_object.deinit();
 
         if (commit_object.content.commit.metadata.firstParent()) |oid| {
@@ -192,7 +192,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const oid_hex = std.fmt.bytesToHex(oid, .lower);
             const commit_id_int = try hash.hexToInt(repo_opts.hash, &oid_hex);
 
-            var object = try obj.Object(.xit, repo_opts, .full).init(state, io, allocator, &oid_hex);
+            var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &oid_hex);
             defer object.deinit();
 
             var is_base_oid = false;

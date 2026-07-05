@@ -310,7 +310,7 @@ const ReceivePack = struct {
     ) !void {
         if (!options.skip_connectivity_check) {
             const all_connected = blk: {
-                var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(
+                var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(
                     state.readOnly(),
                     io,
                     allocator,
@@ -340,7 +340,7 @@ const ReceivePack = struct {
                     if (isNullOid(&update.new_oid)) continue;
 
                     const connected = per_update: {
-                        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(
+                        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(
                             state.readOnly(),
                             io,
                             allocator,
@@ -498,9 +498,9 @@ const ReceivePack = struct {
         }
 
         if (!isNullOid(&ref_update.new_oid)) {
-            var object_or_err = obj.Object(repo_kind, repo_opts, .raw).init(state.readOnly(), io, allocator, &ref_update.new_oid);
-            if (object_or_err) |*object| {
-                object.deinit();
+            var object_reader_or_err = obj.ObjectReader(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &ref_update.new_oid);
+            if (object_reader_or_err) |*object_reader| {
+                object_reader.deinit();
             } else |err| switch (err) {
                 error.ObjectNotFound => return "bad pack",
                 else => |e| return e,

@@ -530,7 +530,7 @@ pub fn objectToFile(
         },
         .tree => {
             // load the tree
-            var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &oid_hex);
+            var tree_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             defer tree_object.deinit();
 
             // update each entry recursively
@@ -843,11 +843,11 @@ pub fn restore(
     if (path_parts.len == 0) {
         // get the current commit
         const current_oid = try rf.readHeadRecur(repo_kind, repo_opts, state, io);
-        var commit_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &current_oid);
+        var commit_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &current_oid);
         defer commit_object.deinit();
 
         // get the tree of the current commit
-        var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &commit_object.content.commit.tree);
+        var tree_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &commit_object.content.commit.tree);
         defer tree_object.deinit();
 
         const entries = &tree_object.content.tree.entries;

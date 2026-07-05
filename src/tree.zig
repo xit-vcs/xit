@@ -119,7 +119,7 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
         ) !std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)) {
             if (oid_maybe) |oid| {
-                const object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, self.arena.allocator(), oid);
+                const object = try obj.Object(repo_kind, repo_opts).init(state, io, self.arena.allocator(), oid);
                 return switch (object.content) {
                     .blob, .tag => .empty,
                     .tree => |tree| tree.entries,
@@ -138,7 +138,7 @@ fn pathToTreeEntry(
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
     io: std.Io,
     allocator: std.mem.Allocator,
-    parent: obj.Object(repo_kind, repo_opts, .full),
+    parent: obj.Object(repo_kind, repo_opts),
     path_parts: []const []const u8,
 ) !?TreeEntry(repo_opts.hash) {
     const path_part = path_parts[0];
@@ -149,7 +149,7 @@ fn pathToTreeEntry(
     }
 
     const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
-    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &oid_hex);
+    var tree_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
     defer tree_object.deinit();
 
     switch (tree_object.content) {
@@ -169,11 +169,11 @@ pub fn headTreeEntry(
 ) !?TreeEntry(repo_opts.hash) {
     // get the current commit
     const current_oid = try rf.readHeadRecur(repo_kind, repo_opts, state, io);
-    var commit_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &current_oid);
+    var commit_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &current_oid);
     defer commit_object.deinit();
 
     // get the tree of the current commit
-    var tree_object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, &commit_object.content.commit.tree);
+    var tree_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &commit_object.content.commit.tree);
     defer tree_object.deinit();
 
     // get the entry for the given path
@@ -205,7 +205,7 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
 
             const oid = oid_maybe orelse &(try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io) orelse return tree);
 
-            var commit_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, allocator, oid);
+            var commit_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, allocator, oid);
             defer commit_object.deinit();
             try tree.read(state, "", &commit_object.content.commit.tree);
 
@@ -219,7 +219,7 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         }
 
         fn read(self: *Tree(repo_kind, repo_opts), state: rp.Repo(repo_kind, repo_opts).State(.read_only), prefix: []const u8, oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
-            var object = try obj.Object(repo_kind, repo_opts, .full).init(state, self.io, self.allocator, oid);
+            var object = try obj.Object(repo_kind, repo_opts).init(state, self.io, self.allocator, oid);
             defer object.deinit();
 
             switch (object.content) {

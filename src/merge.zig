@@ -51,20 +51,20 @@ pub fn getDescendent(
     var queue: CommitParentsQueue(repo_opts.hash) = .empty;
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid1);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid1);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
                 try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .one, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
     }
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid2);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid2);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
                 try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .two, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
@@ -89,10 +89,10 @@ pub fn getDescendent(
             .stale => unreachable,
         }
 
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &node.oid);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &node.oid);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
                 try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
@@ -120,12 +120,12 @@ pub fn commonAncestor(
     var queue: CommitParentsQueue(repo_opts.hash) = .empty;
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid1);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid1);
         try queue.push(arena.allocator(), .{ .oid = oid1.*, .kind = .one, .timestamp = object.content.commit.metadata.timestamp });
     }
 
     {
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), oid2);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid2);
         try queue.push(arena.allocator(), .{ .oid = oid2.*, .kind = .two, .timestamp = object.content.commit.metadata.timestamp });
     }
 
@@ -165,7 +165,7 @@ pub fn commonAncestor(
 
         const is_base_ancestor = parents_of_both.contains(&node.oid);
 
-        const object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &node.oid);
+        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &node.oid);
         if (object.content.commit.metadata.parent_oids) |parent_oids| {
             parents: for (parent_oids) |parent_oid| {
                 const is_stale = is_base_ancestor or stale_oids.contains(&parent_oid);
@@ -180,7 +180,7 @@ pub fn commonAncestor(
                         }
                     }
                 }
-                const parent_object = try obj.Object(repo_kind, repo_opts, .full).initCommit(state, io, arena.allocator(), &parent_oid);
+                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
                 try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = if (is_stale) .stale else node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
             }
         }
@@ -614,7 +614,7 @@ fn writeBlobWithPatches(
 
     // get all the patch ids from source
     {
-        var iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+        var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
         defer iter.deinit();
         try iter.include(source_oid);
 
@@ -1596,7 +1596,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     switch (merge_input.kind) {
                         .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
                         .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &source_oid);
+                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
                             const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
                             switch (object.content) {
@@ -1664,7 +1664,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name}),
                         },
                         .pick => blk: {
-                            const object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, arena.allocator(), &source_oid);
+                            const object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, arena.allocator(), &source_oid);
                             switch (object.content) {
                                 .commit => break :blk object.content.commit.metadata,
                                 else => return error.CommitObjectNotFound,
@@ -1838,7 +1838,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     switch (merge_input.kind) {
                         .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
                         .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts, .full).init(state.readOnly(), io, allocator, &source_oid);
+                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
                             const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
                             switch (object.content) {
@@ -1893,7 +1893,7 @@ fn writePossiblePatches(
     var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
     defer patch_writer.deinit(io, allocator);
 
-    var source_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+    var source_iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer source_iter.deinit();
     try source_iter.include(source_oid);
     while (try source_iter.next(allocator)) |commit_object| {
@@ -1903,7 +1903,7 @@ fn writePossiblePatches(
         try patch_writer.add(state.readOnly(), io, allocator, &oid);
     }
 
-    var target_iter = try obj.ObjectIterator(.xit, repo_opts, .full).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+    var target_iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer target_iter.deinit();
     try target_iter.include(target_oid);
     while (try target_iter.next(allocator)) |commit_object| {

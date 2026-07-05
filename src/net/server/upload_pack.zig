@@ -247,7 +247,7 @@ fn writePack(
     have_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     use_ofs_delta: bool,
 ) !void {
-    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .all });
+    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
 
     for (have_obj.items) |*item| {
@@ -459,7 +459,7 @@ const UploadPack = struct {
         while (it.next()) |oid| {
             if (not_shallow_oids.contains(oid.*)) {
                 try writePktResponse(writer, self.writer_use_sideband, "unshallow {s}", .{oid});
-                var object = obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, oid) catch |err| switch (err) {
+                var object = obj.Object(repo_kind, repo_opts).init(state, io, allocator, oid) catch |err| switch (err) {
                     error.ObjectNotFound => continue,
                     else => |e| return e,
                 };
@@ -493,12 +493,12 @@ const UploadPack = struct {
         const hex_len = comptime hash.hexLen(repo_opts.hash);
 
         // walk commits reachable from wants
-        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit });
+        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
         defer obj_iter.deinit();
 
         // build exclude set from deepen-not refs
         if (deepen_not.count() != 0) {
-            var exclude_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .commit });
+            var exclude_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
             defer exclude_iter.deinit();
 
             var it = deepen_not.keyIterator();
@@ -624,7 +624,7 @@ const UploadPack = struct {
                 }
             }
             try getReachableShallows(repo_kind, repo_opts, state, io, allocator, shallow_oids, our_refs, &reachable_shallows);
-            var depth_iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit, .max_depth = depth });
+            var depth_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit, .max_depth = depth });
             defer depth_iter.deinit();
             for (reachable_shallows.items) |*oid| {
                 try depth_iter.includeAtDepth(oid, 0);
@@ -641,7 +641,7 @@ const UploadPack = struct {
             }
         } else {
             const max_depth: usize = depth - 1;
-            var depth_iter = try obj.ObjectIterator(repo_kind, repo_opts, .full).init(state, io, allocator, .{ .kind = .commit, .max_depth = max_depth });
+            var depth_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit, .max_depth = max_depth });
             defer depth_iter.deinit();
             for (want_obj.items) |*item| {
                 try depth_iter.includeAtDepth(item, 0);
@@ -1787,7 +1787,7 @@ fn peelToNonTag(
             }
         }
 
-        var object = try obj.Object(repo_kind, repo_opts, .full).init(state, io, allocator, oid);
+        var object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, oid);
         defer object.deinit();
         switch (object.content) {
             .tag => |tag| oid.* = tag.target,
@@ -1826,7 +1826,7 @@ fn getReachableShallows(
     if (remaining.count() == 0) return;
 
     // walk from our ref tips to find remaining reachable shallows
-    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .commit });
+    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
     defer obj_iter.deinit();
 
     {
@@ -1977,7 +1977,7 @@ fn allReachableFromHaves(
         if (have_oids.contains(item.*)) continue;
 
         // walk ancestors looking for a have
-        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts, .raw).init(state, io, allocator, .{ .kind = .commit });
+        var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
         defer obj_iter.deinit();
         try obj_iter.include(item);
 
