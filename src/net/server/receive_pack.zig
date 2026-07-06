@@ -71,6 +71,12 @@ pub fn run(
                 var pack_iter = try pack.PackIterator(repo_kind, repo_opts).init(io, allocator, &pack_reader);
 
                 try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, null);
+
+                // fsync the chunk store, so the objects are durable before
+                // the ref updates are reported to the client below
+                if (.xit == repo_kind) {
+                    try state.core.chunk_store_file.sync(io);
+                }
             }
         }
 

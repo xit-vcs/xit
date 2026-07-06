@@ -219,6 +219,14 @@ pub fn runPrint(
             try cmd.printHelp(.init, run_opts.err);
             return error.HandledError;
         },
+        error.RepoFormatTooOld => {
+            try run_opts.err.print(
+                \\this repo was made by an older version of xit,
+                \\and the format has changed since then.
+                \\
+            , .{});
+            return error.HandledError;
+        },
         error.RepoAlreadyExists => {
             try run_opts.err.print(
                 \\repo already exists, dummy.

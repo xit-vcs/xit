@@ -2,6 +2,7 @@
 //! runs with both git and xit modes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const hash = @import("../hash.zig");
 const rp = @import("../repo.zig");
 const rf = @import("../ref.zig");
@@ -2894,5 +2895,104 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             count += 1;
         }
         try std.testing.expectEqual(20, count);
+    }
+}
+
+// the chunk store can be shared by multiple repos by replacing the
+// .xit/chunks file with a symlink to a common store file
+test "chunk store shared between repos" {
+    if (.windows == builtin.os.tag) return error.SkipZigTest; // creating symlinks requires priveleges on windows
+
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const temp_dir_name = "temp-test-repo-chunk-store-shared";
+    const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
+
+    // create the temp dir
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+
+    const work_path1 = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo1" });
+    defer allocator.free(work_path1);
+    const work_path2 = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo2" });
+    defer allocator.free(work_path2);
+
+    var repo1 = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path1 });
+    defer repo1.deinit(io, allocator);
+
+    {
+        var repo2 = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path2 });
+        repo2.deinit(io, allocator);
+    }
+
+    // point repo2's chunk store at repo1's before any object is written to it
+    {
+        var repo2_xit_dir = try temp_dir.openDir(io, "repo2/.xit", .{});
+        defer repo2_xit_dir.close(io);
+        try repo2_xit_dir.deleteFile(io, "chunks");
+        const store_path = try std.fs.path.join(allocator, &.{ work_path1, ".xit", "chunks" });
+        defer allocator.free(store_path);
+        try repo2_xit_dir.symLink(io, store_path, "chunks", .{});
+    }
+
+    var repo2 = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path2 });
+    defer repo2.deinit(io, allocator);
+
+    // make random content, so the chunks are unique between tests
+    // and cannot be compressed
+    const content = try allocator.alloc(u8, 200_000);
+    defer allocator.free(content);
+    var prng = std.Random.DefaultPrng.init(42);
+    prng.random().bytes(content);
+    const half_len = content.len / 2;
+
+    // commit the same content in both repos. the second commit should
+    // find all of its chunks already in the store and barely grow it.
+    try addFile(.xit, repo_opts, &repo1, io, allocator, "data.bin", content);
+    _ = try repo1.commit(io, allocator, .{ .message = "a" });
+    const store_size_before = try repo1.core.chunk_store_file.length(io);
+
+    try addFile(.xit, repo_opts, &repo2, io, allocator, "data.bin", content);
+    _ = try repo2.commit(io, allocator, .{ .message = "a" });
+    const store_size_after = try repo2.core.chunk_store_file.length(io);
+
+    try std.testing.expect(store_size_after - store_size_before < content.len / 10);
+
+    // alternate writes between the repos, so each db instance appends
+    // to a store that was changed behind its back by the other one
+    try addFile(.xit, repo_opts, &repo1, io, allocator, "more.bin", content[0..half_len]);
+    _ = try repo1.commit(io, allocator, .{ .message = "b" });
+    try addFile(.xit, repo_opts, &repo2, io, allocator, "other.bin", content[half_len..]);
+    _ = try repo2.commit(io, allocator, .{ .message = "b" });
+    try addFile(.xit, repo_opts, &repo1, io, allocator, "same-as-other.bin", content[half_len..]);
+    _ = try repo1.commit(io, allocator, .{ .message = "c" });
+
+    // both repos can read their objects back from the shared store
+    for ([_]struct { repo: *rp.Repo(.xit, repo_opts), work_dir_name: []const u8, path: []const u8, expected: []const u8 }{
+        .{ .repo = &repo1, .work_dir_name = "repo1", .path = "data.bin", .expected = content },
+        .{ .repo = &repo1, .work_dir_name = "repo1", .path = "more.bin", .expected = content[0..half_len] },
+        .{ .repo = &repo1, .work_dir_name = "repo1", .path = "same-as-other.bin", .expected = content[half_len..] },
+        .{ .repo = &repo2, .work_dir_name = "repo2", .path = "data.bin", .expected = content },
+        .{ .repo = &repo2, .work_dir_name = "repo2", .path = "other.bin", .expected = content[half_len..] },
+    }) |check| {
+        var work_dir = try temp_dir.openDir(io, check.work_dir_name, .{});
+        defer work_dir.close(io);
+
+        try work_dir.deleteFile(io, check.path);
+        try check.repo.restore(io, allocator, check.path);
+
+        const actual = try work_dir.readFileAlloc(io, check.path, allocator, .limited(check.expected.len * 2));
+        defer allocator.free(actual);
+        try std.testing.expectEqualSlices(u8, check.expected, actual);
     }
 }

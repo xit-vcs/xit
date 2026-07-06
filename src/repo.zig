@@ -141,6 +141,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 repo_dir: std.Io.Dir,
                 db_file: std.Io.File,
                 db: DB,
+                chunk_store_file: std.Io.File,
+                chunk_store_db: DB,
 
                 /// used by read-only fns to get a moment without starting a transaction
                 pub fn latestMoment(self: *@This()) !DB.HashMap(.read_only) {
@@ -275,6 +277,16 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
                     errdefer buffer_ptr.deinit();
 
+                    // create the chunk store file
+                    const chunk_store_file = try repo_dir.createFile(io, "chunks", .{ .exclusive = true, .lock = .none, .read = true });
+                    errdefer chunk_store_file.close(io);
+
+                    const chunk_store_buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
+                    errdefer allocator.destroy(chunk_store_buffer_ptr);
+
+                    chunk_store_buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
+                    errdefer chunk_store_buffer_ptr.deinit();
+
                     // make the db
                     var self = Repo(repo_kind, repo_opts){
                         .core = .{
@@ -290,8 +302,29 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 .buffer = buffer_ptr,
                                 .hash_id = .{ .id = hash.hashId(repo_opts.hash) },
                             }),
+                            .chunk_store_file = chunk_store_file,
+                            .chunk_store_db = try DB.init(.{
+                                .io = io,
+                                .file = chunk_store_file,
+                                .buffer = chunk_store_buffer_ptr,
+                                .hash_id = .{ .id = hash.hashId(repo_opts.hash) },
+                                // don't fsync at the end of each transaction.
+                                // instead, ops fsync once before their repo db
+                                // transaction commits (see `writeChunks`)
+                                .fsync = false,
+                            }),
                         },
                     };
+
+                    // eagerly create the chunk store's top-level array list.
+                    // each process caches the db header when it opens the store,
+                    // so initializing the root here (before any other process can
+                    // see the repo) guarantees every later opener sees it.
+                    {
+                        try chunk_store_file.lock(io, .exclusive);
+                        defer chunk_store_file.unlock(io);
+                        _ = try DB.ArrayList(.read_write).init(self.core.chunk_store_db.rootCursor());
+                    }
 
                     if (opts.create_default_branch) |default_branch_name| {
                         try self.addBranch(io, .{ .name = default_branch_name });
@@ -369,6 +402,15 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                     errdefer db_file.close(io);
 
+                    // open the chunk store. in older versions of xit,
+                    // "chunks" was a directory containing one file per chunk.
+                    var chunk_store_file = repo_dir.openFile(io, "chunks", .{ .mode = .read_write, .lock = .none, .allow_directory = false }) catch |err| switch (err) {
+                        error.IsDir => return error.RepoFormatTooOld,
+                        error.FileNotFound => return error.RepoChunksNotFound,
+                        else => |e| return e,
+                    };
+                    errdefer chunk_store_file.close(io);
+
                     return .{
                         .core = .{
                             .cwd_path = cwd_path_resolved,
@@ -384,6 +426,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
                                 errdefer buffer_ptr.deinit();
 
+                                // hold the lock while initing the db, because it
+                                // truncates junk data left by an interrupted write,
+                                // which must not race with a concurrent writer
+                                try db_file.lock(io, .exclusive);
+                                defer db_file.unlock(io);
+
                                 const hash_id = hash.hashId(repo_opts.hash);
                                 const db = try DB.init(.{
                                     .io = io,
@@ -393,6 +441,34 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 });
                                 if (db.header.hash_id.id != hash_id) return error.UnexpectedHashKind;
                                 break :blk db;
+                            } else {},
+                            .chunk_store_file = chunk_store_file,
+                            .chunk_store_db = if (repo_opts.extra.init_db) blk: {
+                                const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
+                                errdefer allocator.destroy(buffer_ptr);
+
+                                buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
+                                errdefer buffer_ptr.deinit();
+
+                                // see comment on the db lock above
+                                try chunk_store_file.lock(io, .exclusive);
+                                defer chunk_store_file.unlock(io);
+
+                                const hash_id = hash.hashId(repo_opts.hash);
+                                var chunk_store_db = try DB.init(.{
+                                    .io = io,
+                                    .file = chunk_store_file,
+                                    .buffer = buffer_ptr,
+                                    .hash_id = .{ .id = hash_id },
+                                    // see comment on fsync in `init`
+                                    .fsync = false,
+                                });
+                                if (chunk_store_db.header.hash_id.id != hash_id) return error.UnexpectedHashKind;
+
+                                // create the top-level array list if this store is
+                                // brand new (no-op otherwise). see comment in `init`.
+                                _ = try DB.ArrayList(.read_write).init(chunk_store_db.rootCursor());
+                                break :blk chunk_store_db;
                             } else {},
                         },
                     };
@@ -416,9 +492,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     self.core.work_dir.close(io);
                     self.core.repo_dir.close(io);
                     self.core.db_file.close(io);
+                    self.core.chunk_store_file.close(io);
                     if (DB != void) {
                         self.core.db.core.memory.buffer.deinit();
                         allocator.destroy(self.core.db.core.memory.buffer);
+                        self.core.chunk_store_db.core.memory.buffer.deinit();
+                        allocator.destroy(self.core.chunk_store_db.core.memory.buffer);
                     }
                 },
             }
@@ -447,6 +526,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try obj.writeCommitAtHead(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata);
                             try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -491,6 +573,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try obj.writeCommit(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata, ctx.tree_maybe, ctx.ref);
                             try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -537,6 +622,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try tg.add(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.input);
                             try un.writeMessage(repo_opts, state, .{ .tag = .{ .add = ctx.input } });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -624,6 +712,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try work.addPaths(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.paths);
                             try un.writeMessage(repo_opts, state, .{ .add = .{ .paths = ctx.paths, .allocator = ctx.allocator } });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -1057,6 +1148,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             }
 
                             try un.writeMessage(repo_opts, state, .{ .merge = .{ .input = ctx.input, .allocator = ctx.allocator } });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -1440,6 +1534,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 ctx.progress_ctx_maybe,
                             );
                             try un.writeMessage(repo_opts, state, .copy_objects);
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
@@ -1495,6 +1592,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             defer remote.deinit(ctx.io, ctx.allocator);
                             try net.fetch(repo_kind, repo_opts, state, ctx.io, ctx.allocator, &remote, ctx.opts);
                             try un.writeMessage(repo_opts, state, .{ .fetch = .{ .remote_name = ctx.remote_name } });
+                            // fsync the chunk store, so the chunks written by
+                            // this op are durable before the transaction commits
+                            try ctx.core.chunk_store_file.sync(ctx.io);
                         }
                     };
 
