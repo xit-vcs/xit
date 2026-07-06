@@ -44,6 +44,14 @@ pub const LockFile = struct {
     }
 };
 
+/// fsyncs a directory, making renames/creates/deletes of its entries durable
+pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
+    if (.windows == builtin.os.tag) return;
+    const dir_file = try dir.openFile(io, ".", .{ .mode = .read_only, .allow_directory = true });
+    defer dir_file.close(io);
+    try dir_file.sync(io);
+}
+
 pub const Mode = packed struct(u32) {
     pub const ObjectType = enum(u4) {
         tree = 0o04,

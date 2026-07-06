@@ -227,6 +227,14 @@ pub fn runPrint(
             , .{});
             return error.HandledError;
         },
+        error.SharedChunkStoreNotSupported => {
+            try run_opts.err.print(
+                \\this repo shares its chunk store with other repos,
+                \\so it can't be garbage collected on its own.
+                \\
+            , .{});
+            return error.HandledError;
+        },
         error.RepoAlreadyExists => {
             try run_opts.err.print(
                 \\repo already exists, dummy.
@@ -633,6 +641,25 @@ fn runCommand(
             },
             .add => |remote_add_cmd| try repo.addRemote(io, allocator, remote_add_cmd),
             .remove => |remote_remove_cmd| try repo.removeRemote(io, allocator, remote_remove_cmd),
+        },
+        .gc => switch (repo_kind) {
+            .git => {
+                try run_opts.err.print("command not valid for this backend\n", .{});
+                return error.HandledError;
+            },
+            .xit => {
+                const result = try repo.garbageCollect(io, allocator);
+                try run_opts.out.print(
+                    \\db:     {} -> {} bytes
+                    \\chunks: {} -> {} bytes
+                    \\
+                , .{
+                    result.db_size_before,
+                    result.db_size_after,
+                    result.chunk_store_size_before,
+                    result.chunk_store_size_after,
+                });
+            },
         },
         .clone => {},
         .fetch => |fetch_cmd| {

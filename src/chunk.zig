@@ -248,15 +248,42 @@ const ChunkLocation = struct {
 // a u64 length header followed by the bytes themselves, laid out
 // contiguously. the record's location can therefore be derived from the
 // cursor's slot, allowing readers to find it with a single positional read.
-fn chunkLocation(cursor: anytype, size: u64) !ChunkLocation {
+pub fn chunkRecordOffset(cursor: anytype) !u64 {
     const slot = cursor.slot();
     // byte arrays small enough to be inlined into the slot (short_bytes)
     // have no file location, so they must never be used for chunk records
     if (slot.tag != .bytes) return error.UnexpectedTag;
+    return slot.value + @sizeOf(u64);
+}
+
+fn chunkLocation(cursor: anytype, size: u64) !ChunkLocation {
     return .{
-        .offset = slot.value + @sizeOf(u64),
+        .offset = try chunkRecordOffset(cursor),
         .size = @intCast(size),
     };
+}
+
+// collect the chunk store offset of every record referenced by a chunk
+// info buffer. used by gc to find the records that must be kept.
+pub fn collectRecordOffsets(chunk_info: []const u8, offsets: *std.AutoHashMap(u64, void)) !void {
+    if (chunk_info.len % chunk_entry_size != 0) return error.WrongChunkInfoSize;
+    var position: usize = 0;
+    while (position < chunk_info.len) : (position += chunk_entry_size) {
+        const record_offset = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
+        try offsets.put(record_offset, {});
+    }
+}
+
+// rewrite every record offset in a chunk info buffer using the offset map
+// produced by compacting the chunk store
+pub fn rewriteRecordOffsets(chunk_info: []u8, offset_map: *const std.AutoHashMap(u64, u64)) !void {
+    if (chunk_info.len % chunk_entry_size != 0) return error.WrongChunkInfoSize;
+    var position: usize = 0;
+    while (position < chunk_info.len) : (position += chunk_entry_size) {
+        const record_offset = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
+        const new_position = offset_map.get(record_offset - @sizeOf(u64)) orelse return error.ChunkNotFound;
+        std.mem.writeInt(u64, chunk_info[position..][0..@sizeOf(u64)], new_position + @sizeOf(u64), .big);
+    }
 }
 
 // build a chunk record in `buffer`: the record header followed by the

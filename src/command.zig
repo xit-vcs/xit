@@ -36,6 +36,7 @@ pub const CommandKind = enum {
     cherry_pick,
     config,
     remote,
+    gc,
     clone,
     fetch,
     push,
@@ -329,6 +330,17 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\    xit remote list
             ,
         },
+        .gc => .{
+            .name = "gc",
+            .descrip =
+            \\reclaim disk space by removing objects unreachable from any
+            \\branch, tag, or the index, and compacting the database files.
+            ,
+            .example =
+            \\run garbage collection:
+            \\    xit gc
+            ,
+        },
         .clone => .{
             .name = "clone",
             .descrip =
@@ -585,6 +597,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
         cherry_pick: mrg.MergeInput(hash_kind),
         config: cfg.ConfigCommand,
         remote: cfg.ConfigCommand,
+        gc,
         clone: struct {
             url: []const u8,
             local_path: []const u8,
@@ -867,6 +880,11 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
                         .remote => .{ .remote = cmd },
                         else => comptime unreachable,
                     };
+                },
+                .gc => {
+                    if (cmd_args.positional_args.len != 0) return null;
+
+                    return .gc;
                 },
                 .clone => {
                     if (cmd_args.positional_args.len != 2) return null;

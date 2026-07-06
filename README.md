@@ -129,6 +129,8 @@ merge         join two or more development histories together.
 cherry-pick   apply the changes introduced by an existing commit.
 config        add, remove, and list config options.
 remote        add, remove, and list remotes.
+gc            reclaim disk space by removing objects unreachable from any
+              branch, tag, or the index, and compacting the database files.
 clone         clone a repository into a new directory.
 fetch         download objects and refs from another repository.
 push          update remote refs along with associated objects.

@@ -16,6 +16,7 @@ const tr = @import("./tree.zig");
 const net = @import("./net.zig");
 const net_refspec = @import("./net/refspec.zig");
 const un = @import("./undo.zig");
+const gc = @import("./gc.zig");
 const server_upload_pack = @import("./net/server/upload_pack.zig");
 const server_receive_pack = @import("./net/server/receive_pack.zig");
 const server_http_backend = @import("./net/server/http_backend.zig");
@@ -396,6 +397,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                 },
                 .xit => {
+                    // if a gc crashed during its file swap, complete it
+                    try gc.recover(io, repo_dir);
+
                     var db_file = repo_dir.openFile(io, "db", .{ .mode = .read_write, .lock = .none }) catch |err| switch (err) {
                         error.FileNotFound => return error.RepoNotFound,
                         else => |e| return e,
@@ -1726,6 +1730,14 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         else => |e| return e,
                     };
                 },
+            }
+        }
+
+        /// reclaims disk space by removing objects that can't be reached
+        pub fn garbageCollect(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) !gc.GcResult {
+            switch (repo_kind) {
+                .git => return error.NotImplemented,
+                .xit => return try gc.run(repo_opts, self, io, allocator),
             }
         }
     };
