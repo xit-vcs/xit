@@ -187,6 +187,28 @@ pub fn start(
             blocking = false;
             switch (key) {
                 .escape => return,
+                .ctrl => |letter| switch (letter) {
+                    // ctrl+r: refresh by reopening the repo and recreating
+                    // the root widget, preserving the currently selected tab
+                    'r' => {
+                        const new_repo = try rp.Repo(repo_kind, repo_opts).open(io, allocator, .{
+                            .cwd_path = repo.core.cwd_path,
+                            .path = repo.core.work_path,
+                        });
+                        repo.deinit(io, allocator);
+                        repo.* = new_repo;
+
+                        const tab_index = root.ui_root.box.children.values()[0].widget.ui_root_tabs.getSelectedIndex();
+                        const new_root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
+                        root.deinit(allocator);
+                        root = new_root;
+                        if (tab_index) |index| {
+                            const tabs = &root.ui_root.box.children.values()[0].widget.ui_root_tabs;
+                            root.getFocus().setFocus(tabs.box.children.keys()[index]);
+                        }
+                    },
+                    else => try root.input(allocator, key, root.getFocus()),
+                },
                 .mouse => |mouse| {
                     if (mouse.action == .press and mouse.action.press == .left) {
                         const root_focus = root.getFocus();
