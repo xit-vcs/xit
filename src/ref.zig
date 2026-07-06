@@ -334,6 +334,107 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
     };
 }
 
+pub fn AllRefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+    return struct {
+        arena: *std.heap.ArenaAllocator,
+        allocator: std.mem.Allocator,
+        refs: std.ArrayList(Ref),
+        index: usize,
+
+        const Self = @This();
+
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            _: std.Io,
+            allocator: std.mem.Allocator,
+        ) !Self {
+            const arena = try allocator.create(std.heap.ArenaAllocator);
+            arena.* = std.heap.ArenaAllocator.init(allocator);
+            errdefer {
+                arena.deinit();
+                allocator.destroy(arena);
+            }
+
+            // the list and the names it contains are both in the arena
+            var refs: std.ArrayList(Ref) = .empty;
+
+            switch (repo_kind) {
+                .git => return error.NotImplemented,
+                .xit => try collectRefs(repo_opts, state, arena.allocator(), &refs),
+            }
+
+            return .{
+                .arena = arena,
+                .allocator = allocator,
+                .refs = refs,
+                .index = 0,
+            };
+        }
+
+        pub fn next(self: *Self, _: std.Io) !?Ref {
+            if (self.index >= self.refs.items.len) return null;
+            defer self.index += 1;
+            return self.refs.items[self.index];
+        }
+
+        pub fn deinit(self: *Self, _: std.Io) void {
+            self.arena.deinit();
+            self.allocator.destroy(self.arena);
+        }
+
+        fn collectRefs(
+            comptime opts: rp.RepoOpts(.xit),
+            state: rp.Repo(.xit, opts).State(.read_only),
+            arena_allocator: std.mem.Allocator,
+            refs_out: *std.ArrayList(Ref),
+        ) !void {
+            const DB = rp.Repo(.xit, opts).DB;
+            const refs_cursor = (try state.extra.moment.getCursor(hash.hashInt(opts.hash, "refs"))) orelse return;
+            const refs = try DB.SortedMap(.read_only).init(refs_cursor);
+            var refs_iter = try refs.iterator();
+            while (try refs_iter.next()) |*dir_cursor| {
+                var dir_kv_pair = try dir_cursor.readKeyValuePair();
+                const dir_name = try dir_kv_pair.key_cursor.readBytesAlloc(arena_allocator, MAX_REF_CONTENT_SIZE);
+
+                if (std.mem.eql(u8, "remotes", dir_name)) {
+                    const remotes = try DB.SortedMap(.read_only).init(dir_kv_pair.value_cursor);
+                    var remotes_iter = try remotes.iterator();
+                    while (try remotes_iter.next()) |*remote_cursor| {
+                        var remote_kv_pair = try remote_cursor.readKeyValuePair();
+                        const remote_name = try remote_kv_pair.key_cursor.readBytesAlloc(arena_allocator, MAX_REF_CONTENT_SIZE);
+                        try collectRefMap(opts, remote_kv_pair.value_cursor, arena_allocator, refs_out, .{ .remote = remote_name });
+                    }
+                } else {
+                    const ref_kind: RefKind = if (std.mem.eql(u8, "heads", dir_name))
+                        .head
+                    else if (std.mem.eql(u8, "tags", dir_name))
+                        .tag
+                    else
+                        .{ .other = dir_name };
+                    try collectRefMap(opts, dir_kv_pair.value_cursor, arena_allocator, refs_out, ref_kind);
+                }
+            }
+        }
+
+        fn collectRefMap(
+            comptime opts: rp.RepoOpts(.xit),
+            map_cursor: rp.Repo(.xit, opts).DB.Cursor(.read_only),
+            arena_allocator: std.mem.Allocator,
+            refs_out: *std.ArrayList(Ref),
+            ref_kind: RefKind,
+        ) !void {
+            const DB = rp.Repo(.xit, opts).DB;
+            const map = try DB.SortedMap(.read_only).init(map_cursor);
+            var iter = try map.iterator();
+            while (try iter.next()) |*ref_cursor| {
+                var kv_pair = try ref_cursor.readKeyValuePair();
+                const name = try kv_pair.key_cursor.readBytesAlloc(arena_allocator, MAX_REF_CONTENT_SIZE);
+                try refs_out.append(arena_allocator, .{ .kind = ref_kind, .name = name });
+            }
+        }
+    };
+}
+
 pub fn readRecur(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),

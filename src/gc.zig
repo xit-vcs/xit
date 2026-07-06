@@ -341,8 +341,6 @@ fn findLiveOids(
     allocator: std.mem.Allocator,
     live_oids: *std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
 ) !void {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-
     var obj_iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
 
@@ -352,25 +350,13 @@ fn findLiveOids(
         try obj_iter.include(&head_oid);
     }
 
-    // all refs under the "refs" key: heads, tags, remotes and any other
-    // kind. remote refs are nested one level deeper (remote name -> refs).
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "refs"))) |refs_cursor| {
-        const refs = try DB.SortedMap(.read_only).init(refs_cursor);
-        var refs_iter = try refs.iterator();
-        while (try refs_iter.next()) |*dir_cursor| {
-            var dir_kv_pair = try dir_cursor.readKeyValuePair();
-            var dir_name_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-            const dir_name = try dir_kv_pair.key_cursor.readBytes(&dir_name_buffer);
-
-            if (std.mem.eql(u8, "remotes", dir_name)) {
-                const remotes = try DB.SortedMap(.read_only).init(dir_kv_pair.value_cursor);
-                var remotes_iter = try remotes.iterator();
-                while (try remotes_iter.next()) |*remote_cursor| {
-                    const remote_kv_pair = try remote_cursor.readKeyValuePair();
-                    try includeRefMap(repo_opts, &obj_iter, remote_kv_pair.value_cursor);
-                }
-            } else {
-                try includeRefMap(repo_opts, &obj_iter, dir_kv_pair.value_cursor);
+    // all refs under the "refs" key: heads, tags, remotes and any other kind
+    {
+        var ref_iter = try rf.AllRefIterator(.xit, repo_opts).init(state, io, allocator);
+        defer ref_iter.deinit(io);
+        while (try ref_iter.next(io)) |ref| {
+            if (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) |oid| {
+                try obj_iter.include(&oid);
             }
         }
     }
@@ -400,28 +386,6 @@ fn findLiveOids(
     while (try obj_iter.next(allocator)) |object| {
         defer object.deinit();
         try live_oids.put(try hash.hexToInt(repo_opts.hash, &object.oid), {});
-    }
-}
-
-// includes every oid in a map of ref name -> ref content. symbolic refs
-// are skipped, because the refs they point at are enumerated on their own.
-fn includeRefMap(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    obj_iter: *obj.ObjectIterator(.xit, repo_opts),
-    map_cursor: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-) !void {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const map = try DB.SortedMap(.read_only).init(map_cursor);
-    var iter = try map.iterator();
-    while (try iter.next()) |*ref_cursor| {
-        var kv_pair = try ref_cursor.readKeyValuePair();
-        if (kv_pair.value_cursor.slot().empty()) continue;
-        var content_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-        const content = try kv_pair.value_cursor.readBytes(&content_buffer);
-        switch (rf.RefOrOid(repo_opts.hash).initFromDb(content) orelse continue) {
-            .oid => |oid| try obj_iter.include(oid),
-            .ref => {},
-        }
     }
 }
 

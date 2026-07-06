@@ -1340,21 +1340,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator, .{ .kind = .commit });
                     defer obj_iter.deinit();
 
-                    // add heads
+                    // add refs
                     {
-                        var ref_iter = try rf.RefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator, .head, .beginning);
-                        defer ref_iter.deinit(ctx.io);
-
-                        while (try ref_iter.next(ctx.io)) |ref| {
-                            if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) |oid| {
-                                try obj_iter.include(&oid);
-                            }
-                        }
-                    }
-
-                    // add tags
-                    {
-                        var ref_iter = try rf.RefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator, .tag, .beginning);
+                        var ref_iter = try rf.AllRefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
                         defer ref_iter.deinit(ctx.io);
 
                         while (try ref_iter.next(ctx.io)) |ref| {
