@@ -179,7 +179,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             var repo = try rp.Repo(.git, remote_repo_opts).open(io, allocator, .{ .path = work_path });
             defer repo.deinit(io, allocator);
 
-            var obj_iter = try repo.logRaw(io, allocator, .{ .kind = .all });
+            var obj_iter = try obj.ObjectIterator(.git, remote_repo_opts).init(.{ .core = &repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
             defer obj_iter.deinit();
 
             for (self.heads.items) |*head| {

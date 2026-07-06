@@ -1023,17 +1023,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return iter;
         }
 
-        pub fn logRaw(
-            self: *Repo(repo_kind, repo_opts),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            opts: obj.ObjectIteratorOptions,
-        ) !obj.ObjectIterator(repo_kind, repo_opts) {
-            var moment = try self.core.latestMoment();
-            const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            return try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, opts);
-        }
-
         pub fn merge(
             self: *Repo(repo_kind, repo_opts),
             io: std.Io,
