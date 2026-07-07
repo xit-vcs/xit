@@ -157,34 +157,37 @@ pub const Stat = struct {
         switch (builtin.os.tag) {
             .linux => {
                 var stat = std.mem.zeroInit(std.os.linux.Statx, .{});
-                if (0 != std.os.linux.statx(fd, "", 0, .{}, &stat)) {
-                    return .{
-                        .dev = 0, // TODO: get dev from dev_major and dev_minor
-                        .ino = @truncate(stat.ino),
-                        .uid = stat.uid,
-                        .gid = stat.gid,
-                    };
-                } else {
-                    return .{
-                        .dev = 0,
-                        .ino = 0,
-                        .uid = 0,
-                        .gid = 0,
-                    };
+                switch (std.os.linux.errno(std.os.linux.statx(
+                    fd,
+                    "",
+                    std.os.linux.AT.EMPTY_PATH,
+                    .{ .INO = true, .UID = true, .GID = true },
+                    &stat,
+                ))) {
+                    .SUCCESS => {},
+                    .NOMEM => return error.SystemResources,
+                    .ACCES => return error.AccessDenied,
+                    else => |err| return std.posix.unexpectedErrno(err),
                 }
+                return .{
+                    .dev = 0, // useless
+                    .ino = @truncate(stat.ino),
+                    .uid = stat.uid,
+                    .gid = stat.gid,
+                };
             },
             .macos => {
                 var stat = std.mem.zeroes(std.posix.Stat);
                 switch (std.posix.errno(std.posix.system.fstat(fd, &stat))) {
                     .SUCCESS => {},
                     .INVAL => unreachable,
-                    .BADF => unreachable, // Always a race condition.
+                    .BADF => unreachable, // always a race condition
                     .NOMEM => return error.SystemResources,
                     .ACCES => return error.AccessDenied,
                     else => |err| return std.posix.unexpectedErrno(err),
                 }
                 return .{
-                    .dev = @intCast(stat.dev),
+                    .dev = 0, // useless
                     .ino = @intCast(stat.ino),
                     .uid = stat.uid,
                     .gid = stat.gid,
