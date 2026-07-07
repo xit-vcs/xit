@@ -104,26 +104,26 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
             var index = opts.min_size - 1;
             try reader.readSliceAll(buffer[0..index]);
 
+            // scan the reader's buffered bytes a slice at a time. the small
+            // mask is used up to `center` and the large mask after, so the
+            // slice is capped at `center` to switch masks at the right byte.
             var h: u64 = 0;
-            while (index < center) {
-                const byte = try reader.takeByte();
-                buffer[index] = byte;
-                h = (h << 1) +% gear_hash[byte];
-                index += 1;
-                if (h & mask_s == 0) {
-                    return buffer[0..index];
+            while (index < remaining) {
+                const in_small_zone = index < center;
+                const end = if (in_small_zone) center else remaining;
+                const mask = if (in_small_zone) mask_s else mask_l;
+                const available = try reader.peekGreedy(1);
+                const limit = @min(available.len, end - index);
+                for (available[0..limit], 1..) |byte, tossed| {
+                    buffer[index] = byte;
+                    h = (h << 1) +% gear_hash[byte];
+                    index += 1;
+                    if (h & mask == 0) {
+                        reader.toss(tossed);
+                        return buffer[0..index];
+                    }
                 }
-            }
-
-            const last_pos = remaining;
-            while (index < last_pos) {
-                const byte = try reader.takeByte();
-                buffer[index] = byte;
-                h = (h << 1) +% gear_hash[byte];
-                index += 1;
-                if (h & mask_l == 0) {
-                    return buffer[0..index];
-                }
+                reader.toss(limit);
             }
 
             return buffer[0..index];
