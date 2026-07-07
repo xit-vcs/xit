@@ -316,13 +316,11 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             _ = std.ascii.lowerString(var_name, var_name_orig);
             const var_value = try self.arena.allocator().dupe(u8, input.value);
 
-            if (self.sections.getPtr(section_name)) |variables| {
-                try variables.put(self.arena.allocator(), var_name, var_value);
-            } else {
-                var variables = Variables.empty;
-                try variables.put(self.arena.allocator(), var_name, var_value);
-                try self.sections.put(self.arena.allocator(), section_name, variables);
+            const variables = try self.sections.getOrPut(self.arena.allocator(), section_name);
+            if (!variables.found_existing) {
+                variables.value_ptr.* = Variables.empty;
             }
+            try variables.value_ptr.put(self.arena.allocator(), var_name, var_value);
 
             switch (repo_kind) {
                 .git => try self.write(state, io),

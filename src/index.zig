@@ -417,24 +417,18 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
             while (parent_path_maybe) |parent_path| {
                 // populate dir_to_children
-                const children_maybe = self.dir_to_children.getEntry(parent_path);
-                if (children_maybe) |children| {
-                    try children.value_ptr.*.put(self.allocator, child, {});
-                } else {
-                    var children: std.StringArrayHashMapUnmanaged(void) = .empty;
-                    try children.put(self.allocator, child, {});
-                    try self.dir_to_children.put(self.allocator, parent_path, children);
+                const children = try self.dir_to_children.getOrPut(self.allocator, parent_path);
+                if (!children.found_existing) {
+                    children.value_ptr.* = .empty;
                 }
+                try children.value_ptr.put(self.allocator, child, {});
 
                 // populate dir_to_paths
-                const child_paths_maybe = self.dir_to_paths.getEntry(parent_path);
-                if (child_paths_maybe) |child_paths| {
-                    try child_paths.value_ptr.*.put(self.allocator, entry.path, {});
-                } else {
-                    var child_paths: std.StringArrayHashMapUnmanaged(void) = .empty;
-                    try child_paths.put(self.allocator, entry.path, {});
-                    try self.dir_to_paths.put(self.allocator, parent_path, child_paths);
+                const child_paths = try self.dir_to_paths.getOrPut(self.allocator, parent_path);
+                if (!child_paths.found_existing) {
+                    child_paths.value_ptr.* = .empty;
                 }
+                try child_paths.value_ptr.put(self.allocator, entry.path, {});
 
                 child = std.fs.path.basename(parent_path);
                 parent_path_maybe = std.fs.path.dirname(parent_path);
