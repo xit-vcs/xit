@@ -55,6 +55,33 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             flags: Flags,
             extended_flags: ?ExtendedFlags,
             path: []const u8,
+
+            pub fn init(meta: fs.Metadata, mode: fs.Mode, oid: [hash.byteLen(repo_opts.hash)]u8, path: []const u8) Entry {
+                return .{
+                    .ctime_secs = meta.times.ctime_secs,
+                    .ctime_nsecs = meta.times.ctime_nsecs,
+                    .mtime_secs = meta.times.mtime_secs,
+                    .mtime_nsecs = meta.times.mtime_nsecs,
+                    .dev = meta.stat.dev,
+                    .ino = meta.stat.ino,
+                    .mode = mode,
+                    .uid = meta.stat.uid,
+                    .gid = meta.stat.gid,
+                    .file_size = switch (repo_kind) {
+                        .git => @truncate(meta.size), // git docs say that the file size is truncated
+                        .xit => meta.size,
+                    },
+                    .oid = oid,
+                    .flags = .{
+                        .name_length = @intCast(path.len),
+                        .stage = 0,
+                        .extended = false,
+                        .assume_valid = false,
+                    },
+                    .extended_flags = null,
+                    .path = path,
+                };
+            }
         };
 
         pub fn init(
@@ -299,32 +326,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
                     const mode = mode_maybe orelse meta.mode;
 
-                    // add entry
-                    const entry = Entry{
-                        .ctime_secs = meta.times.ctime_secs,
-                        .ctime_nsecs = meta.times.ctime_nsecs,
-                        .mtime_secs = meta.times.mtime_secs,
-                        .mtime_nsecs = meta.times.mtime_nsecs,
-                        .dev = meta.stat.dev,
-                        .ino = meta.stat.ino,
-                        .mode = mode,
-                        .uid = meta.stat.uid,
-                        .gid = meta.stat.gid,
-                        .file_size = switch (repo_kind) {
-                            .git => @truncate(meta.size), // git docs say that the file size is truncated
-                            .xit => meta.size,
-                        },
-                        .oid = oid,
-                        .flags = .{
-                            .name_length = @intCast(path.len),
-                            .stage = 0,
-                            .extended = false,
-                            .assume_valid = false,
-                        },
-                        .extended_flags = null,
-                        .path = path,
-                    };
-                    try self.addEntry(entry);
+                    try self.addEntry(Entry.init(meta, mode, oid, path));
                 },
                 .directory => {
                     var dir = try state.core.work_dir.openDir(io, path, .{ .iterate = true });
@@ -358,31 +360,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     var reader = std.Io.Reader.fixed(target_path);
                     try obj.writeObject(repo_kind, repo_opts, state, self.io, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
 
-                    const entry = Entry{
-                        .ctime_secs = meta.times.ctime_secs,
-                        .ctime_nsecs = meta.times.ctime_nsecs,
-                        .mtime_secs = meta.times.mtime_secs,
-                        .mtime_nsecs = meta.times.mtime_nsecs,
-                        .dev = meta.stat.dev,
-                        .ino = meta.stat.ino,
-                        .mode = meta.mode,
-                        .uid = meta.stat.uid,
-                        .gid = meta.stat.gid,
-                        .file_size = switch (repo_kind) {
-                            .git => @truncate(meta.size), // git docs say that the file size is truncated
-                            .xit => meta.size,
-                        },
-                        .oid = oid,
-                        .flags = .{
-                            .name_length = @intCast(path.len),
-                            .stage = 0,
-                            .extended = false,
-                            .assume_valid = false,
-                        },
-                        .extended_flags = null,
-                        .path = path,
-                    };
-                    try self.addEntry(entry);
+                    try self.addEntry(Entry.init(meta, meta.mode, oid, path));
                 },
                 else => return,
             }
@@ -581,37 +559,28 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         ) !void {
             const path = try fs.joinPath(self.arena.allocator(), path_parts);
 
-            // if the path doesn't exist, remove it, regardless of what the `action` is
-            if (state.core.work_dir.openFile(io, path, .{ .mode = .read_only })) |file| {
+            const file_exists = if (state.core.work_dir.openFile(io, path, .{ .mode = .read_only })) |file| exists: {
                 file.close(io);
-            } else |err| {
-                switch (err) {
-                    error.FileNotFound => {
-                        if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
-                            return switch (action) {
-                                .add => error.AddIndexPathNotFound,
-                                .rm => error.RemoveIndexPathNotFound,
-                            };
-                        }
-                        try self.removePath(path, removed_paths_maybe);
-                        try self.removeChildren(path, removed_paths_maybe);
-                        return;
-                    },
-                    else => |e| return e,
-                }
+                break :exists true;
+            } else |err| switch (err) {
+                error.FileNotFound => false,
+                else => |e| return e,
+            };
+
+            // the path is only added if it exists. in every other case it is
+            // removed from the index, regardless of what the `action` is.
+            if (file_exists and action == .add) {
+                return self.addPath(state, io, path, null);
             }
 
-            // add or remove based on the `action`
-            switch (action) {
-                .add => try self.addPath(state, io, path, null),
-                .rm => {
-                    if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
-                        return error.RemoveIndexPathNotFound;
-                    }
-                    try self.removePath(path, removed_paths_maybe);
-                    try self.removeChildren(path, removed_paths_maybe);
-                },
+            if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
+                return switch (action) {
+                    .add => error.AddIndexPathNotFound,
+                    .rm => error.RemoveIndexPathNotFound,
+                };
             }
+            try self.removePath(path, removed_paths_maybe);
+            try self.removeChildren(path, removed_paths_maybe);
         }
 
         pub fn write(
