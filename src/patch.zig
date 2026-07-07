@@ -610,7 +610,7 @@ fn patchHash(
 
     try createPatchEntries(repo_opts, moment, snapshot, allocator, &arena, myers_diff_iter, path_hash, 0, &patch_entries, &patch_offsets);
 
-    var hasher = hash.Hasher(repo_opts.hash).init();
+    var hasher = hash.Hasher(repo_opts.hash).init(.{});
 
     for (patch_entries.items) |patch_entry| {
         hasher.update(patch_entry);

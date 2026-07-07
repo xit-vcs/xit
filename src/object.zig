@@ -37,7 +37,7 @@ pub fn writeObject(
     var header_bytes = [_]u8{0} ** 32;
     const header_str = try header.write(&header_bytes);
 
-    var hasher = hash.Hasher(repo_opts.hash).init();
+    var hasher = hash.Hasher(repo_opts.hash).init(.{});
     hasher.update(header_str);
 
     var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
@@ -510,25 +510,11 @@ pub const ObjectKind = enum {
     tag,
 
     pub fn init(kind_str: []const u8) !ObjectKind {
-        return if (std.mem.eql(u8, "blob", kind_str))
-            .blob
-        else if (std.mem.eql(u8, "tree", kind_str))
-            .tree
-        else if (std.mem.eql(u8, "commit", kind_str))
-            .commit
-        else if (std.mem.eql(u8, "tag", kind_str))
-            .tag
-        else
-            error.InvalidObjectKind;
+        return std.meta.stringToEnum(ObjectKind, kind_str) orelse error.InvalidObjectKind;
     }
 
     pub fn name(self: ObjectKind) []const u8 {
-        return switch (self) {
-            .blob => "blob",
-            .tree => "tree",
-            .commit => "commit",
-            .tag => "tag",
-        };
+        return @tagName(self);
     }
 };
 

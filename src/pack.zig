@@ -1521,7 +1521,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 .out_index = 0,
                 .bytes_produced = 0,
                 .stream_buffer = [_]u8{0} ** std.compress.flate.max_window_len,
-                .hasher = hash.Hasher(repo_opts.hash).init(),
+                .hasher = hash.Hasher(repo_opts.hash).init(.{}),
                 .mode = .header,
             };
             errdefer self.deinit();

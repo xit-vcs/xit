@@ -46,28 +46,9 @@ pub fn hexLen(comptime hash_kind: HashKind) usize {
 }
 
 pub fn Hasher(comptime hash_kind: HashKind) type {
-    return struct {
-        hasher: switch (hash_kind) {
-            .sha1 => std.crypto.hash.Sha1,
-            .sha256 => std.crypto.hash.sha2.Sha256,
-        },
-
-        pub fn init() Hasher(hash_kind) {
-            return .{
-                .hasher = switch (hash_kind) {
-                    .sha1 => std.crypto.hash.Sha1.init(.{}),
-                    .sha256 => std.crypto.hash.sha2.Sha256.init(.{}),
-                },
-            };
-        }
-
-        pub fn update(self: *Hasher(hash_kind), buffer: []const u8) void {
-            self.hasher.update(buffer);
-        }
-
-        pub fn final(self: *Hasher(hash_kind), out: *[byteLen(hash_kind)]u8) void {
-            self.hasher.final(out);
-        }
+    return switch (hash_kind) {
+        .sha1 => std.crypto.hash.Sha1,
+        .sha256 => std.crypto.hash.sha2.Sha256,
     };
 }
 
@@ -78,7 +59,7 @@ pub fn hashReader(
     header_maybe: ?[]const u8,
     out: *[byteLen(hash_kind)]u8,
 ) !void {
-    var hasher = Hasher(hash_kind).init();
+    var hasher = Hasher(hash_kind).init(.{});
     var buffer = [_]u8{0} ** read_size;
     if (header_maybe) |header| {
         hasher.update(header);
@@ -94,14 +75,14 @@ pub fn hashReader(
 }
 
 pub fn hashBuffer(comptime hash_kind: HashKind, buffer: []const u8, out: *[byteLen(hash_kind)]u8) !void {
-    var hasher = Hasher(hash_kind).init();
+    var hasher = Hasher(hash_kind).init(.{});
     hasher.update(buffer);
     hasher.final(out);
 }
 
 pub fn hashInt(comptime hash_kind: HashKind, buffer: []const u8) HashInt(hash_kind) {
     var hash_buffer = [_]u8{0} ** byteLen(hash_kind);
-    var hasher = Hasher(hash_kind).init();
+    var hasher = Hasher(hash_kind).init(.{});
     hasher.update(buffer);
     hasher.final(&hash_buffer);
     return bytesToInt(hash_kind, &hash_buffer);

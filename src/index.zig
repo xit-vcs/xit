@@ -638,7 +638,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     self.entries.sort(SortCtx{ .keys = self.entries.keys() });
 
                     // start the checksum
-                    var hasher = hash.Hasher(.sha1).init();
+                    var hasher = hash.Hasher(.sha1).init(.{});
 
                     // calculate entry count
                     var entry_count: u32 = 0;

@@ -277,7 +277,7 @@ fn writePack(
         std.mem.writeInt(u32, header[4..8], 2, .big);
         std.mem.writeInt(u32, header[8..12], 0, .big);
 
-        var hasher = hash.Hasher(repo_opts.hash).init();
+        var hasher = hash.Hasher(repo_opts.hash).init(.{});
         hasher.update(&header);
         var checksum = [_]u8{0} ** hash.byteLen(repo_opts.hash);
         hasher.final(&checksum);

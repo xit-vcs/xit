@@ -615,10 +615,7 @@ fn RefUpdate(comptime hash_kind: hash.HashKind) type {
 }
 
 fn isNullOid(oid: []const u8) bool {
-    for (oid) |b| {
-        if (b != '0') return false;
-    }
-    return true;
+    return std.mem.allEqual(u8, oid, '0');
 }
 
 const deny_current_branch_msg =
