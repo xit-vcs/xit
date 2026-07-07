@@ -32,7 +32,7 @@ pub fn validateName(name: []const u8) bool {
     while (split_iter.next()) |path_part| {
         if (path_part.len == 0 or
             path_part[0] == '.' or
-            std.mem.endsWith(u8, name, ".lock"))
+            std.mem.endsWith(u8, path_part, ".lock"))
         {
             return false;
         }
