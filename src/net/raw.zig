@@ -93,9 +93,6 @@ pub const RawStream = struct {
 };
 
 fn sendCommand(stream: *RawStream) !void {
-    var buffer = std.Io.Writer.Allocating.init(stream.allocator);
-    defer buffer.deinit();
-
     const uri = try std.Uri.parse(stream.url);
     const path = switch (uri.path) {
         .raw => |s| s,
@@ -107,16 +104,11 @@ fn sendCommand(stream: *RawStream) !void {
         .percent_encoded => |s| s,
     };
 
-    var command_size_buf = [_]u8{'0'} ** 4;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(stream.allocator);
+    try net_pkt.appendPktLine(stream.allocator, &buffer, "{s} {s}\x00host={s}\x00", .{ stream.cmd, path, host_str });
 
-    try buffer.writer.print("{s}{s} {s}\x00host={s}\x00", .{ &command_size_buf, stream.cmd, path, host_str });
-
-    var written = buffer.written();
-
-    try net_pkt.commandSize(&command_size_buf, written.len);
-    @memcpy(written[0..4], &command_size_buf);
-
-    try stream.socket.writeAll(written.ptr, written.len);
+    try stream.socket.writeAll(buffer.items.ptr, buffer.items.len);
 
     stream.sent_command = true;
 }

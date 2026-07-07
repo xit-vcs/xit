@@ -114,13 +114,10 @@ pub fn Buffer(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         len: usize,
         data: [repo_opts.net_buffer_size]u8,
 
-        fn consume(self: *Buffer(repo_kind, repo_opts), end: [*c]const u8) void {
-            if (@intFromPtr(end) > @intFromPtr(&self.data) and
-                @intFromPtr(end) <= @intFromPtr(&self.data) + self.len)
-            {
-                const consumed = @intFromPtr(end) - @intFromPtr(&self.data);
+        fn consume(self: *Buffer(repo_kind, repo_opts), consumed: usize) void {
+            if (consumed > 0 and consumed <= self.len) {
                 const new_len = self.len - consumed;
-                std.mem.copyForwards(u8, self.data[0..new_len], end[0..new_len]);
+                std.mem.copyForwards(u8, self.data[0..new_len], self.data[consumed..self.len]);
                 self.data[new_len] = '\x00';
                 self.len = new_len;
             }
@@ -492,25 +489,11 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         fn pktline(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), specs: []net_push.PushSpec(repo_kind, repo_opts)) !void {
             for (specs, 0..) |*spec, i| {
-                var line = std.Io.Writer.Allocating.init(allocator);
-                defer line.deinit();
-
-                var command_size_buf = [_]u8{'0'} ** 4;
-
-                try line.writer.print("{s}{s} {s} {s}", .{ &command_size_buf, &spec.roid, &spec.loid, spec.refspec.dst });
-
                 if (i == 0) {
-                    try line.writer.print("\x00 report-status side-band-64k", .{});
+                    try net_pkt.appendPktLine(allocator, buffer, "{s} {s} {s}\x00 report-status side-band-64k\n", .{ &spec.roid, &spec.loid, spec.refspec.dst });
+                } else {
+                    try net_pkt.appendPktLine(allocator, buffer, "{s} {s} {s}\n", .{ &spec.roid, &spec.loid, spec.refspec.dst });
                 }
-
-                try line.writer.writeByte('\n');
-
-                var written = line.written();
-
-                try net_pkt.commandSize(&command_size_buf, written.len);
-                @memcpy(written[0..4], &command_size_buf);
-
-                try buffer.appendSlice(allocator, written);
             }
 
             try buffer.appendSlice(allocator, "0000");
@@ -619,16 +602,15 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             var flush: c_int = 0;
             var found_capabilities = false;
-            var bufptr_maybe: ?[*]const u8 = null;
+            var consumed: usize = 0;
             while (true) {
                 var pkt_maybe: ?net_pkt.Pkt(repo_kind, repo_opts) = null;
                 if (self.buffer.len > 0) {
-                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &bufptr_maybe);
+                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed);
                 }
 
                 if (pkt_maybe) |*pkt| {
-                    const bufptr = bufptr_maybe orelse return error.BufPtrNotSet;
-                    self.buffer.consume(bufptr);
+                    self.buffer.consume(consumed);
 
                     switch (pkt.*) {
                         .err => {
@@ -666,13 +648,12 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             allocator: std.mem.Allocator,
         ) !net_pkt.Pkt(repo_kind, repo_opts) {
             var found_capabilities = true;
-            var bufptr_maybe: ?[*]const u8 = null;
+            var consumed: usize = 0;
 
             while (true) {
                 if (self.buffer.len > 0) {
-                    if (try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &bufptr_maybe)) |pkt| {
-                        const bufptr = bufptr_maybe orelse return error.BufPtrNotSet;
-                        self.buffer.consume(bufptr);
+                    if (try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed)) |pkt| {
+                        self.buffer.consume(consumed);
                         return pkt;
                     }
                 }
@@ -780,20 +761,19 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             git_push: *net_push.Push(repo_kind, repo_opts),
         ) !void {
             var found_capabilities = false;
-            var bufptr_maybe: ?[*]const u8 = null;
+            var consumed: usize = 0;
 
             while (true) {
                 var pkt_maybe: ?net_pkt.Pkt(repo_kind, repo_opts) = null;
 
                 if (self.buffer.len > 0) {
-                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &bufptr_maybe);
+                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed);
                 }
 
                 if (pkt_maybe) |*pkt| {
                     defer pkt.deinit(allocator);
 
-                    const bufptr = bufptr_maybe orelse return error.BufPtrNotSet;
-                    self.buffer.consume(bufptr);
+                    self.buffer.consume(consumed);
 
                     var iter_over = false;
 
@@ -839,18 +819,15 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             git_push: *net_push.Push(repo_kind, repo_opts),
             data_pkt: []const u8,
         ) !void {
-            var line = data_pkt.ptr;
-            var line_len = data_pkt.len;
+            var line = data_pkt;
             var found_capabilities = false;
-            var bufptr_maybe: ?[*]const u8 = null;
+            var consumed: usize = 0;
 
-            while (line_len > 0) {
-                var pkt = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, line[0..line_len], &found_capabilities, &bufptr_maybe) orelse return;
+            while (line.len > 0) {
+                var pkt = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, line, &found_capabilities, &consumed) orelse return;
                 defer pkt.deinit(allocator);
 
-                const bufptr = bufptr_maybe orelse return error.BufPtrNotSet;
-                line_len -= (@intFromPtr(bufptr) - @intFromPtr(line));
-                line = bufptr;
+                line = line[consumed..];
 
                 _ = try handlePushPkt(git_push, &pkt);
             }

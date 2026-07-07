@@ -47,11 +47,14 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             oid: [hash.hexLen(repo_opts.hash)]u8,
         },
 
+        /// parses the next packet from `buffer`, or returns null if the buffer
+        /// doesn't contain a complete packet yet. `consumed` is set to the
+        /// number of bytes the packet took up whenever a packet is returned.
         pub fn initMaybe(
             allocator: std.mem.Allocator,
             buffer: []const u8,
             found_capabilities: *bool,
-            bufptr: *?[*]const u8,
+            consumed: *usize,
         ) !?Pkt(repo_kind, repo_opts) {
             var line = buffer;
 
@@ -72,12 +75,12 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             }
 
             if (len == 0) {
-                bufptr.* = line.ptr;
+                consumed.* = PKT_LEN_SIZE;
                 return .{ .flush = {} };
             }
 
             len -= PKT_LEN_SIZE;
-            bufptr.* = line[len..].ptr;
+            consumed.* = PKT_LEN_SIZE + len;
 
             const content = line[0..len];
 
@@ -249,10 +252,23 @@ const PKT_WANT_PREFIX = "want ";
 const PKT_LEN_SIZE = 4;
 const PKT_MAX_SIZE = 0xffff;
 
-pub fn commandSize(command: []u8, len: usize) !void {
-    var command_size_buf = [_]u8{'0'} ** 4;
-    const command_size = try std.fmt.bufPrint(&command_size_buf, "{x}", .{len});
-    @memcpy(command[command_size_buf.len - command_size.len .. command_size_buf.len], command_size);
+/// append a pkt-line to `buf`: a 4-digit hex length header followed by the
+/// formatted content
+pub fn appendPktLine(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    var content = std.Io.Writer.Allocating.init(allocator);
+    defer content.deinit();
+    try content.writer.print(fmt, args);
+
+    const pkt_len = content.written().len + PKT_LEN_SIZE;
+    if (pkt_len > PKT_MAX_SIZE) {
+        return error.InvalidPacket;
+    }
+    var header: [PKT_LEN_SIZE]u8 = undefined;
+    var header_writer: std.Io.Writer = .fixed(&header);
+    header_writer.print("{x:0>4}", .{pkt_len}) catch unreachable;
+
+    try buf.appendSlice(allocator, &header);
+    try buf.appendSlice(allocator, content.written());
 }
 
 pub fn bufferHave(
@@ -262,15 +278,7 @@ pub fn bufferHave(
     oid_hex: *const [hash.hexLen(repo_opts.hash)]u8,
     buf: *std.ArrayList(u8),
 ) !void {
-    var command_size_buf = [_]u8{'0'} ** 4;
-
-    const line = try std.fmt.allocPrint(allocator, "{s}{s}{s}\n", .{ &command_size_buf, PKT_HAVE_PREFIX, oid_hex });
-    defer allocator.free(line);
-
-    try commandSize(&command_size_buf, line.len);
-    @memcpy(line[0..4], &command_size_buf);
-
-    try buf.appendSlice(allocator, line);
+    try appendPktLine(allocator, buf, "{s}{s}\n", .{ PKT_HAVE_PREFIX, oid_hex });
 }
 
 fn bufferWantWithCaps(
@@ -281,55 +289,38 @@ fn bufferWantWithCaps(
     caps: *const net_wire.Capabilities,
     buf: *std.ArrayList(u8),
 ) !void {
-    var line = std.Io.Writer.Allocating.init(allocator);
-    defer line.deinit();
-
-    var command_size_buf = [_]u8{'0'} ** 4;
-
-    try line.writer.print("{s}{s}{s} ", .{ &command_size_buf, PKT_WANT_PREFIX, &head.oid });
+    var caps_str = std.Io.Writer.Allocating.init(allocator);
+    defer caps_str.deinit();
 
     if (caps.multi_ack_detailed) {
-        try line.writer.writeAll("multi_ack_detailed ");
+        try caps_str.writer.writeAll("multi_ack_detailed ");
     } else if (caps.multi_ack) {
-        try line.writer.writeAll("multi_ack ");
+        try caps_str.writer.writeAll("multi_ack ");
     }
 
     if (caps.side_band_64k) {
-        try line.writer.writeAll("side-band-64k ");
+        try caps_str.writer.writeAll("side-band-64k ");
     } else if (caps.side_band) {
-        try line.writer.writeAll("side-band ");
+        try caps_str.writer.writeAll("side-band ");
     }
 
     if (caps.include_tag) {
-        try line.writer.writeAll("include-tag ");
+        try caps_str.writer.writeAll("include-tag ");
     }
 
     if (caps.thin_pack) {
-        try line.writer.writeAll("thin-pack ");
+        try caps_str.writer.writeAll("thin-pack ");
     }
 
     if (caps.ofs_delta) {
-        try line.writer.writeAll("ofs-delta ");
+        try caps_str.writer.writeAll("ofs-delta ");
     }
 
     if (caps.shallow) {
-        try line.writer.writeAll("shallow ");
+        try caps_str.writer.writeAll("shallow ");
     }
 
-    try line.writer.writeByte('\n');
-
-    const PKT_MAX_WANTLEN = (PKT_LEN_SIZE + PKT_WANT_PREFIX.len + hash.hexLen(repo_opts.hash) + 1);
-
-    var written = line.written();
-
-    if (written.len > (PKT_MAX_SIZE - (PKT_MAX_WANTLEN + 1))) {
-        return error.InvalidPacket;
-    }
-
-    try commandSize(&command_size_buf, written.len);
-    @memcpy(written[0..4], &command_size_buf);
-
-    try buf.appendSlice(allocator, written);
+    try appendPktLine(allocator, buf, "{s}{s} {s}\n", .{ PKT_WANT_PREFIX, &head.oid, caps_str.written() });
 }
 
 pub fn bufferWants(
@@ -361,15 +352,7 @@ pub fn bufferWants(
             continue;
         }
 
-        var command_size_buf = [_]u8{'0'} ** 4;
-
-        const line = try std.fmt.allocPrint(allocator, "{s}{s}{s}\n", .{ &command_size_buf, PKT_WANT_PREFIX, &head.oid });
-        defer allocator.free(line);
-
-        try commandSize(&command_size_buf, line.len);
-        @memcpy(line[0..4], &command_size_buf);
-
-        try buf.appendSlice(allocator, line);
+        try appendPktLine(allocator, buf, "{s}{s}\n", .{ PKT_WANT_PREFIX, &head.oid });
     }
 
     try buf.appendSlice(allocator, "0000");
