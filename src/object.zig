@@ -197,60 +197,8 @@ fn writeTree(
     const tree_contents = try std.mem.join(allocator, "", tree.entries.values());
     defer allocator.free(tree_contents);
 
-    // create tree header
-    var header_buffer = [_]u8{0} ** 32;
-    const header_str = try std.fmt.bufPrint(&header_buffer, "tree {}\x00", .{tree_contents.len});
-
-    // create tree
-    const tree_bytes = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, tree_contents });
-    defer allocator.free(tree_bytes);
-
-    switch (repo_kind) {
-        .git => {
-            // calc the hash of its contents
-            try hash.hashBuffer(repo_opts.hash, tree_bytes, hash_bytes_buffer);
-            const tree_hash_hex = std.fmt.bytesToHex(hash_bytes_buffer, .lower);
-
-            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
-            defer objects_dir.close(io);
-
-            // make the two char dir
-            var tree_hash_prefix_dir = try objects_dir.createDirPathOpen(io, tree_hash_hex[0..2], .{});
-            defer tree_hash_prefix_dir.close(io);
-            const tree_hash_suffix = tree_hash_hex[2..];
-
-            // exit early if there is nothing to commit
-            if (tree_hash_prefix_dir.openFile(io, tree_hash_suffix, .{ .allow_directory = false })) |tree_hash_suffix_file| {
-                tree_hash_suffix_file.close(io);
-                return;
-            } else |err| switch (err) {
-                error.FileNotFound => {},
-                else => |e| return e,
-            }
-
-            // create lock file
-            var lock = try fs.LockFile.init(io, tree_hash_prefix_dir, tree_hash_suffix ++ ".uncompressed");
-            defer lock.deinit(io);
-            try lock.lock_file.writeStreamingAll(io, tree_bytes);
-
-            // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(io, tree_hash_prefix_dir, tree_hash_suffix);
-            defer compressed_lock.deinit(io);
-            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
-            compressed_lock.success = true;
-        },
-        .xit => {
-            var reader = std.Io.Reader.fixed(tree_contents);
-
-            var hasher = hash.Hasher(repo_opts.hash).init();
-            hasher.update(header_str);
-
-            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
-            var hashed = reader.hashed(hasher, &hash_buffer);
-
-            try chunk.writeChunks(repo_opts, state, io, &hashed, tree_contents.len, "tree", hash_bytes_buffer);
-        },
-    }
+    var reader = std.Io.Reader.fixed(tree_contents);
+    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .tree, .size = tree_contents.len }, hash_bytes_buffer);
 }
 
 fn sign(
@@ -482,67 +430,17 @@ pub fn writeCommit(
     };
     defer allocator.free(commit_contents);
 
-    // create commit header
-    var header_buffer = [_]u8{0} ** 32;
-    const header_str = try std.fmt.bufPrint(&header_buffer, "commit {}\x00", .{commit_contents.len});
-
-    // create commit
-    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, commit_contents });
-    defer allocator.free(obj_content);
-
     var commit_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var reader = std.Io.Reader.fixed(commit_contents);
+    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .commit, .size = commit_contents.len }, &commit_hash_bytes_buffer);
 
-    switch (repo_kind) {
-        .git => {
-            // calc the hash of its contents
-            try hash.hashBuffer(repo_opts.hash, obj_content, &commit_hash_bytes_buffer);
-            const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
+    // write commit id to ref
+    var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+    const ref_path = try ref.toPath(&ref_path_buffer);
+    const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
+    try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
 
-            // open the objects dir
-            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
-            defer objects_dir.close(io);
-
-            // make the two char dir
-            var commit_hash_prefix_dir = try objects_dir.createDirPathOpen(io, commit_hash_hex[0..2], .{});
-            defer commit_hash_prefix_dir.close(io);
-            const commit_hash_suffix = commit_hash_hex[2..];
-
-            // create lock file
-            var lock = try fs.LockFile.init(io, commit_hash_prefix_dir, commit_hash_suffix ++ ".uncompressed");
-            defer lock.deinit(io);
-            try lock.lock_file.writeStreamingAll(io, obj_content);
-
-            // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(io, commit_hash_prefix_dir, commit_hash_suffix);
-            defer compressed_lock.deinit(io);
-            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
-            compressed_lock.success = true;
-
-            // write commit id to ref
-            var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-            const ref_path = try ref.toPath(&ref_path_buffer);
-            try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
-        },
-        .xit => {
-            var reader = std.Io.Reader.fixed(commit_contents);
-
-            var hasher = hash.Hasher(repo_opts.hash).init();
-            hasher.update(header_str);
-
-            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
-            var hashed = reader.hashed(hasher, &hash_buffer);
-
-            try chunk.writeChunks(repo_opts, state, io, &hashed, commit_contents.len, "commit", &commit_hash_bytes_buffer);
-
-            // write commit id to ref
-            var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-            const ref_path = try ref.toPath(&ref_path_buffer);
-            const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
-            try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
-        },
-    }
-
-    return std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
+    return commit_hash_hex;
 }
 
 pub fn writeTag(
@@ -598,54 +496,9 @@ pub fn writeTag(
     };
     defer allocator.free(tag_contents);
 
-    // create tag header
-    var header_buffer = [_]u8{0} ** 32;
-    const header_str = try std.fmt.bufPrint(&header_buffer, "tag {}\x00", .{tag_contents.len});
-
-    // create tag
-    const obj_content = try std.fmt.allocPrint(allocator, "{s}{s}", .{ header_str, tag_contents });
-    defer allocator.free(obj_content);
-
     var tag_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-
-    switch (repo_kind) {
-        .git => {
-            // calc the hash of its contents
-            try hash.hashBuffer(repo_opts.hash, obj_content, &tag_hash_bytes_buffer);
-            const tag_hash_hex = std.fmt.bytesToHex(tag_hash_bytes_buffer, .lower);
-
-            // open the objects dir
-            var objects_dir = try state.core.repo_dir.openDir(io, "objects", .{});
-            defer objects_dir.close(io);
-
-            // make the two char dir
-            var tag_hash_prefix_dir = try objects_dir.createDirPathOpen(io, tag_hash_hex[0..2], .{});
-            defer tag_hash_prefix_dir.close(io);
-            const tag_hash_suffix = tag_hash_hex[2..];
-
-            // create lock file
-            var lock = try fs.LockFile.init(io, tag_hash_prefix_dir, tag_hash_suffix ++ ".uncompressed");
-            defer lock.deinit(io);
-            try lock.lock_file.writeStreamingAll(io, obj_content);
-
-            // create compressed lock file
-            var compressed_lock = try fs.LockFile.init(io, tag_hash_prefix_dir, tag_hash_suffix);
-            defer compressed_lock.deinit(io);
-            try compressZlib(repo_opts.buffer_size, io, lock.lock_file, compressed_lock.lock_file);
-            compressed_lock.success = true;
-        },
-        .xit => {
-            var reader = std.Io.Reader.fixed(tag_contents);
-
-            var hasher = hash.Hasher(repo_opts.hash).init();
-            hasher.update(header_str);
-
-            var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
-            var hashed = reader.hashed(hasher, &hash_buffer);
-
-            try chunk.writeChunks(repo_opts, state, io, &hashed, tag_contents.len, "tag", &tag_hash_bytes_buffer);
-        },
-    }
+    var reader = std.Io.Reader.fixed(tag_contents);
+    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .tag, .size = tag_contents.len }, &tag_hash_bytes_buffer);
 
     return std.fmt.bytesToHex(tag_hash_bytes_buffer, .lower);
 }
