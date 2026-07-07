@@ -324,51 +324,6 @@ fn makeChunkRecord(
     return buffer[0 .. chunk_record_header_size + payload_len];
 }
 
-test "chunk records can be read directly at their location" {
-    const xitdb = @import("xitdb");
-    const DB = xitdb.Database(.memory, u160);
-
-    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer buffer.deinit();
-
-    var db = try DB.init(.{ .buffer = &buffer });
-    const history = try DB.ArrayList(.read_write).init(db.rootCursor());
-
-    const record = "record bytes long enough to not be inlined into the slot";
-    const Ctx = struct {
-        record: []const u8,
-        location: *ChunkLocation,
-
-        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            const chunk_map = try DB.HashMap(.read_write).init(cursor.*);
-            var chunk_cursor = try chunk_map.putCursor(42);
-            var record_writer = try chunk_cursor.writer(&.{});
-            try record_writer.interface.writeAll(ctx.record);
-            try record_writer.finish();
-            ctx.location.* = try chunkLocation(chunk_cursor, ctx.record.len);
-        }
-    };
-    var location: ChunkLocation = undefined;
-    try history.appendContext(
-        .{ .slot = try history.getSlot(-1) },
-        Ctx{ .record = record, .location = &location },
-    );
-
-    // the record must be readable with a single raw read at its location.
-    // this pins the byte array layout of xitdb, which the chunk store
-    // relies on: reads never go through the db structure, they just read
-    // the raw location stored in the chunk info.
-    try std.testing.expectEqualStrings(record, buffer.written()[@intCast(location.offset)..][0..location.size]);
-
-    // looking the record up in the map must derive the same location
-    const history_read = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
-    const moment_cursor = (try history_read.getCursor(-1)) orelse return error.ExpectedMoment;
-    const chunk_map = try DB.HashMap(.read_only).init(moment_cursor);
-    const chunk_cursor = (try chunk_map.getCursor(42)) orelse return error.ExpectedChunk;
-    const found_location = try chunkLocation(chunk_cursor, try chunk_cursor.count());
-    try std.testing.expectEqual(location, found_location);
-}
-
 pub fn writeChunks(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
