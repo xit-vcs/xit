@@ -1723,11 +1723,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                                 }
                             }
 
-                            // add conflicts to index
-                            for (conflicts.keys(), conflicts.values()) |path, conflict| {
-                                try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
-                            }
-
                             // update the index
                             try index.write(allocator, state, io);
 
