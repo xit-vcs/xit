@@ -181,51 +181,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             path: []const u8,
             entry: tr.TreeEntry(repo_opts.hash),
         ) !LineIterator(repo_kind, repo_opts) {
-            const oid_hex = std.fmt.bytesToHex(&entry.oid, .lower);
-
-            // treat submodules as binary files so they are ignored in diffs and patches
-            if (entry.mode.content.object_type == .gitlink) {
-                var offsets: std.ArrayList(usize) = .empty;
-                errdefer offsets.deinit(allocator);
-                return .{
-                    .io = io,
-                    .allocator = allocator,
-                    .path = path,
-                    .oid = entry.oid,
-                    .oid_hex = oid_hex,
-                    .mode = entry.mode,
-                    .line_offsets = try offsets.toOwnedSlice(allocator),
-                    .current_line = 0,
-                    .source = .binary,
-                };
-            }
-
-            var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
-            errdefer object_reader.deinit();
-            var iter = LineIterator(repo_kind, repo_opts){
-                .io = io,
-                .allocator = allocator,
-                .path = path,
-                .oid = entry.oid,
-                .oid_hex = oid_hex,
-                .mode = entry.mode,
-                .line_offsets = undefined,
-                .current_line = 0,
-                .source = .{
-                    .object = .{
-                        .object_reader = object_reader,
-                        .eof = false,
-                    },
-                },
-            };
-
-            try iter.validateLines();
-
-            if (in_memory and iter.source == .object) {
-                try iter.convertToBuffer();
-            }
-
-            return iter;
+            return initFromOid(state, io, allocator, path, &entry.oid, entry.mode);
         }
 
         pub fn initFromOid(
