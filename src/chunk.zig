@@ -64,6 +64,10 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
             0x0000d93777577000, // 16MB
             0x0000db3777577000, // unused except for NC 3
         };
+        comptime {
+            // each mask's index is its number of one-bits
+            for (masks, 0..) |mask, i| if (mask != 0) std.debug.assert(@popCount(mask) == i);
+        }
         const mask_s = masks[bits + normalization];
         const mask_l = masks[bits - normalization];
 
@@ -84,11 +88,9 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
         }
 
         fn read(self: FastCdc(opts), reader: *std.Io.Reader, buffer: *[opts.max_size]u8) ![]const u8 {
-            var writer = std.Io.Writer.fixed(buffer);
-
             var remaining = self.remaining;
             if (remaining <= opts.min_size) {
-                try reader.streamExact(&writer, remaining);
+                try reader.readSliceAll(buffer[0..remaining]);
                 return buffer[0..remaining];
             }
 
@@ -100,7 +102,7 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
             }
 
             var index = opts.min_size - 1;
-            try reader.streamExact(&writer, index);
+            try reader.readSliceAll(buffer[0..index]);
 
             var h: u64 = 0;
             while (index < center) {
@@ -137,8 +139,7 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
                 var buffer = [_]u8{0} ** std.crypto.hash.Md5.digest_length;
                 std.crypto.hash.Md5.hash(&seed, &buffer, .{});
 
-                var reader = std.Io.Reader.fixed(&buffer);
-                num.* = reader.takeInt(u64, .big) catch unreachable;
+                num.* = std.mem.readInt(u64, buffer[0..8], .big);
             }
             return nums;
         }
