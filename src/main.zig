@@ -207,123 +207,73 @@ pub fn runPrint(
     cwd_path: []const u8,
     run_opts: RunOpts,
 ) !void {
-    run(repo_kind, any_repo_opts, io, allocator, args, cwd_path, run_opts) catch |err| switch (err) {
-        error.RepoNotFound => {
-            try run_opts.err.print(
-                \\repo not found, dummy.
-                \\either you're in the wrong place or you need to make a new one like this:
-                \\
-                \\
-            , .{});
-            try cmd.printHelp(.init, run_opts.err);
-            return error.HandledError;
-        },
-        error.RepoFormatTooOld => {
-            try run_opts.err.print(
-                \\this repo was made by an older version of xit,
-                \\and the format has changed since then.
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.SharedChunkStoreNotSupported => {
-            try run_opts.err.print(
-                \\this repo shares its chunk store with other repos,
-                \\so it can't be garbage collected on its own.
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.RepoAlreadyExists => {
-            try run_opts.err.print(
-                \\repo already exists, dummy.
-                \\two repos in the same directory makes no sense.
-                \\think about it.
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.CannotRemoveFileWithStagedAndUnstagedChanges, error.CannotRemoveFileWithStagedChanges, error.CannotRemoveFileWithUnstagedChanges => {
-            try run_opts.err.print("a file has uncommitted changes. if you really want to do it, throw caution into the wind by adding the -f flag.\n", .{});
-            return error.HandledError;
-        },
-        error.EmptyCommit => {
-            try run_opts.err.print("you haven't added anything to commit yet. if you really want to commit anyway, add the --allow-empty flag and no one will judge you.\n", .{});
-            return error.HandledError;
-        },
-        error.AddIndexPathNotFound => {
-            try run_opts.err.print("a path you are adding does not exist\n", .{});
-            return error.HandledError;
-        },
-        error.RemoveIndexPathNotFound => {
-            try run_opts.err.print("a path you are removing does not exist\n", .{});
-            return error.HandledError;
-        },
-        error.RecursiveOptionRequired => {
-            try run_opts.err.print("to do this on a dir, add the -r flag\n", .{});
-            return error.HandledError;
-        },
-        error.RefNotFound => {
-            try run_opts.err.print("ref does not exist\n", .{});
-            return error.HandledError;
-        },
-        error.BranchAlreadyExists => {
-            try run_opts.err.print("branch already exists\n", .{});
-            return error.HandledError;
-        },
-        error.UserConfigNotFound => {
-            try run_opts.err.print(
-                \\you need to set your name and email, mystery man. you can do it like this:
-                \\
-                \\    xit config add user.name foo
-                \\    xit config add user.email foo@bar
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.SubmodulesNotSupported => {
-            try run_opts.err.print("repos with submodules aren't supported right now, sowwy\n", .{});
-            return error.HandledError;
-        },
-        error.InvalidMergeSource => {
-            try run_opts.err.print("your merge source doesn't look right and you should feel bad\n", .{});
-            return error.HandledError;
-        },
-        error.InvalidSwitchTarget => {
-            try run_opts.err.print("your switch target doesn't look right and you should feel bad\n", .{});
-            return error.HandledError;
-        },
-        error.UnfinishedMergeInProgress => {
-            try run_opts.err.print("there is an unfinished merge in progress! use `--continue` or `--abort` to finish it.\n", .{});
-            return error.HandledError;
-        },
-        error.OtherMergeInProgress => {
-            try run_opts.err.print("there's another merge already in progress! use `--continue` or `--abort` to finish it.\n", .{});
-            return error.HandledError;
-        },
-        error.CannotContinueMergeWithUnresolvedConflicts => {
-            try run_opts.err.print("you haven't resolved all the conflicts! after fixing, run `xit add` on them.\n", .{});
-            return error.HandledError;
-        },
-        error.RemoteRefContainsCommitsNotFoundLocally => {
-            try run_opts.err.print(
-                \\a ref you are pushing to contains commits you don't have locally.
-                \\you either need to retrieve them with `xit fetch` and then `xit merge`,
-                \\or if you want to obliterate them like a badass, run this command with `-f`.
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.RemoteRefContainsIncompatibleHistory => {
-            try run_opts.err.print(
-                \\a ref you are pushing to has commits with an incompatible history.
-                \\if you want to obliterate them like a badass, run this command with `-f`.
-                \\
-            , .{});
-            return error.HandledError;
-        },
-        error.BrokenPipe => {},
-        else => |e| return e,
+    run(repo_kind, any_repo_opts, io, allocator, args, cwd_path, run_opts) catch |err| {
+        const message: []const u8 = switch (err) {
+            error.RepoNotFound => {
+                try run_opts.err.print(
+                    \\repo not found, dummy.
+                    \\either you're in the wrong place or you need to make a new one like this:
+                    \\
+                    \\
+                , .{});
+                try cmd.printHelp(.init, run_opts.err);
+                return error.HandledError;
+            },
+            error.BrokenPipe => return,
+            error.RepoFormatTooOld =>
+            \\this repo was made by an older version of xit,
+            \\and the format has changed since then.
+            \\
+            ,
+            error.SharedChunkStoreNotSupported =>
+            \\this repo shares its chunk store with other repos,
+            \\so it can't be garbage collected on its own.
+            \\
+            ,
+            error.RepoAlreadyExists =>
+            \\repo already exists, dummy.
+            \\two repos in the same directory makes no sense.
+            \\think about it.
+            \\
+            ,
+            error.CannotRemoveFileWithStagedAndUnstagedChanges,
+            error.CannotRemoveFileWithStagedChanges,
+            error.CannotRemoveFileWithUnstagedChanges,
+            => "a file has uncommitted changes. if you really want to do it, throw caution into the wind by adding the -f flag.\n",
+            error.EmptyCommit => "you haven't added anything to commit yet. if you really want to commit anyway, add the --allow-empty flag and no one will judge you.\n",
+            error.AddIndexPathNotFound => "a path you are adding does not exist\n",
+            error.RemoveIndexPathNotFound => "a path you are removing does not exist\n",
+            error.RecursiveOptionRequired => "to do this on a dir, add the -r flag\n",
+            error.RefNotFound => "ref does not exist\n",
+            error.BranchAlreadyExists => "branch already exists\n",
+            error.UserConfigNotFound =>
+            \\you need to set your name and email, mystery man. you can do it like this:
+            \\
+            \\    xit config add user.name foo
+            \\    xit config add user.email foo@bar
+            \\
+            ,
+            error.SubmodulesNotSupported => "repos with submodules aren't supported right now, sowwy\n",
+            error.InvalidMergeSource => "your merge source doesn't look right and you should feel bad\n",
+            error.InvalidSwitchTarget => "your switch target doesn't look right and you should feel bad\n",
+            error.UnfinishedMergeInProgress => "there is an unfinished merge in progress! use `--continue` or `--abort` to finish it.\n",
+            error.OtherMergeInProgress => "there's another merge already in progress! use `--continue` or `--abort` to finish it.\n",
+            error.CannotContinueMergeWithUnresolvedConflicts => "you haven't resolved all the conflicts! after fixing, run `xit add` on them.\n",
+            error.RemoteRefContainsCommitsNotFoundLocally =>
+            \\a ref you are pushing to contains commits you don't have locally.
+            \\you either need to retrieve them with `xit fetch` and then `xit merge`,
+            \\or if you want to obliterate them like a badass, run this command with `-f`.
+            \\
+            ,
+            error.RemoteRefContainsIncompatibleHistory =>
+            \\a ref you are pushing to has commits with an incompatible history.
+            \\if you want to obliterate them like a badass, run this command with `-f`.
+            \\
+            ,
+            else => |e| return e,
+        };
+        try run_opts.err.print("{s}", .{message});
+        return error.HandledError;
     };
 }
 
