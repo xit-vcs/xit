@@ -1373,6 +1373,26 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             }
         }
 
+        pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer) !void {
+            const offsets = hunk.offsets();
+            try writer.print("@@ -{},{} +{},{} @@\n", .{
+                offsets.del_start,
+                offsets.del_count,
+                offsets.ins_start,
+                offsets.ins_count,
+            });
+            for (hunk.edits.items) |edit| {
+                const line_iter, const line_num, const prefix = switch (edit) {
+                    .eql => |eql| .{ self.line_iter_b, eql.new_line.num, " " },
+                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+" },
+                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-" },
+                };
+                const line = try line_iter.get(line_num);
+                defer line_iter.free(line);
+                try writer.print("{s} {s}\n", .{ prefix, line });
+            }
+        }
+
         pub fn deinit(self: *HunkIterator(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.myers_diff.deinit();
             self.arena.deinit();

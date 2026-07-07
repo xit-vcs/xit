@@ -420,33 +420,7 @@ fn runCommand(
                 while (try hunk_iter.next(allocator)) |*hunk_ptr| {
                     var hunk = hunk_ptr.*;
                     defer hunk.deinit(allocator);
-                    const offsets = hunk.offsets();
-                    try run_opts.out.print("@@ -{},{} +{},{} @@\n", .{
-                        offsets.del_start,
-                        offsets.del_count,
-                        offsets.ins_start,
-                        offsets.ins_count,
-                    });
-                    for (hunk.edits.items) |edit| {
-                        const line = switch (edit) {
-                            .eql => |eql| try hunk_iter.line_iter_b.get(eql.new_line.num),
-                            .ins => |ins| try hunk_iter.line_iter_b.get(ins.new_line.num),
-                            .del => |del| try hunk_iter.line_iter_a.get(del.old_line.num),
-                        };
-                        defer switch (edit) {
-                            .eql => hunk_iter.line_iter_b.free(line),
-                            .ins => hunk_iter.line_iter_b.free(line),
-                            .del => hunk_iter.line_iter_a.free(line),
-                        };
-                        try run_opts.out.print("{s} {s}\n", .{
-                            switch (edit) {
-                                .eql => " ",
-                                .ins => "+",
-                                .del => "-",
-                            },
-                            line,
-                        });
-                    }
+                    try hunk_iter.writeHunk(&hunk, run_opts.out);
                 }
             }
         },
