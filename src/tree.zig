@@ -119,7 +119,11 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
         ) !std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)) {
             if (oid_maybe) |oid| {
-                const object = try obj.Object(repo_kind, repo_opts).init(state, io, self.arena.allocator(), oid);
+                var object = try obj.Object(repo_kind, repo_opts).init(state, io, self.arena.allocator(), oid);
+                // the content is fully parsed during init and lives in the arena,
+                // so only the reader (which holds an open file in the git backend)
+                // needs to be closed. a full deinit would free the entries.
+                defer object.object_reader.deinit();
                 return switch (object.content) {
                     .blob, .tag => .empty,
                     .tree => |tree| tree.entries,
