@@ -229,6 +229,158 @@ pub fn MergeConflict(comptime hash_kind: hash.HashKind) type {
     };
 }
 
+/// the lines from one side of a conflicted region
+const LineRange = struct {
+    lines: std.ArrayList([]const u8),
+
+    fn deinit(self: *LineRange, allocator: std.mem.Allocator) void {
+        for (self.lines.items) |line| {
+            allocator.free(line);
+        }
+        self.lines.deinit(allocator);
+    }
+
+    fn eql(self: LineRange, other: LineRange) bool {
+        if (self.lines.items.len != other.lines.items.len) {
+            return false;
+        }
+        for (self.lines.items, other.lines.items) |our_line, their_line| {
+            if (!std.mem.eql(u8, our_line, their_line)) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+/// the marker lines that surround a conflicted region in the merged file
+const ConflictMarkers = struct {
+    target: []u8,
+    base: []u8,
+    source: []u8,
+
+    const separate = "=======";
+
+    fn init(allocator: std.mem.Allocator, base_oid: []const u8, target_name: []const u8, source_name: []const u8) !ConflictMarkers {
+        const target = try std.fmt.allocPrint(allocator, "<<<<<<< target ({s})", .{target_name});
+        errdefer allocator.free(target);
+        const base = try std.fmt.allocPrint(allocator, "||||||| base ({s})", .{base_oid});
+        errdefer allocator.free(base);
+        const source = try std.fmt.allocPrint(allocator, ">>>>>>> source ({s})", .{source_name});
+        errdefer allocator.free(source);
+        return .{ .target = target, .base = base, .source = source };
+    }
+
+    fn deinit(self: *ConflictMarkers, allocator: std.mem.Allocator) void {
+        allocator.free(self.target);
+        allocator.free(self.base);
+        allocator.free(self.source);
+    }
+};
+
+/// append the resolution of a conflicted region to the line buffer: the
+/// autoresolved side if two sides agree, otherwise all three sides wrapped
+/// in conflict markers. returns true if there was a conflict. the lines are
+/// moved (not copied) out of the given ranges.
+fn appendResolvedOrConflict(
+    allocator: std.mem.Allocator,
+    line_buffer: *std.ArrayList([]const u8),
+    markers: *const ConflictMarkers,
+    base_lines: *LineRange,
+    target_lines: *LineRange,
+    source_lines: *LineRange,
+) !bool {
+    // if base == target or target == source, return source to autoresolve conflict
+    if (base_lines.eql(target_lines.*) or target_lines.eql(source_lines.*)) {
+        try line_buffer.appendSlice(allocator, source_lines.lines.items);
+        source_lines.lines.clearAndFree(allocator);
+        return false;
+    }
+    // if base == source, return target to autoresolve conflict
+    else if (base_lines.eql(source_lines.*)) {
+        try line_buffer.appendSlice(allocator, target_lines.lines.items);
+        target_lines.lines.clearAndFree(allocator);
+        return false;
+    }
+
+    // return conflict
+
+    const target_marker = try allocator.dupe(u8, markers.target);
+    {
+        errdefer allocator.free(target_marker);
+        try line_buffer.append(allocator, target_marker);
+    }
+    try line_buffer.appendSlice(allocator, target_lines.lines.items);
+    target_lines.lines.clearAndFree(allocator);
+
+    const base_marker = try allocator.dupe(u8, markers.base);
+    {
+        errdefer allocator.free(base_marker);
+        try line_buffer.append(allocator, base_marker);
+    }
+    try line_buffer.appendSlice(allocator, base_lines.lines.items);
+    base_lines.lines.clearAndFree(allocator);
+
+    const separate_marker = try allocator.dupe(u8, ConflictMarkers.separate);
+    {
+        errdefer allocator.free(separate_marker);
+        try line_buffer.append(allocator, separate_marker);
+    }
+
+    try line_buffer.appendSlice(allocator, source_lines.lines.items);
+    source_lines.lines.clearAndFree(allocator);
+    const source_marker = try allocator.dupe(u8, markers.source);
+    {
+        errdefer allocator.free(source_marker);
+        try line_buffer.append(allocator, source_marker);
+    }
+
+    return true;
+}
+
+/// copy as much of the current line as we can into `buf`, advancing to the
+/// next line in the line buffer when the current one is finished. a newline
+/// is added between lines, including after the final buffered line when
+/// `more_follows` says the underlying stream isn't done yet.
+fn drainCurrentLine(
+    allocator: std.mem.Allocator,
+    line_buffer: *std.ArrayList([]const u8),
+    current_line_ptr: *?[]const u8,
+    more_follows: bool,
+    buf: []u8,
+) usize {
+    const current_line = current_line_ptr.* orelse return 0;
+    const size = @min(buf.len, current_line.len);
+    var line_finished = current_line.len == 0;
+    if (size > 0) {
+        // copy as much from the current line as we can
+        @memcpy(buf[0..size], current_line[0..size]);
+        const new_current_line = current_line[size..];
+        line_finished = new_current_line.len == 0;
+        current_line_ptr.* = new_current_line;
+    }
+    // if we have copied the entire line
+    if (line_finished) {
+        // if there is room for the newline character
+        if (buf.len > size) {
+            // remove the line from the line buffer
+            const line = line_buffer.orderedRemove(0);
+            allocator.free(line);
+            if (line_buffer.items.len > 0) {
+                current_line_ptr.* = line_buffer.items[0];
+            } else {
+                current_line_ptr.* = null;
+            }
+            // if we aren't at the very last line, add a newline character
+            if (current_line_ptr.* != null or more_follows) {
+                buf[size] = '\n';
+                return size + 1;
+            }
+        }
+    }
+    return size;
+}
+
 fn writeBlobWithDiff3(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -272,10 +424,8 @@ fn writeBlobWithDiff3(
         line_buffer.deinit(allocator);
     }
 
-    const LineRange = struct {
-        lines: std.ArrayList([]const u8),
-
-        fn init(inner_allocator: std.mem.Allocator, iter: *df.LineIterator(repo_kind, repo_opts), range_maybe: ?df.Diff3Iterator(repo_kind, repo_opts).Range) !@This() {
+    const initLineRange = struct {
+        fn init(inner_allocator: std.mem.Allocator, iter: *df.LineIterator(repo_kind, repo_opts), range_maybe: ?df.Diff3Iterator(repo_kind, repo_opts).Range) !LineRange {
             var lines: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (lines.items) |line| {
@@ -298,33 +448,11 @@ fn writeBlobWithDiff3(
                 .lines = lines,
             };
         }
-
-        fn deinit(self: *@This(), inner_allocator: std.mem.Allocator) void {
-            for (self.lines.items) |line| {
-                inner_allocator.free(line);
-            }
-            self.lines.deinit(inner_allocator);
-        }
-
-        fn eql(self: @This(), other: @This()) bool {
-            if (self.lines.items.len != other.lines.items.len) {
-                return false;
-            }
-            for (self.lines.items, other.lines.items) |our_line, their_line| {
-                if (!std.mem.eql(u8, our_line, their_line)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    };
+    }.init;
 
     const Stream = struct {
         allocator: std.mem.Allocator,
-        target_marker: []u8,
-        base_marker: []u8,
-        separate_marker: []u8,
-        source_marker: []u8,
+        markers: *const ConflictMarkers,
         base_iter: *df.LineIterator(repo_kind, repo_opts),
         target_iter: *df.LineIterator(repo_kind, repo_opts),
         source_iter: *df.LineIterator(repo_kind, repo_opts),
@@ -362,36 +490,8 @@ fn writeBlobWithDiff3(
             }
 
             fn readStep(self: @This(), buf: []u8) !usize {
-                if (self.parent.current_line) |current_line| {
-                    const size = @min(buf.len, current_line.len);
-                    var line_finished = current_line.len == 0;
-                    if (size > 0) {
-                        // copy as much from the current line as we can
-                        @memcpy(buf[0..size], current_line[0..size]);
-                        const new_current_line = current_line[size..];
-                        line_finished = new_current_line.len == 0;
-                        self.parent.current_line = new_current_line;
-                    }
-                    // if we have copied the entire line
-                    if (line_finished) {
-                        // if there is room for the newline character
-                        if (buf.len > size) {
-                            // remove the line from the line buffer
-                            const line = self.parent.line_buffer.orderedRemove(0);
-                            self.parent.allocator.free(line);
-                            if (self.parent.line_buffer.items.len > 0) {
-                                self.parent.current_line = self.parent.line_buffer.items[0];
-                            } else {
-                                self.parent.current_line = null;
-                            }
-                            // if we aren't at the very last line, add a newline character
-                            if (self.parent.current_line != null or !self.parent.diff3_iter.finished) {
-                                buf[size] = '\n';
-                                return size + 1;
-                            }
-                        }
-                    }
-                    return size;
+                if (self.parent.current_line != null) {
+                    return drainCurrentLine(self.parent.allocator, self.parent.line_buffer, &self.parent.current_line, !self.parent.diff3_iter.finished, buf);
                 }
 
                 if (try self.parent.diff3_iter.next()) |chunk| {
@@ -409,66 +509,19 @@ fn writeBlobWithDiff3(
                             }
                         },
                         .conflict => |conflict| {
-                            var base_lines = try LineRange.init(self.parent.allocator, self.parent.base_iter, conflict.o_range);
+                            var base_lines = try initLineRange(self.parent.allocator, self.parent.base_iter, conflict.o_range);
                             defer base_lines.deinit(self.parent.allocator);
-                            var target_lines = try LineRange.init(self.parent.allocator, self.parent.target_iter, conflict.a_range);
+                            var target_lines = try initLineRange(self.parent.allocator, self.parent.target_iter, conflict.a_range);
                             defer target_lines.deinit(self.parent.allocator);
-                            var source_lines = try LineRange.init(self.parent.allocator, self.parent.source_iter, conflict.b_range);
+                            var source_lines = try initLineRange(self.parent.allocator, self.parent.source_iter, conflict.b_range);
                             defer source_lines.deinit(self.parent.allocator);
 
-                            // if base == target or target == source, return source to autoresolve conflict
-                            if (base_lines.eql(target_lines) or target_lines.eql(source_lines)) {
-                                if (source_lines.lines.items.len > 0) {
-                                    try self.parent.line_buffer.appendSlice(self.parent.allocator, source_lines.lines.items);
-                                    self.parent.current_line = self.parent.line_buffer.items[0];
-                                    source_lines.lines.clearAndFree(self.parent.allocator);
-                                }
-                                return self.readStep(buf);
+                            if (try appendResolvedOrConflict(self.parent.allocator, self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
+                                self.parent.has_conflict = true;
                             }
-                            // if base == source, return target to autoresolve conflict
-                            else if (base_lines.eql(source_lines)) {
-                                if (target_lines.lines.items.len > 0) {
-                                    try self.parent.line_buffer.appendSlice(self.parent.allocator, target_lines.lines.items);
-                                    self.parent.current_line = self.parent.line_buffer.items[0];
-                                    target_lines.lines.clearAndFree(self.parent.allocator);
-                                }
-                                return self.readStep(buf);
+                            if (self.parent.line_buffer.items.len > 0) {
+                                self.parent.current_line = self.parent.line_buffer.items[0];
                             }
-
-                            // return conflict
-
-                            const target_marker = try self.parent.allocator.dupe(u8, self.parent.target_marker);
-                            {
-                                errdefer self.parent.allocator.free(target_marker);
-                                try self.parent.line_buffer.append(self.parent.allocator, target_marker);
-                            }
-                            try self.parent.line_buffer.appendSlice(self.parent.allocator, target_lines.lines.items);
-                            target_lines.lines.clearAndFree(self.parent.allocator);
-
-                            const base_marker = try self.parent.allocator.dupe(u8, self.parent.base_marker);
-                            {
-                                errdefer self.parent.allocator.free(base_marker);
-                                try self.parent.line_buffer.append(self.parent.allocator, base_marker);
-                            }
-                            try self.parent.line_buffer.appendSlice(self.parent.allocator, base_lines.lines.items);
-                            base_lines.lines.clearAndFree(self.parent.allocator);
-
-                            const separate_marker = try self.parent.allocator.dupe(u8, self.parent.separate_marker);
-                            {
-                                errdefer self.parent.allocator.free(separate_marker);
-                                try self.parent.line_buffer.append(self.parent.allocator, separate_marker);
-                            }
-
-                            try self.parent.line_buffer.appendSlice(self.parent.allocator, source_lines.lines.items);
-                            source_lines.lines.clearAndFree(self.parent.allocator);
-                            const source_marker = try self.parent.allocator.dupe(u8, self.parent.source_marker);
-                            {
-                                errdefer self.parent.allocator.free(source_marker);
-                                try self.parent.line_buffer.append(self.parent.allocator, source_marker);
-                            }
-
-                            self.parent.current_line = self.parent.line_buffer.items[0];
-                            self.parent.has_conflict = true;
                         },
                     }
                     return self.readStep(buf);
@@ -527,22 +580,13 @@ fn writeBlobWithDiff3(
         }
     };
 
-    const target_marker = try std.fmt.allocPrint(allocator, "<<<<<<< target ({s})", .{target_name});
-    defer allocator.free(target_marker);
-    const base_marker = try std.fmt.allocPrint(allocator, "||||||| base ({s})", .{base_oid});
-    defer allocator.free(base_marker);
-    const separate_marker = try std.fmt.allocPrint(allocator, "=======", .{});
-    defer allocator.free(separate_marker);
-    const source_marker = try std.fmt.allocPrint(allocator, ">>>>>>> source ({s})", .{source_name});
-    defer allocator.free(source_marker);
+    var markers = try ConflictMarkers.init(allocator, base_oid, target_name, source_name);
+    defer markers.deinit(allocator);
 
     var stream_buffer = [_]u8{0} ** repo_opts.buffer_size;
     var stream = Stream{
         .allocator = allocator,
-        .target_marker = target_marker,
-        .base_marker = base_marker,
-        .separate_marker = separate_marker,
-        .source_marker = source_marker,
+        .markers = &markers,
         .base_iter = &base_iter,
         .target_iter = &target_iter,
         .source_iter = &source_iter,
@@ -729,16 +773,14 @@ fn writeBlobWithPatches(
         }
     }.readLine;
 
-    const LineRange = struct {
-        lines: std.ArrayList([]const u8),
-
+    const initLineRange = struct {
         fn init(
             inner_state: rp.Repo(.xit, repo_opts).State(.read_only),
             inner_io: std.Io,
             inner_allocator: std.mem.Allocator,
             patch_id_to_offset_list_ptr: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
             line_ids: []patch.LineId(repo_opts.hash),
-        ) !@This() {
+        ) !LineRange {
             var lines: std.ArrayList([]const u8) = .empty;
             errdefer {
                 for (lines.items) |line| {
@@ -756,35 +798,13 @@ fn writeBlobWithPatches(
                 .lines = lines,
             };
         }
-
-        fn deinit(self: *@This(), inner_allocator: std.mem.Allocator) void {
-            for (self.lines.items) |line| {
-                inner_allocator.free(line);
-            }
-            self.lines.deinit(inner_allocator);
-        }
-
-        fn eql(self: @This(), other: @This()) bool {
-            if (self.lines.items.len != other.lines.items.len) {
-                return false;
-            }
-            for (self.lines.items, other.lines.items) |our_line, their_line| {
-                if (!std.mem.eql(u8, our_line, their_line)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    };
+    }.init;
 
     const Stream = struct {
         state: rp.Repo(.xit, repo_opts).State(.read_only),
         io: std.Io,
         allocator: std.mem.Allocator,
-        target_marker: []u8,
-        base_marker: []u8,
-        separate_marker: []u8,
-        source_marker: []u8,
+        markers: *const ConflictMarkers,
         merge_live_parent_to_children: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
         base_live_parent_to_children: ?*const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
         target_live_parent_to_children: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
@@ -824,36 +844,8 @@ fn writeBlobWithPatches(
             }
 
             fn readStep(self: @This(), buf: []u8) !usize {
-                if (self.parent.current_line) |current_line| {
-                    const size = @min(buf.len, current_line.len);
-                    var line_finished = current_line.len == 0;
-                    if (size > 0) {
-                        // copy as much from the current line as we can
-                        @memcpy(buf[0..size], current_line[0..size]);
-                        const new_current_line = current_line[size..];
-                        line_finished = new_current_line.len == 0;
-                        self.parent.current_line = new_current_line;
-                    }
-                    // if we have copied the entire line
-                    if (line_finished) {
-                        // if there is room for the newline character
-                        if (buf.len > size) {
-                            // remove the line from the line buffer
-                            const line = self.parent.line_buffer.orderedRemove(0);
-                            self.parent.allocator.free(line);
-                            if (self.parent.line_buffer.items.len > 0) {
-                                self.parent.current_line = self.parent.line_buffer.items[0];
-                            } else {
-                                self.parent.current_line = null;
-                            }
-                            // if we aren't at the very last line, add a newline character
-                            if (self.parent.current_line != null or self.parent.current_line_id_hash != null) {
-                                buf[size] = '\n';
-                                return size + 1;
-                            }
-                        }
-                    }
-                    return size;
+                if (self.parent.current_line != null) {
+                    return drainCurrentLine(self.parent.allocator, self.parent.line_buffer, &self.parent.current_line, self.parent.current_line_id_hash != null, buf);
                 }
 
                 if (self.parent.current_line_id_hash) |current_line_id_hash| {
@@ -1003,66 +995,19 @@ fn writeBlobWithPatches(
                             self.parent.current_line_id_hash = null;
                         }
 
-                        var base_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, base_line_ids.items);
+                        var base_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, base_line_ids.items);
                         defer base_lines.deinit(self.parent.allocator);
-                        var target_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, target_line_ids.items);
+                        var target_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, target_line_ids.items);
                         defer target_lines.deinit(self.parent.allocator);
-                        var source_lines = try LineRange.init(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, source_line_ids.items);
+                        var source_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, source_line_ids.items);
                         defer source_lines.deinit(self.parent.allocator);
 
-                        // if base == target or target == source, return source to autoresolve conflict
-                        if (base_lines.eql(target_lines) or target_lines.eql(source_lines)) {
-                            if (source_lines.lines.items.len > 0) {
-                                try self.parent.line_buffer.appendSlice(self.parent.allocator, source_lines.lines.items);
-                                self.parent.current_line = self.parent.line_buffer.items[0];
-                                source_lines.lines.clearAndFree(self.parent.allocator);
-                            }
-                            return self.readStep(buf);
+                        if (try appendResolvedOrConflict(self.parent.allocator, self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
+                            self.parent.has_conflict = true;
                         }
-                        // if base == source, return target to autoresolve conflict
-                        else if (base_lines.eql(source_lines)) {
-                            if (target_lines.lines.items.len > 0) {
-                                try self.parent.line_buffer.appendSlice(self.parent.allocator, target_lines.lines.items);
-                                self.parent.current_line = self.parent.line_buffer.items[0];
-                                target_lines.lines.clearAndFree(self.parent.allocator);
-                            }
-                            return self.readStep(buf);
+                        if (self.parent.line_buffer.items.len > 0) {
+                            self.parent.current_line = self.parent.line_buffer.items[0];
                         }
-
-                        // return conflict
-
-                        const target_marker = try self.parent.allocator.dupe(u8, self.parent.target_marker);
-                        {
-                            errdefer self.parent.allocator.free(target_marker);
-                            try self.parent.line_buffer.append(self.parent.allocator, target_marker);
-                        }
-                        try self.parent.line_buffer.appendSlice(self.parent.allocator, target_lines.lines.items);
-                        target_lines.lines.clearAndFree(self.parent.allocator);
-
-                        const base_marker = try self.parent.allocator.dupe(u8, self.parent.base_marker);
-                        {
-                            errdefer self.parent.allocator.free(base_marker);
-                            try self.parent.line_buffer.append(self.parent.allocator, base_marker);
-                        }
-                        try self.parent.line_buffer.appendSlice(self.parent.allocator, base_lines.lines.items);
-                        base_lines.lines.clearAndFree(self.parent.allocator);
-
-                        const separate_marker = try self.parent.allocator.dupe(u8, self.parent.separate_marker);
-                        {
-                            errdefer self.parent.allocator.free(separate_marker);
-                            try self.parent.line_buffer.append(self.parent.allocator, separate_marker);
-                        }
-
-                        try self.parent.line_buffer.appendSlice(self.parent.allocator, source_lines.lines.items);
-                        source_lines.lines.clearAndFree(self.parent.allocator);
-                        const source_marker = try self.parent.allocator.dupe(u8, self.parent.source_marker);
-                        {
-                            errdefer self.parent.allocator.free(source_marker);
-                            try self.parent.line_buffer.append(self.parent.allocator, source_marker);
-                        }
-
-                        self.parent.current_line = self.parent.line_buffer.items[0];
-                        self.parent.has_conflict = true;
                     } else {
                         var offset_list_cursor = (try self.parent.patch_id_to_offset_list.getCursor(first_line_id.patch_id)) orelse return error.KeyNotFound;
                         const line = try readLine(self.parent.state, self.parent.io, self.parent.allocator, &offset_list_cursor, first_line_id);
@@ -1131,24 +1076,15 @@ fn writeBlobWithPatches(
         }
     };
 
-    const target_marker = try std.fmt.allocPrint(allocator, "<<<<<<< target ({s})", .{target_name});
-    defer allocator.free(target_marker);
-    const base_marker = try std.fmt.allocPrint(allocator, "||||||| base ({s})", .{base_oid});
-    defer allocator.free(base_marker);
-    const separate_marker = try std.fmt.allocPrint(allocator, "=======", .{});
-    defer allocator.free(separate_marker);
-    const source_marker = try std.fmt.allocPrint(allocator, ">>>>>>> source ({s})", .{source_name});
-    defer allocator.free(source_marker);
+    var markers = try ConflictMarkers.init(allocator, base_oid, target_name, source_name);
+    defer markers.deinit(allocator);
 
     var stream_buffer = [_]u8{0} ** repo_opts.buffer_size;
     var stream = Stream{
         .state = state.readOnly(),
         .io = io,
         .allocator = allocator,
-        .target_marker = target_marker,
-        .base_marker = base_marker,
-        .separate_marker = separate_marker,
-        .source_marker = source_marker,
+        .markers = &markers,
         .merge_live_parent_to_children = &merge_live_parent_to_children,
         .base_live_parent_to_children = if (base_live_parent_to_children_maybe) |*map| map else null,
         .target_live_parent_to_children = &target_live_parent_to_children,
