@@ -682,15 +682,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
-            var normalized_paths: std.ArrayList([]const u8) = .empty;
-            for (paths) |path| {
-                const rel_path = try fs.relativePath(allocator, self.core.work_path, self.core.cwd_path, path);
-                defer allocator.free(rel_path);
-                const path_parts = try fs.splitPath(allocator, rel_path);
-                defer allocator.free(path_parts);
-                const normalized_path = try fs.joinPath(arena.allocator(), path_parts);
-                try normalized_paths.append(arena.allocator(), normalized_path);
-            }
+            const normalized_paths = try fs.normalizePaths(&arena, allocator, self.core.work_path, self.core.cwd_path, paths);
 
             switch (repo_kind) {
                 .git => {
@@ -698,7 +690,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     defer lock.deinit(io);
 
                     const state = State(.read_write){ .core = &self.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
-                    try work.addPaths(repo_kind, repo_opts, state, io, allocator, normalized_paths.items);
+                    try work.addPaths(repo_kind, repo_opts, state, io, allocator, normalized_paths);
 
                     lock.success = true;
                 },
@@ -726,7 +718,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths.items },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths },
                     );
                 },
             }
@@ -742,15 +734,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
-            var normalized_paths: std.ArrayList([]const u8) = .empty;
-            for (paths) |path| {
-                const rel_path = try fs.relativePath(allocator, self.core.work_path, self.core.cwd_path, path);
-                defer allocator.free(rel_path);
-                const path_parts = try fs.splitPath(allocator, rel_path);
-                defer allocator.free(path_parts);
-                const normalized_path = try fs.joinPath(arena.allocator(), path_parts);
-                try normalized_paths.append(arena.allocator(), normalized_path);
-            }
+            const normalized_paths = try fs.normalizePaths(&arena, allocator, self.core.work_path, self.core.cwd_path, paths);
 
             switch (repo_kind) {
                 .git => {
@@ -758,7 +742,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     defer lock.deinit(io);
 
                     const state = State(.read_write){ .core = &self.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
-                    try work.unaddPaths(repo_kind, repo_opts, state, io, allocator, normalized_paths.items, opts);
+                    try work.unaddPaths(repo_kind, repo_opts, state, io, allocator, normalized_paths, opts);
 
                     lock.success = true;
                 },
@@ -784,7 +768,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths.items, .opts = opts },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths, .opts = opts },
                     );
                 },
             }
@@ -814,15 +798,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
-            var normalized_paths: std.ArrayList([]const u8) = .empty;
-            for (paths) |path| {
-                const rel_path = try fs.relativePath(allocator, self.core.work_path, self.core.cwd_path, path);
-                defer allocator.free(rel_path);
-                const path_parts = try fs.splitPath(allocator, rel_path);
-                defer allocator.free(path_parts);
-                const normalized_path = try fs.joinPath(arena.allocator(), path_parts);
-                try normalized_paths.append(arena.allocator(), normalized_path);
-            }
+            const normalized_paths = try fs.normalizePaths(&arena, allocator, self.core.work_path, self.core.cwd_path, paths);
 
             switch (repo_kind) {
                 .git => {
@@ -830,7 +806,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     defer lock.deinit(io);
 
                     const state = State(.read_write){ .core = &self.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
-                    try work.removePaths(repo_kind, repo_opts, state, io, allocator, normalized_paths.items, opts);
+                    try work.removePaths(repo_kind, repo_opts, state, io, allocator, normalized_paths, opts);
 
                     lock.success = true;
                 },
@@ -856,7 +832,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     try history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths.items, .opts = opts },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .paths = normalized_paths, .opts = opts },
                     );
                 },
             }

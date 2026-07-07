@@ -52,6 +52,27 @@ pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
     try dir_file.sync(io);
 }
 
+/// resolve each path relative to the work dir and normalize it.
+/// the returned paths are allocated in the arena.
+pub fn normalizePaths(
+    arena: *std.heap.ArenaAllocator,
+    allocator: std.mem.Allocator,
+    work_path: []const u8,
+    cwd_path: []const u8,
+    paths: []const []const u8,
+) ![]const []const u8 {
+    var normalized_paths: std.ArrayList([]const u8) = .empty;
+    for (paths) |path| {
+        const rel_path = try relativePath(allocator, work_path, cwd_path, path);
+        defer allocator.free(rel_path);
+        const path_parts = try splitPath(allocator, rel_path);
+        defer allocator.free(path_parts);
+        const normalized_path = try joinPath(arena.allocator(), path_parts);
+        try normalized_paths.append(arena.allocator(), normalized_path);
+    }
+    return normalized_paths.items;
+}
+
 /// delete any parent dirs of `path` that are now empty
 pub fn deleteEmptyParents(io: std.Io, parent_dir: std.Io.Dir, path: []const u8) !void {
     var dir_path_maybe = std.fs.path.dirname(path);
