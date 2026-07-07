@@ -82,29 +82,29 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             const content = line[0..len];
 
             return switch (line[0]) {
-                1 => try dataPkt(repo_kind, repo_opts, allocator, content),
-                2 => try sidebandProgressPkt(repo_kind, repo_opts, allocator, content),
-                3 => try sidebandErrorPkt(repo_kind, repo_opts, allocator, content),
+                1 => .{ .data = try allocator.dupe(u8, content[1..]) },
+                2 => .{ .progress = try allocator.dupe(u8, content[1..]) },
+                3 => .{ .err = try allocator.dupe(u8, content[1..]) },
                 else => if (std.mem.startsWith(u8, content, "ACK"))
-                    try ackPkt(repo_kind, repo_opts, content)
+                    try ackPkt(content)
                 else if (std.mem.startsWith(u8, content, "NAK"))
                     .{ .nak = {} }
                 else if (line[0] == '#')
-                    try commentPkt(repo_kind, repo_opts, allocator, content)
+                    .{ .comment = try allocator.dupe(u8, content) }
                 else if (std.mem.startsWith(u8, content, "ERR"))
-                    try errPkt(repo_kind, repo_opts, allocator, content)
+                    try errPkt(allocator, content)
                 else if (std.mem.startsWith(u8, content, "ok"))
-                    try okPkt(repo_kind, repo_opts, allocator, content)
+                    try okPkt(allocator, content)
                 else if (std.mem.startsWith(u8, content, "ng"))
-                    try ngPkt(repo_kind, repo_opts, allocator, content)
+                    try ngPkt(allocator, content)
                 else if (std.mem.startsWith(u8, content, "unpack"))
-                    try unpackPkt(repo_kind, repo_opts, content)
+                    .{ .unpack = .{ .unpack_ok = std.mem.startsWith(u8, content, "unpack ok") } }
                 else if (std.mem.startsWith(u8, content, "unshallow"))
-                    try unshallowPkt(repo_kind, repo_opts, content)
+                    try unshallowPkt(content)
                 else if (std.mem.startsWith(u8, content, "shallow"))
-                    try shallowPkt(repo_kind, repo_opts, content)
+                    try shallowPkt(content)
                 else
-                    try refPkt(repo_kind, repo_opts, allocator, content, found_capabilities),
+                    try refPkt(allocator, content, found_capabilities),
             };
         }
 
@@ -125,7 +125,122 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
                 .shallow => {},
             }
         }
+
+        fn ackPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
+            // the content looks like "ACK <oid>[ <status>]"
+            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            if (content.len < "ACK ".len + oid_len) {
+                return error.InvalidPacket;
+            }
+
+            var pkt = Pkt(repo_kind, repo_opts){ .ack = .{ .oid = content["ACK ".len..][0..oid_len].*, .status = null } };
+
+            const rest = content["ACK ".len + oid_len ..];
+            if (rest.len > 0 and rest[0] == ' ') {
+                const status = rest[1..];
+                pkt.ack.status =
+                    if (std.mem.startsWith(u8, status, "continue"))
+                        .cont
+                    else if (std.mem.startsWith(u8, status, "common"))
+                        .common
+                    else if (std.mem.startsWith(u8, status, "ready"))
+                        .ready
+                    else
+                        return error.InvalidPacket;
+            }
+
+            return pkt;
+        }
+
+        fn errPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+            if (content.len < "ERR ".len) {
+                return error.InvalidPacket;
+            }
+            return .{ .err = try allocator.dupe(u8, content["ERR ".len..]) };
+        }
+
+        fn okPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+            if (content.len < "ok ".len) {
+                return error.InvalidPacket;
+            }
+            return .{ .ok = try dupeChomped(allocator, content["ok ".len..]) };
+        }
+
+        fn ngPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+            if (content.len < "ng ".len) {
+                return error.InvalidPacket;
+            }
+            return .{ .ng = try dupeChomped(allocator, content["ng ".len..]) };
+        }
+
+        fn shallowPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
+            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            if (content.len < "shallow ".len + oid_len) {
+                return error.InvalidPacket;
+            }
+            return .{ .shallow = .{ .oid = content["shallow ".len..][0..oid_len].* } };
+        }
+
+        fn unshallowPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
+            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            if (content.len < "unshallow ".len + oid_len) {
+                return error.InvalidPacket;
+            }
+            return .{ .unshallow = .{ .oid = content["unshallow ".len..][0..oid_len].* } };
+        }
+
+        fn refPkt(allocator: std.mem.Allocator, content: []const u8, found_capabilities: *bool) !Pkt(repo_kind, repo_opts) {
+            // the content looks like "<oid> <name>[\x00<capabilities>]"
+            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            if (content.len < oid_len) {
+                return error.InvalidPacket;
+            }
+            const oid_hex = content[0..oid_len];
+
+            var line = content[oid_len..];
+            if (!std.mem.startsWith(u8, line, " ")) {
+                return error.InvalidPacket;
+            }
+            line = line[1..];
+
+            if (line.len == 0) {
+                return error.InvalidPacket;
+            }
+            if (line[line.len - 1] == '\n') {
+                line = line[0 .. line.len - 1];
+            }
+
+            const head_name = try allocator.dupe(u8, std.mem.sliceTo(line, 0));
+            errdefer allocator.free(head_name);
+
+            var head = net.RemoteHead(repo_kind, repo_opts).init(head_name);
+            head.oid = oid_hex.*;
+
+            var caps_maybe: ?[]const u8 = null;
+            errdefer if (caps_maybe) |caps| allocator.free(caps);
+
+            if (head_name.len < line.len) {
+                if (!found_capabilities.*) {
+                    caps_maybe = try allocator.dupe(u8, line[head_name.len + 1 ..]);
+                } else {
+                    return error.InvalidPacket;
+                }
+            }
+
+            found_capabilities.* = true;
+
+            return .{ .ref = .{
+                .head = head,
+                .capabilities = caps_maybe,
+            } };
+        }
     };
+}
+
+/// dupe the line with its trailing newline (if any) removed
+fn dupeChomped(allocator: std.mem.Allocator, line: []const u8) ![]u8 {
+    const end = if (std.mem.endsWith(u8, line, "\n")) line.len - 1 else line.len;
+    return allocator.dupe(u8, line[0..end]);
 }
 
 const PKT_HAVE_PREFIX = "have ";
@@ -258,266 +373,4 @@ pub fn bufferWants(
     }
 
     try buf.appendSlice(allocator, "0000");
-}
-
-fn dataPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 1;
-    len -= 1;
-
-    const data = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(data);
-    return .{ .data = data };
-}
-
-fn sidebandProgressPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 1;
-    len -= 1;
-
-    const progress = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(progress);
-    return .{ .progress = progress };
-}
-
-fn sidebandErrorPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 1;
-    len -= 1;
-
-    const err = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(err);
-    return .{ .err = err };
-}
-
-fn ackPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    var pkt = Pkt(repo_kind, repo_opts){ .ack = .{ .oid = undefined, .status = null } };
-
-    line += 4;
-    len -= 4;
-
-    if (len < hash.hexLen(repo_opts.hash)) {
-        return error.InvalidPacket;
-    }
-    pkt.ack.oid = line[0..comptime hash.hexLen(repo_opts.hash)].*;
-
-    line += hash.hexLen(repo_opts.hash);
-    len -= hash.hexLen(repo_opts.hash);
-
-    if (len > 0 and line[0] == ' ') {
-        line += 1;
-        len -= 1;
-
-        pkt.ack.status =
-            if (std.mem.startsWith(u8, line[0..len], "continue"))
-                .cont
-            else if (std.mem.startsWith(u8, line[0..len], "common"))
-                .common
-            else if (std.mem.startsWith(u8, line[0..len], "ready"))
-                .ready
-            else
-                return error.InvalidPacket;
-    }
-
-    return pkt;
-}
-
-fn errPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 4;
-    len -= 4;
-
-    const err = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(err);
-    return .{ .err = err };
-}
-
-fn commentPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    line: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    const comment = try allocator.dupe(u8, line);
-    errdefer allocator.free(comment);
-    return .{ .comment = comment };
-}
-
-fn okPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 3;
-    len -= 3;
-
-    if (len > 0 and line[len - 1] == '\n') {
-        len -= 1;
-    }
-    const ok = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(ok);
-    return .{ .ok = ok };
-}
-
-fn ngPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 3;
-    len -= 3;
-
-    if (len > 0 and line[len - 1] == '\n') {
-        len -= 1;
-    }
-    const ng = try allocator.dupe(u8, line[0..len]);
-    errdefer allocator.free(ng);
-    return .{ .ng = ng };
-}
-
-fn unpackPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    return .{ .unpack = .{ .unpack_ok = std.mem.startsWith(u8, content, "unpack ok") } };
-}
-
-fn shallowPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 8;
-    len -= 8;
-
-    if (len < hash.hexLen(repo_opts.hash)) {
-        return error.InvalidPacket;
-    }
-
-    return .{ .shallow = .{ .oid = line[0..comptime hash.hexLen(repo_opts.hash)].* } };
-}
-
-fn unshallowPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    content: []const u8,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    line += 10;
-    len -= 10;
-
-    if (len < hash.hexLen(repo_opts.hash)) {
-        return error.InvalidPacket;
-    }
-
-    return .{ .unshallow = .{ .oid = line[0..comptime hash.hexLen(repo_opts.hash)].* } };
-}
-
-fn refPkt(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    allocator: std.mem.Allocator,
-    content: []const u8,
-    found_capabilities: *bool,
-) !Pkt(repo_kind, repo_opts) {
-    var line = content.ptr;
-    var len = content.len;
-
-    if (len < hash.hexLen(repo_opts.hash)) {
-        return error.InvalidPacket;
-    }
-    const oid_hex = line[0..comptime hash.hexLen(repo_opts.hash)];
-
-    line += hash.hexLen(repo_opts.hash);
-    len -= hash.hexLen(repo_opts.hash);
-
-    if (!std.mem.startsWith(u8, line[0..len], " ")) {
-        return error.InvalidPacket;
-    }
-
-    line += 1;
-    len -= 1;
-
-    if (0 == len) {
-        return error.InvalidPacket;
-    }
-
-    if (line[len - 1] == '\n') {
-        len -= 1;
-    }
-
-    const line_slice = line[0..len];
-
-    const head_name = try allocator.dupe(u8, std.mem.sliceTo(line_slice, 0));
-    errdefer allocator.free(head_name);
-
-    var head = net.RemoteHead(repo_kind, repo_opts).init(head_name);
-    head.oid = oid_hex.*;
-
-    var caps_maybe: ?[]const u8 = null;
-    errdefer if (caps_maybe) |caps| allocator.free(caps);
-
-    if (head_name.len < len) {
-        if (!found_capabilities.*) {
-            caps_maybe = try allocator.dupe(u8, line_slice[head_name.len + 1 ..]);
-        } else {
-            return error.InvalidPacket;
-        }
-    }
-
-    found_capabilities.* = true;
-
-    return .{ .ref = .{
-        .head = head,
-        .capabilities = caps_maybe,
-    } };
 }
