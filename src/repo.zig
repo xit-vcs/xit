@@ -1722,11 +1722,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         }
 
         /// reclaims disk space by removing objects that can't be reached
-        pub fn garbageCollect(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) !gc.GcResult {
-            switch (repo_kind) {
-                .git => return error.NotImplemented,
-                .xit => return try gc.run(repo_opts, self, io, allocator),
-            }
+        pub fn garbageCollect(self: *Repo(.xit, repo_opts), io: std.Io, allocator: std.mem.Allocator) !gc.GcResult {
+            return try gc.run(repo_opts, self, io, allocator);
         }
     };
 }
