@@ -2,10 +2,11 @@ const std = @import("std");
 const xitui = @import("xitui");
 const wgt = xitui.widget;
 const layout = xitui.layout;
-const inp = xitui.input;
+const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const ui_diff = @import("./diff.zig");
+const inp = @import("./input.zig");
 const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
 const tr = @import("../tree.zig");
@@ -98,55 +99,12 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             }
         }
 
-        pub fn input(self: *LogCommitList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *LogCommitList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             _ = allocator;
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
-                    var index = current_index;
-
-                    switch (key) {
-                        .arrow_up => {
-                            index -|= 1;
-                        },
-                        .arrow_down => {
-                            if (index + 1 < children.count()) {
-                                index += 1;
-                            }
-                        },
-                        .home => {
-                            index = 0;
-                        },
-                        .end => {
-                            if (children.count() > 0) {
-                                index = children.count() - 1;
-                            }
-                        },
-                        .page_up => {
-                            if (self.getGrid()) |grid| {
-                                const half_count = (grid.size.height / 3) / 2;
-                                index -|= half_count;
-                            }
-                        },
-                        .page_down => {
-                            if (self.getGrid()) |grid| {
-                                if (children.count() > 0) {
-                                    const half_count = (grid.size.height / 3) / 2;
-                                    index = @min(index + half_count, children.count() - 1);
-                                }
-                            }
-                        },
-                        .mouse => |mouse| switch (mouse.action) {
-                            .scroll => |dir| switch (dir) {
-                                .up => index -|= 1,
-                                .down => if (index + 1 < children.count()) {
-                                    index += 1;
-                                },
-                            },
-                            else => {},
-                        },
-                        else => {},
-                    }
+                    const index = inp.vertIndex(key, current_index, children.count(), self.getGrid());
 
                     if (index != current_index) {
                         root_focus.setFocus(children.keys()[index]);
@@ -274,42 +232,14 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
             try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *Log(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Log(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             const diff_scroll_x = self.box.children.values()[1].widget.ui_diff.box.children.values()[0].widget.scroll.x;
 
             if (self.getFocus().child_id) |child_id| {
                 if (self.box.children.getIndex(child_id)) |current_index| {
                     const child = &self.box.children.values()[current_index].widget;
 
-                    const index = blk: {
-                        switch (key) {
-                            .arrow_left => {
-                                if (child.* == .ui_diff and diff_scroll_x == 0) {
-                                    break :blk 0;
-                                }
-                            },
-                            .arrow_right => {
-                                if (child.* == .ui_log_commit_list) {
-                                    break :blk 1;
-                                }
-                            },
-                            .codepoint => |codepoint| {
-                                switch (codepoint) {
-                                    13 => {
-                                        if (child.* == .ui_log_commit_list) {
-                                            break :blk 1;
-                                        }
-                                    },
-                                    127, '\x1B' => {
-                                        if (child.* == .ui_diff) {
-                                            break :blk 0;
-                                        }
-                                    },
-                                    else => {},
-                                }
-                            },
-                            else => {},
-                        }
+                    const index = inp.horizIndex(key, child.* == .ui_log_commit_list, diff_scroll_x) orelse blk: {
                         try child.input(allocator, key, root_focus);
                         break :blk current_index;
                     };

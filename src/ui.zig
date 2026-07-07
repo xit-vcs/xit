@@ -4,7 +4,7 @@ const xitui = @import("xitui");
 const term = xitui.terminal;
 const wgt = xitui.widget;
 const layout = xitui.layout;
-const inp = xitui.input;
+const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const ui_root = @import("./ui/root.zig");
@@ -51,7 +51,7 @@ pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        pub fn input(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) anyerror!void {
+        pub fn input(self: *Widget(repo_kind, repo_opts), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) anyerror!void {
             switch (self.*) {
                 inline else => |*case| try case.input(allocator, key, root_focus),
             }
@@ -126,7 +126,7 @@ pub fn input(
     comptime repo_opts: rp.RepoOpts(repo_kind),
     root: *Widget(repo_kind, repo_opts),
     allocator: std.mem.Allocator,
-    key: inp.Key,
+    key: Key,
 ) !void {
     try root.input(allocator, key, root.getFocus());
 

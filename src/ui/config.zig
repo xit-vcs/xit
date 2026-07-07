@@ -2,7 +2,7 @@ const std = @import("std");
 const xitui = @import("xitui");
 const wgt = xitui.widget;
 const layout = xitui.layout;
-const inp = xitui.input;
+const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
@@ -103,7 +103,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
             try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *ConfigListItem(Widget), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *ConfigListItem(Widget), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.box.children;
                 if (children.getIndex(child_id)) |index| {
@@ -210,7 +210,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *ConfigAddListItem(Widget), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *ConfigAddListItem(Widget), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.box.children;
                 if (children.getIndex(child_id)) |index| {
@@ -365,7 +365,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             try self.box.build(allocator, constraint, root_focus);
         }
 
-        pub fn input(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             const current_row = self.currentRowIndex() orelse return;
             const row_count = self.rowCount();
 

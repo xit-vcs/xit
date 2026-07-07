@@ -2,7 +2,7 @@ const std = @import("std");
 const xitui = @import("xitui");
 const wgt = xitui.widget;
 const layout = xitui.layout;
-const inp = xitui.input;
+const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
@@ -95,7 +95,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             }
         }
 
-        pub fn input(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: inp.Key, root_focus: *Focus) !void {
+        pub fn input(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, key: Key, root_focus: *Focus) !void {
             _ = allocator;
             _ = root_focus;
             switch (key) {
