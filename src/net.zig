@@ -642,37 +642,7 @@ pub fn clone(
     const transport_def = net_transport.TransportDefinition.init(io, cwd, url) orelse return error.UnsupportedUrl;
 
     switch (repo_kind) {
-        .git => {
-            var remote = try Remote(repo_kind, repo_opts).init(
-                .{ .core = &repo.core, .extra = .{} },
-                io,
-                allocator,
-                "origin",
-                url,
-            );
-            defer remote.deinit(io, allocator);
-
-            switch (transport_def) {
-                .file => try net_clone.cloneFile(
-                    repo_kind,
-                    repo_opts,
-                    .{ .core = &repo.core, .extra = .{} },
-                    io,
-                    allocator,
-                    &remote,
-                    transport_opts,
-                ),
-                .wire => try net_clone.cloneWire(
-                    repo_kind,
-                    repo_opts,
-                    .{ .core = &repo.core, .extra = .{} },
-                    io,
-                    allocator,
-                    &remote,
-                    transport_opts,
-                ),
-            }
-        },
+        .git => try net_clone.cloneRemote(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, url, transport_def, transport_opts),
         .xit => {
             const Ctx = struct {
                 core: *rp.Repo(repo_kind, repo_opts).Core,
@@ -686,29 +656,7 @@ pub fn clone(
                     var moment = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
-                    var remote = try Remote(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, "origin", ctx.url);
-                    defer remote.deinit(ctx.io, ctx.allocator);
-
-                    switch (ctx.transport_def) {
-                        .file => try net_clone.cloneFile(
-                            repo_kind,
-                            repo_opts,
-                            state,
-                            ctx.io,
-                            ctx.allocator,
-                            &remote,
-                            ctx.transport_opts,
-                        ),
-                        .wire => try net_clone.cloneWire(
-                            repo_kind,
-                            repo_opts,
-                            state,
-                            ctx.io,
-                            ctx.allocator,
-                            &remote,
-                            ctx.transport_opts,
-                        ),
-                    }
+                    try net_clone.cloneRemote(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.url, ctx.transport_def, ctx.transport_opts);
 
                     const un = @import("./undo.zig");
                     try un.writeMessage(repo_opts, state, .{ .clone = .{ .url = ctx.url } });

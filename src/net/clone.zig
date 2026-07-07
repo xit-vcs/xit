@@ -86,43 +86,38 @@ fn checkoutBranch(
     }
 }
 
-pub fn cloneFile(
+pub fn cloneRemote(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    remote: *net.Remote(repo_kind, repo_opts),
+    url: []const u8,
+    transport_def: net_transport.TransportDefinition,
     transport_opts: net_transport.Opts(repo_opts.ProgressCtx),
 ) !void {
     if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), io, allocator, "HEAD")) |_| {
         return error.RepoIsNotEmpty;
     }
 
-    try net.fetch(repo_kind, repo_opts, state, io, allocator, remote, transport_opts);
+    var remote = try net.Remote(repo_kind, repo_opts).init(state, io, allocator, "origin", url);
+    defer remote.deinit(io, allocator);
 
-    try checkoutBranch(repo_kind, repo_opts, state, io, allocator, remote);
-}
+    switch (transport_def) {
+        .file => {
+            try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote, transport_opts);
 
-pub fn cloneWire(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    remote: *net.Remote(repo_kind, repo_opts),
-    transport_opts: net_transport.Opts(repo_opts.ProgressCtx),
-) !void {
-    if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), io, allocator, "HEAD")) |_| {
-        return error.RepoIsNotEmpty;
+            try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote);
+        },
+        .wire => {
+            var remote_copy = try remote.dupe(allocator);
+            defer remote_copy.deinit(io, allocator);
+
+            try net.connect(repo_kind, repo_opts, state.readOnly(), io, allocator, &remote_copy, .fetch, transport_opts);
+
+            try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote_copy, transport_opts);
+
+            try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote_copy);
+        },
     }
-
-    var remote_copy = try remote.dupe(allocator);
-    defer remote_copy.deinit(io, allocator);
-
-    try net.connect(repo_kind, repo_opts, state.readOnly(), io, allocator, &remote_copy, .fetch, transport_opts);
-
-    try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote_copy, transport_opts);
-
-    try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote_copy);
 }

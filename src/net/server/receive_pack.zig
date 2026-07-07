@@ -82,24 +82,7 @@ pub fn run(
 
         try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options);
 
-        if (receive_pack.report_status_v2) {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-
-            try pkt.bufPktLineFmt(&buf, allocator, "unpack {s}\n", .{"ok"});
-
-            for (ref_updates.items) |update| {
-                if (update.error_message) |err_msg| {
-                    try pkt.bufPktLineFmt(&buf, allocator, "ng {s} {s}\n", .{ update.ref_name, err_msg });
-                    continue;
-                }
-
-                try pkt.bufPktLineFmt(&buf, allocator, "ok {s}\n", .{update.ref_name});
-            }
-            try pkt.bufPktFlush(&buf, allocator);
-
-            try pkt.sendSideband(writer, 1, buf.items);
-        } else if (receive_pack.report_status) {
+        if (receive_pack.report_status_v2 or receive_pack.report_status) {
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(allocator);
 
@@ -205,26 +188,12 @@ const ReceivePack = struct {
             try self.advertiseRef(repo_kind, repo_opts, writer, "HEAD", head_oid);
         }
 
-        // heads
-        {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
-            defer heads.deinit(io);
+        // heads and tags
+        for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+            var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+            defer iter.deinit(io);
 
-            while (try heads.next(io)) |ref| {
-                if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                    var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-                    const ref_path = try ref.toPath(&path_buf);
-                    try self.advertiseRef(repo_kind, repo_opts, writer, ref_path, oid);
-                }
-            }
-        }
-
-        // tags
-        {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
-            defer tags.deinit(io);
-
-            while (try tags.next(io)) |ref| {
+            while (try iter.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                     var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
                     const ref_path = try ref.toPath(&path_buf);

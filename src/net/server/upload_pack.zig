@@ -152,24 +152,11 @@ fn uploadPack(
             try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, "HEAD", head_oid);
         }
 
-        // heads
-        {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
-            defer heads.deinit(io);
-            while (try heads.next(io)) |ref| {
-                if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                    var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-                    const ref_path = try ref.toPath(&path_buf);
-                    try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, ref_path, oid);
-                }
-            }
-        }
-
-        // tags
-        {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
-            defer tags.deinit(io);
-            while (try tags.next(io)) |ref| {
+        // heads and tags
+        for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+            var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+            defer iter.deinit(io);
+            while (try iter.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                     var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
                     const ref_path = try ref.toPath(&path_buf);
@@ -188,21 +175,11 @@ fn uploadPack(
         if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |*head_oid| {
             try our_refs.put(head_oid.*, {});
         }
-        // mark heads
-        {
-            var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
-            defer heads.deinit(io);
-            while (try heads.next(io)) |ref| {
-                if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                    try our_refs.put(oid.*, {});
-                }
-            }
-        }
-        // mark tags
-        {
-            var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
-            defer tags.deinit(io);
-            while (try tags.next(io)) |ref| {
+        // mark heads and tags
+        for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+            var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+            defer iter.deinit(io);
+            while (try iter.next(io)) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                     try our_refs.put(oid.*, {});
                 }
@@ -603,21 +580,11 @@ const UploadPack = struct {
             if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |*head_oid| {
                 try our_refs.put(head_oid.*, {});
             }
-            // heads
-            {
-                var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
-                defer heads.deinit(io);
-                while (try heads.next(io)) |ref| {
-                    if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                        try our_refs.put(oid.*, {});
-                    }
-                }
-            }
-            // tags
-            {
-                var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
-                defer tags.deinit(io);
-                while (try tags.next(io)) |ref| {
+            // heads and tags
+            for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+                var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+                defer iter.deinit(io);
+                while (try iter.next(io)) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                         try our_refs.put(oid.*, {});
                     }
@@ -1290,25 +1257,11 @@ fn lsRefs(
         }
     }
 
-    // heads
-    {
-        var heads = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .head, .beginning);
-        defer heads.deinit(io);
-        while (try heads.next(io)) |ref| {
-            var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-            const ref_path = try ref.toPath(&path_buf);
-            if (!refMatch(prefixes.items, ref_path)) continue;
-            if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                try sendLsRef(hex_len, writer, ref_path, oid, should_peel, should_symrefs, null, repo_kind, repo_opts, state, io, allocator);
-            }
-        }
-    }
-
-    // tags
-    {
-        var tags = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, .tag, .beginning);
-        defer tags.deinit(io);
-        while (try tags.next(io)) |ref| {
+    // heads and tags
+    for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+        var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+        defer iter.deinit(io);
+        while (try iter.next(io)) |ref| {
             var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
             const ref_path = try ref.toPath(&path_buf);
             if (!refMatch(prefixes.items, ref_path)) continue;
