@@ -420,18 +420,18 @@ pub fn printHelp(cmd_kind_maybe: ?CommandKind, writer: *std.Io.Writer) !void {
         const help = commandHelp(cmd_kind);
         // name and description
         try writer.print("{s}", .{help.name});
-        for (0..print_indent - help.name.len) |_| try writer.print(" ", .{});
+        try writer.splatByteAll(' ', print_indent - help.name.len);
         var split_iter = std.mem.splitScalar(u8, help.descrip, '\n');
         try writer.print("{s}\n", .{split_iter.first()});
         while (split_iter.next()) |line| {
-            for (0..print_indent) |_| try writer.print(" ", .{});
+            try writer.splatByteAll(' ', print_indent);
             try writer.print("{s}\n", .{line});
         }
         try writer.print("\n", .{});
         // example
         split_iter = std.mem.splitScalar(u8, help.example, '\n');
         while (split_iter.next()) |line| {
-            for (0..print_indent) |_| try writer.print(" ", .{});
+            try writer.splatByteAll(' ', print_indent);
             try writer.print("{s}\n", .{line});
         }
     } else {
@@ -440,11 +440,11 @@ pub fn printHelp(cmd_kind_maybe: ?CommandKind, writer: *std.Io.Writer) !void {
             const help = commandHelp(@enumFromInt(field.value));
             // name and description
             try writer.print("{s}", .{help.name});
-            for (0..print_indent - help.name.len) |_| try writer.print(" ", .{});
+            try writer.splatByteAll(' ', print_indent - help.name.len);
             var split_iter = std.mem.splitScalar(u8, help.descrip, '\n');
             try writer.print("{s}\n", .{split_iter.first()});
             while (split_iter.next()) |line| {
-                for (0..print_indent) |_| try writer.print(" ", .{});
+                try writer.splatByteAll(' ', print_indent);
                 try writer.print("{s}\n", .{line});
             }
         }
