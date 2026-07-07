@@ -2,7 +2,6 @@ const std = @import("std");
 const rp = @import("./repo.zig");
 const df = @import("./diff.zig");
 const mrg = @import("./merge.zig");
-const idx = @import("./index.zig");
 const obj = @import("./object.zig");
 const cfg = @import("./config.zig");
 const bch = @import("./branch.zig");
@@ -554,7 +553,7 @@ pub const CommandArgs = struct {
 
 /// parses the args into a format that can be directly used by a repo.
 /// if any additional allocation needs to be done, the arena inside the cmd args will be used.
-pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKind) type {
+pub fn Command(comptime hash_kind: hash.HashKind) type {
     return union(CommandKind) {
         init: struct {
             dir: []const u8,
@@ -621,7 +620,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
         },
         http_backend,
 
-        pub fn initMaybe(cmd_args: *CommandArgs) !?Command(repo_kind, hash_kind) {
+        pub fn initMaybe(cmd_args: *CommandArgs) !?Command(hash_kind) {
             const command_kind = cmd_args.command_kind orelse return null;
             switch (command_kind) {
                 .init => {
@@ -946,7 +945,7 @@ pub fn Command(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKin
 
 /// parses the given args into a command if valid, and determines how it should be run
 /// (via the TUI or CLI).
-pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash.HashKind) type {
+pub fn CommandDispatch(comptime hash_kind: hash.HashKind) type {
     return union(enum) {
         invalid: union(enum) {
             command: []const u8,
@@ -957,9 +956,9 @@ pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash
         },
         help: ?CommandKind,
         tui: ?CommandKind,
-        cli: Command(repo_kind, hash_kind),
+        cli: Command(hash_kind),
 
-        pub fn init(cmd_args: *CommandArgs) !CommandDispatch(repo_kind, hash_kind) {
+        pub fn init(cmd_args: *CommandArgs) !CommandDispatch(hash_kind) {
             const dispatch = try initIgnoreUnused(cmd_args);
             if (cmd_args.unused_args.count() > 0) {
                 return .{
@@ -978,7 +977,7 @@ pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash
             return dispatch;
         }
 
-        pub fn initIgnoreUnused(cmd_args: *CommandArgs) !CommandDispatch(repo_kind, hash_kind) {
+        pub fn initIgnoreUnused(cmd_args: *CommandArgs) !CommandDispatch(hash_kind) {
             const show_help = cmd_args.contains("--help");
             const force_cli = cmd_args.contains("--cli");
 
@@ -990,7 +989,7 @@ pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash
                     else => false,
                 }) {
                     return .{ .tui = command_kind };
-                } else if (try Command(repo_kind, hash_kind).initMaybe(cmd_args)) |cmd| {
+                } else if (try Command(hash_kind).initMaybe(cmd_args)) |cmd| {
                     return .{ .cli = cmd };
                 } else {
                     return .{ .help = command_kind };
@@ -1009,21 +1008,20 @@ pub fn CommandDispatch(comptime repo_kind: rp.RepoKind, comptime hash_kind: hash
 }
 
 test "command" {
-    const repo_kind = rp.RepoKind.git;
     const hash_kind = hash.HashKind.sha1;
     const allocator = std.testing.allocator;
 
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "add", "--cli" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("help", @tagName(command));
     }
 
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "add", "file.txt" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("cli", @tagName(command));
         try std.testing.expectEqualStrings("add", @tagName(command.cli));
     }
@@ -1032,14 +1030,14 @@ test "command" {
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "commit", "-m" });
         defer cmd_args.deinit();
-        const command_or_err = CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command_or_err = CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectError(error.CommitMessageNotFound, command_or_err);
     }
 
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "commit", "-m", "let there be light" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("cli", @tagName(command));
         try std.testing.expectEqualStrings("let there be light", command.cli.commit.message.?);
     }
@@ -1048,7 +1046,7 @@ test "command" {
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "config", "add", "user.name", "radar", "roark" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("cli", @tagName(command));
         try std.testing.expectEqualStrings("radar roark", command.cli.config.add.value);
     }
@@ -1057,7 +1055,7 @@ test "command" {
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "stats", "--clii" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("invalid", @tagName(command));
         try std.testing.expectEqualStrings("command", @tagName(command.invalid));
         try std.testing.expectEqualStrings("stats", command.invalid.command);
@@ -1067,7 +1065,7 @@ test "command" {
     {
         var cmd_args = try CommandArgs.init(allocator, &.{ "status", "--clii" });
         defer cmd_args.deinit();
-        const command = try CommandDispatch(repo_kind, hash_kind).init(&cmd_args);
+        const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("invalid", @tagName(command));
         try std.testing.expectEqualStrings("argument", @tagName(command.invalid));
         try std.testing.expectEqualStrings("status", @tagName(command.invalid.argument.command.?));

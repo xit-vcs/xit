@@ -1,13 +1,11 @@
 const std = @import("std");
 const xitui = @import("xitui");
-const term = xitui.terminal;
 const wgt = xitui.widget;
 const layout = xitui.layout;
 const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
 const df = @import("../diff.zig");
 
 pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {

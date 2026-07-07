@@ -158,11 +158,11 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
-            for (self.heads.items) |*head| {
-                if (try net.resolveRefPath(repo_kind, repo_opts, state, io, allocator, head.name)) |oid| {
-                    head.loid = oid;
-                }
-            }
+            // the file transport has nothing to negotiate
+            _ = self;
+            _ = state;
+            _ = io;
+            _ = allocator;
         }
 
         pub fn downloadPack(

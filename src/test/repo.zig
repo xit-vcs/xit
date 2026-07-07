@@ -8,7 +8,6 @@ const rp = @import("../repo.zig");
 const rf = @import("../ref.zig");
 const obj = @import("../object.zig");
 const mrg = @import("../merge.zig");
-const df = @import("../diff.zig");
 const ui = @import("../ui.zig");
 
 fn addFile(

@@ -14,7 +14,6 @@ pub const RawState = struct {
 };
 
 pub const RawStream = struct {
-    wire_state: *RawState,
     socket: net_socket.SocketStream,
     cmd: []const u8,
     url: []u8,
@@ -24,13 +23,12 @@ pub const RawStream = struct {
     pub fn initMaybe(
         io: std.Io,
         allocator: std.mem.Allocator,
-        wire_state: *RawState,
         url: []const u8,
         wire_action: net_wire.WireAction,
     ) !?RawStream {
         return switch (wire_action) {
-            .list_upload_pack => try listUpload(io, allocator, wire_state, url),
-            .list_receive_pack => try listReceive(io, allocator, wire_state, url),
+            .list_upload_pack => try listUpload(io, allocator, url),
+            .list_receive_pack => try listReceive(io, allocator, url),
             .upload_pack => null,
             .receive_pack => null,
         };
@@ -39,7 +37,6 @@ pub const RawStream = struct {
     fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
-        wire_state: *RawState,
         url: []const u8,
         cmd: []const u8,
     ) !RawStream {
@@ -57,7 +54,6 @@ pub const RawStream = struct {
         };
 
         return .{
-            .wire_state = wire_state,
             .socket = try net_socket.SocketStream.init(io, allocator, host_str, port),
             .cmd = cmd,
             .url = url_dupe,
@@ -128,10 +124,9 @@ fn sendCommand(stream: *RawStream) !void {
 fn listUpload(
     io: std.Io,
     allocator: std.mem.Allocator,
-    wire_state: *RawState,
     url: []const u8,
 ) !RawStream {
-    var stream = try RawStream.init(io, allocator, wire_state, url, "git-upload-pack");
+    var stream = try RawStream.init(io, allocator, url, "git-upload-pack");
     errdefer stream.deinit(allocator);
 
     try stream.socket.connect();
@@ -142,10 +137,9 @@ fn listUpload(
 fn listReceive(
     io: std.Io,
     allocator: std.mem.Allocator,
-    wire_state: *RawState,
     url: []const u8,
 ) !RawStream {
-    var stream = try RawStream.init(io, allocator, wire_state, url, "git-receive-pack");
+    var stream = try RawStream.init(io, allocator, url, "git-receive-pack");
     errdefer stream.deinit(allocator);
 
     try stream.socket.connect();

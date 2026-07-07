@@ -6,7 +6,6 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
 const cfg = @import("../config.zig");
 
 pub fn ConfigListItem(comptime Widget: type) type {

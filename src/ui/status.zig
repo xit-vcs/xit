@@ -6,9 +6,7 @@ const inp = xitui.input;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const ui_diff = @import("./diff.zig");
-const ui_root = @import("./root.zig");
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
 const work = @import("../workdir.zig");
 const df = @import("../diff.zig");
 

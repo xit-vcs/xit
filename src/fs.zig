@@ -234,11 +234,6 @@ pub const Metadata = struct {
         return try initFromFileMetadata(stat, fstat);
     }
 
-    pub fn initFromFile(file: std.Io.File) !Metadata {
-        const meta = try file.metadata();
-        return initFromFileMetadata(meta, try Stat.init(file.handle));
-    }
-
     pub fn initFromFileMetadata(stat: std.Io.File.Stat, fstat: Stat) !Metadata {
         return .{
             .kind = stat.kind,

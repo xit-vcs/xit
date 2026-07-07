@@ -46,7 +46,7 @@ pub fn negotiate(
                 continue;
             }
 
-            if (!net_refspec.matches(tagspec.src, head.name) and null == net.matchingRefSpec(repo_kind, repo_opts, remote, .src, head.name)) {
+            if (!net_refspec.matches(tagspec.src, head.name) and null == net.matchingRefSpec(repo_kind, repo_opts, remote, head.name)) {
                 continue;
             }
 

@@ -7,8 +7,6 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const ui_diff = @import("./diff.zig");
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
-const df = @import("../diff.zig");
 const obj = @import("../object.zig");
 const tr = @import("../tree.zig");
 

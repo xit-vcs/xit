@@ -3,8 +3,6 @@ const builtin = @import("builtin");
 const xit = @import("xit");
 const rp = xit.repo;
 const rf = xit.ref;
-const work = xit.workdir;
-const hash = xit.hash;
 const net = xit.net;
 
 test "git fetch small" {

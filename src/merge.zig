@@ -361,13 +361,6 @@ fn writeBlobWithDiff3(
                 }
             }
 
-            pub fn readNoEof(self: @This(), dest: []u8) !void {
-                const size = try self.read(dest);
-                if (size != dest.len) {
-                    return error.EndOfStream;
-                }
-            }
-
             fn readStep(self: @This(), buf: []u8) !usize {
                 if (self.parent.current_line) |current_line| {
                     const size = @min(buf.len, current_line.len);
@@ -827,13 +820,6 @@ fn writeBlobWithPatches(
                     return error.EndOfStream;
                 } else {
                     return buffer[0];
-                }
-            }
-
-            pub fn readNoEof(self: @This(), dest: []u8) !void {
-                const size = try self.read(dest);
-                if (size != dest.len) {
-                    return error.EndOfStream;
                 }
             }
 

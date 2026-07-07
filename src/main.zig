@@ -20,7 +20,6 @@ const hash = @import("./hash.zig");
 const df = @import("./diff.zig");
 const work = @import("./workdir.zig");
 const mrg = @import("./merge.zig");
-const obj = @import("./object.zig");
 const tr = @import("./tree.zig");
 const rf = @import("./ref.zig");
 const net_refspec = @import("./net/refspec.zig");
@@ -92,7 +91,7 @@ pub fn run(
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
 
-    switch (try cmd.CommandDispatch(repo_kind, any_repo_opts.toRepoOpts().hash).init(&cmd_args)) {
+    switch (try cmd.CommandDispatch(any_repo_opts.toRepoOpts().hash).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
                 try run_opts.err.print("\"{s}\" is not a valid command\n\n", .{command});
@@ -188,7 +187,7 @@ pub fn run(
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| {
-                            const cmd_maybe = try cmd.Command(repo.self_repo_kind, repo.self_repo_opts.hash).initMaybe(&cmd_args);
+                            const cmd_maybe = try cmd.Command(repo.self_repo_opts.hash).initMaybe(&cmd_args);
                             try runCommand(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_maybe orelse return error.InvalidCommand, run_opts);
                         },
                     }
@@ -335,7 +334,7 @@ fn runCommand(
     repo: *rp.Repo(repo_kind, repo_opts),
     io: std.Io,
     allocator: std.mem.Allocator,
-    command: cmd.Command(repo_kind, repo_opts.hash),
+    command: cmd.Command(repo_opts.hash),
     run_opts: RunOpts,
 ) !void {
     switch (command) {

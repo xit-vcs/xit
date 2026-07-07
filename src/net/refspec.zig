@@ -54,7 +54,6 @@ pub const RefSpec = struct {
     direction: net.Direction,
     is_force: bool,
     is_glob: bool,
-    is_matching: bool,
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8, direction: net.Direction) !RefSpec {
         var self = RefSpec{
@@ -64,14 +63,12 @@ pub const RefSpec = struct {
             .direction = direction,
             .is_force = false,
             .is_glob = false,
-            .is_matching = false,
         };
 
         self.full = try allocator.dupe(u8, input);
         errdefer allocator.free(self.full);
 
         if (.push == direction and (std.mem.eql(u8, ":", input) or std.mem.eql(u8, "+:", input))) {
-            self.is_matching = true;
             self.src = try allocator.dupe(u8, "");
             errdefer allocator.free(self.src);
             self.dst = try allocator.dupe(u8, "");
@@ -175,7 +172,6 @@ pub const RefSpec = struct {
             .direction = self.direction,
             .is_force = self.is_force,
             .is_glob = self.is_glob,
-            .is_matching = self.is_matching,
         };
     }
 

@@ -10,7 +10,6 @@ const ui_status = @import("./status.zig");
 const ui_undo = @import("./undo.zig");
 const ui_config = @import("./config.zig");
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
 
 pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
     return struct {

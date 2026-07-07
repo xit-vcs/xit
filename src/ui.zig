@@ -14,7 +14,6 @@ const ui_status = @import("./ui/status.zig");
 const ui_undo = @import("./ui/undo.zig");
 const ui_config = @import("./ui/config.zig");
 const rp = @import("./repo.zig");
-const hash = @import("./hash.zig");
 
 pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return union(enum) {

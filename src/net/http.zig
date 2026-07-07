@@ -92,7 +92,7 @@ pub const HttpStream = struct {
             try body_writer.writer.writeAll(buffer[0..len]);
             try body_writer.flush();
         } else {
-            var request = try HttpRequest.init(allocator, self, len);
+            var request = try HttpRequest.init(allocator, self);
             defer request.deinit(allocator);
             try self.initWriteRequest(&request, buffer[0..len]);
         }
@@ -138,7 +138,7 @@ pub const HttpStream = struct {
         allocator: std.mem.Allocator,
         buffer: []u8,
     ) !usize {
-        var request = try HttpRequest.init(allocator, self, 0);
+        var request = try HttpRequest.init(allocator, self);
         defer request.deinit(allocator);
 
         const uri = try std.Uri.parse(request.url);
@@ -178,7 +178,7 @@ pub const HttpStream = struct {
         if (request.content_type) |content_type| {
             req.headers.content_type = .{ .override = content_type };
         }
-        req.handle_continue = request.expect_continue;
+        req.handle_continue = false;
         req.extra_headers = &.{
             .{ .name = "accept", .value = request.accept },
         };
@@ -229,7 +229,6 @@ pub const HttpStream = struct {
             } else {
                 return error.HttpRedirectWithoutLocation;
             }
-            return;
         } else if (is_redirect) {
             return error.HttpRedirectUnexpected;
         }
@@ -239,8 +238,6 @@ pub const HttpStream = struct {
         }
 
         if (head.status != .ok) {
-            const status_code: c_int = @intFromEnum(head.status);
-            _ = status_code;
             return error.HttpStatusCodeUnexpected;
         }
 
@@ -299,14 +296,11 @@ const HttpRequest = struct {
     url: []const u8,
     accept: []const u8,
     content_type: ?[]const u8,
-    content_length: usize,
     chunked: bool,
-    expect_continue: bool,
 
     fn init(
         allocator: std.mem.Allocator,
         stream: *HttpStream,
-        len: usize,
     ) !HttpRequest {
         var uri = try std.Uri.parse(stream.url);
         const base_path = switch (uri.path) {
@@ -331,9 +325,7 @@ const HttpRequest = struct {
             .url = url,
             .accept = stream.service.response_type,
             .content_type = stream.service.request_type,
-            .content_length = if (stream.service.chunked) 0 else len,
             .chunked = stream.service.chunked,
-            .expect_continue = false,
         };
     }
 

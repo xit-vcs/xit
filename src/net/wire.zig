@@ -69,7 +69,7 @@ pub const WireStream = union(WireKind) {
     ) !?WireStream {
         return switch (wire_state.*) {
             .http => |*http| .{ .http = try net_http.HttpStream.init(http, url, wire_action) },
-            .raw => |*raw| if (try net_raw.RawStream.initMaybe(io, allocator, raw, url, wire_action)) |stream| .{ .raw = stream } else null,
+            .raw => if (try net_raw.RawStream.initMaybe(io, allocator, url, wire_action)) |stream| .{ .raw = stream } else null,
             .ssh => |*ssh| if (try net_ssh.SshStream.initMaybe(ssh, url, wire_action)) |stream| .{ .ssh = stream } else null,
         };
     }
@@ -286,7 +286,6 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             return .{
                 .fetch_by_oid = self.caps.allow_tip_sha1_in_want,
                 .fetch_reachable = self.caps.allow_reachable_sha1_in_want,
-                .push_options = self.caps.push_options,
             };
         }
 
@@ -862,15 +861,12 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 pub const Capabilities = struct {
     allow_tip_sha1_in_want: bool = false,
     allow_reachable_sha1_in_want: bool = false,
-    push_options: bool = false,
     ofs_delta: bool = false,
     multi_ack: bool = false,
     multi_ack_detailed: bool = false,
     side_band: bool = false,
     side_band_64k: bool = false,
     include_tag: bool = false,
-    delete_refs: bool = false,
-    report_status: bool = false,
     thin_pack: bool = false,
     shallow: bool = false,
     common: bool = false,
@@ -899,10 +895,8 @@ pub const Capabilities = struct {
                 self.side_band = true;
                 self.common = true;
             } else if (std.mem.startsWith(u8, cap, "delete-refs")) {
-                self.delete_refs = true;
                 self.common = true;
             } else if (std.mem.startsWith(u8, cap, "push-options")) {
-                self.push_options = true;
                 self.common = true;
             } else if (std.mem.startsWith(u8, cap, "thin-pack")) {
                 self.thin_pack = true;

@@ -22,7 +22,6 @@ pub const TransportDefinition = net_transport.TransportDefinition;
 pub fn RemoteHead(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         oid: [hash.hexLen(repo_opts.hash)]u8,
-        loid: [hash.hexLen(repo_opts.hash)]u8,
         is_local: bool,
         name: []u8,
         symref: ?[]u8,
@@ -30,7 +29,6 @@ pub fn RemoteHead(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         pub fn init(name: []u8) RemoteHead(repo_kind, repo_opts) {
             return .{
                 .oid = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
-                .loid = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
                 .is_local = false,
                 .name = name,
                 .symref = null,
@@ -318,18 +316,13 @@ pub fn matchingRefSpec(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     remote: *Remote(repo_kind, repo_opts),
-    comptime kind: enum { dst, src },
     refname: []const u8,
 ) ?*net_refspec.RefSpec {
     for (remote.active_refspecs.items) |*spec| {
         if (.push == spec.direction) {
             continue;
         }
-        const target = switch (kind) {
-            .dst => spec.dst,
-            .src => spec.src,
-        };
-        if (net_refspec.matches(target, refname)) {
+        if (net_refspec.matches(spec.src, refname)) {
             return spec;
         }
     }

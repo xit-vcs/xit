@@ -24,7 +24,6 @@ pub const TransportKind = enum {
 pub const Capabilities = struct {
     fetch_by_oid: bool = false,
     fetch_reachable: bool = false,
-    push_options: bool = false,
 };
 
 pub fn Transport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {

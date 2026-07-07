@@ -7,9 +7,6 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
 const hash = @import("../hash.zig");
-const df = @import("../diff.zig");
-const obj = @import("../object.zig");
-const tr = @import("../tree.zig");
 
 pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
