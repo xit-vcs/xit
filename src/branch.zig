@@ -50,58 +50,22 @@ pub fn add(
         },
     };
 
-    switch (repo_kind) {
-        .git => {
-            var refs_dir = try state.core.repo_dir.openDir(io, "refs", .{});
-            defer refs_dir.close(io);
-            var heads_dir = try refs_dir.createDirPathOpen(io, "heads", .{});
-            defer heads_dir.close(io);
-
-            // if there are any slashes in the branch name,
-            // we must treat it as a path and make dirs.
-            // why? i have no idea! what is the point of this, linus!
-            var leaf_name = name;
-            var subdir_maybe = blk: {
-                if (std.mem.lastIndexOfScalar(u8, name, '/')) |last_slash| {
-                    leaf_name = name[last_slash + 1 ..];
-                    break :blk try heads_dir.createDirPathOpen(io, name[0..last_slash], .{});
-                } else {
-                    break :blk null;
-                }
-            };
-            defer if (subdir_maybe) |*subdir| subdir.close(io);
-
-            // create lock file
-            var lock = try fs.LockFile.init(io, if (subdir_maybe) |subdir| subdir else heads_dir, leaf_name);
-            defer lock.deinit(io);
-
-            // get HEAD contents and write to lock file
-            if (oid_maybe) |oid| {
-                try lock.lock_file.writeStreamingAll(io, &oid);
-                try lock.lock_file.writeStreamingAll(io, "\n");
-                lock.success = true;
-            }
-        },
+    if (oid_maybe) |oid| {
+        var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        const ref_path = try (rf.Ref{ .kind = .head, .name = name }).toPath(&ref_path_buffer);
+        try rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = &oid });
+    } else switch (repo_kind) {
+        // a branch without a target does nothing on the git backend
+        .git => {},
         .xit => {
             const DB = rp.Repo(repo_kind, repo_opts).DB;
 
-            // add ref name to refs/heads/{refname}
+            // create an empty ref (a key with no content) in refs/heads/{refname}
             const refs_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "refs"));
             const refs = try DB.SortedMap(.read_write).init(refs_cursor);
             const heads_cursor = try refs.putCursor("heads");
             const heads = try DB.SortedMap(.read_write).init(heads_cursor);
-
-            // store ref content
-            if (oid_maybe) |oid| {
-                const ref_content_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "ref-content-set"));
-                const ref_content_set = try DB.HashSet(.read_write).init(ref_content_set_cursor);
-                var ref_content_cursor = try ref_content_set.putCursor(hash.hashInt(repo_opts.hash, &oid));
-                try ref_content_cursor.writeIfEmpty(.{ .bytes = &oid });
-                try heads.put(name, .{ .slot = ref_content_cursor.slot() });
-            } else {
-                // create an empty ref (a key with no content)
-                _ = try heads.putCursor(name);
-            }
+            _ = try heads.putCursor(name);
         },
     }
 }
@@ -135,20 +99,8 @@ pub fn remove(
             var head_lock = try fs.LockFile.init(io, state.core.repo_dir, "HEAD");
             defer head_lock.deinit(io);
 
-            // delete file
             try heads_dir.deleteFile(io, input.name);
-
-            // delete parent dirs
-            // this is only necessary because branches with a slash
-            // in their name are stored on disk as subdirectories
-            var parent_path_maybe = std.fs.path.dirname(input.name);
-            while (parent_path_maybe) |parent_path| {
-                heads_dir.deleteDir(io, parent_path) catch |err| switch (err) {
-                    error.DirNotEmpty => break,
-                    else => |e| return e,
-                };
-                parent_path_maybe = std.fs.path.dirname(parent_path);
-            }
+            try fs.deleteEmptyParents(io, heads_dir, input.name);
         },
         .xit => {
             const DB = rp.Repo(repo_kind, repo_opts).DB;

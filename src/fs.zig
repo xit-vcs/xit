@@ -52,6 +52,18 @@ pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
     try dir_file.sync(io);
 }
 
+/// delete any parent dirs of `path` that are now empty
+pub fn deleteEmptyParents(io: std.Io, parent_dir: std.Io.Dir, path: []const u8) !void {
+    var dir_path_maybe = std.fs.path.dirname(path);
+    while (dir_path_maybe) |dir_path| {
+        parent_dir.deleteDir(io, dir_path) catch |err| switch (err) {
+            error.DirNotEmpty, error.FileNotFound => break,
+            else => |e| return e,
+        };
+        dir_path_maybe = std.fs.path.dirname(dir_path);
+    }
+}
+
 pub const Mode = packed struct(u32) {
     pub const ObjectType = enum(u4) {
         tree = 0o04,

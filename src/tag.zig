@@ -1,6 +1,7 @@
 const std = @import("std");
 const hash = @import("./hash.zig");
 const rf = @import("./ref.zig");
+const fs = @import("./fs.zig");
 const rp = @import("./repo.zig");
 const obj = @import("./object.zig");
 
@@ -56,20 +57,8 @@ pub fn remove(
             var tags_dir = try refs_dir.createDirPathOpen(io, "tags", .{});
             defer tags_dir.close(io);
 
-            // delete file
             try tags_dir.deleteFile(io, input.name);
-
-            // delete parent dirs
-            // this is only necessary because tags with a slash
-            // in their name are stored on disk as subdirectories
-            var parent_path_maybe = std.fs.path.dirname(input.name);
-            while (parent_path_maybe) |parent_path| {
-                tags_dir.deleteDir(io, parent_path) catch |err| switch (err) {
-                    error.DirNotEmpty => break,
-                    else => |e| return e,
-                };
-                parent_path_maybe = std.fs.path.dirname(parent_path);
-            }
+            try fs.deleteEmptyParents(io, tags_dir, input.name);
         },
         .xit => {
             const DB = rp.Repo(repo_kind, repo_opts).DB;

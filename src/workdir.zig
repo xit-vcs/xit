@@ -471,15 +471,7 @@ pub fn removePaths(
     if (opts.update_work_dir) {
         for (removed_paths.keys()) |path| {
             try state.core.work_dir.deleteFile(io, path);
-
-            var dir_path_maybe = std.fs.path.dirname(path);
-            while (dir_path_maybe) |dir_path| {
-                state.core.work_dir.deleteDir(io, dir_path) catch |err| switch (err) {
-                    error.DirNotEmpty, error.FileNotFound => break,
-                    else => |e| return e,
-                };
-                dir_path_maybe = std.fs.path.dirname(dir_path);
-            }
+            try fs.deleteEmptyParents(io, state.core.work_dir, path);
         }
     }
 
@@ -808,14 +800,7 @@ pub fn migrate(
                 error.FileNotFound => {},
                 else => |e| return e,
             };
-            var dir_path_maybe = std.fs.path.dirname(path);
-            while (dir_path_maybe) |dir_path| {
-                state.core.work_dir.deleteDir(io, dir_path) catch |err| switch (err) {
-                    error.DirNotEmpty, error.FileNotFound => break,
-                    else => |e| return e,
-                };
-                dir_path_maybe = std.fs.path.dirname(dir_path);
-            }
+            try fs.deleteEmptyParents(io, state.core.work_dir, path);
         }
         // update index
         try index.removePath(path, null);
