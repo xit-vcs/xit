@@ -696,19 +696,12 @@ pub fn migrate(
     defer remove_files.deinit(allocator);
 
     for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
-        if (change.old == null) {
-            // if the old change doesn't exist and the new change does, it's an added file
-            if (change.new) |new| {
-                try add_files.put(allocator, path, new);
-            }
-        } else if (change.new == null) {
-            // if the new change doesn't exist, it's a removed file
-            try remove_files.put(allocator, path, {});
+        if (change.new) |new| {
+            // the file is being added or edited
+            try add_files.put(allocator, path, new);
         } else {
-            // otherwise, it's an edited file
-            if (change.new) |new| {
-                try add_files.put(allocator, path, new);
-            }
+            // the file is being removed
+            try remove_files.put(allocator, path, {});
         }
         // check for conflicts
         if (switch_result_maybe) |switch_result| {
@@ -916,58 +909,44 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             var tree_diff = tr.TreeDiff(repo_kind, repo_opts).init(arena.allocator());
             try tree_diff.compare(state.readOnly(), io, if (current_oid_maybe) |current_oid| &current_oid else null, &target_oid, null);
 
-            switch (repo_kind) {
-                .git => {
-                    // create lock file
-                    var lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
-                    defer lock.deinit(io);
+            // when this block ends, the git backend's lock on the index file is
+            // released, renaming the lock file into place
+            {
+                // the git backend needs a lock on the index file while it's updated
+                var lock_maybe: ?fs.LockFile = null;
+                defer if (lock_maybe) |*lock| lock.deinit(io);
+                const write_state: rp.Repo(repo_kind, repo_opts).State(.read_write) = switch (repo_kind) {
+                    .git => blk: {
+                        const lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
+                        lock_maybe = lock;
+                        break :blk .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
+                    },
+                    .xit => state,
+                };
 
-                    // read index
-                    var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                    defer index.deinit();
+                // read index
+                var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                defer index.deinit();
 
-                    // update the work dir
-                    try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, if (input.force) null else &switch_result);
+                // update the work dir
+                try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, if (input.force) null else &switch_result);
 
-                    // return early if conflict
-                    if (.conflict == switch_result.result) {
-                        return switch_result;
-                    }
+                // return early if conflict
+                if (.conflict == switch_result.result) {
+                    return switch_result;
+                }
 
-                    // update the index
-                    try index.write(allocator, .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } }, io);
+                // update the index
+                try index.write(allocator, write_state, io);
 
-                    // update HEAD
-                    switch (input.kind) {
-                        .@"switch" => try rf.replaceHead(repo_kind, repo_opts, state, io, target),
-                        .reset => try rf.updateHead(repo_kind, repo_opts, state, io, &target_oid),
-                    }
+                // update HEAD
+                switch (input.kind) {
+                    .@"switch" => try rf.replaceHead(repo_kind, repo_opts, state, io, target),
+                    .reset => try rf.updateHead(repo_kind, repo_opts, state, io, &target_oid),
+                }
 
-                    // finish lock
-                    lock.success = true;
-                },
-                .xit => {
-                    // read index
-                    var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                    defer index.deinit();
-
-                    // update the work dir
-                    try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, if (input.force) null else &switch_result);
-
-                    // return early if conflict
-                    if (.conflict == switch_result.result) {
-                        return switch_result;
-                    }
-
-                    // update the index
-                    try index.write(allocator, state, io);
-
-                    // update HEAD
-                    switch (input.kind) {
-                        .@"switch" => try rf.replaceHead(repo_kind, repo_opts, state, io, target),
-                        .reset => try rf.updateHead(repo_kind, repo_opts, state, io, &target_oid),
-                    }
-                },
+                // finish lock
+                if (lock_maybe) |*lock| lock.success = true;
             }
 
             // if -f, we need to clean up stored merge state as well
