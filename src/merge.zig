@@ -1575,97 +1575,66 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         },
                     };
 
-                    switch (repo_kind) {
-                        .git => {
-                            // create lock file
-                            var lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
-                            defer lock.deinit(io);
+                    // this block must end before the commit is written below, because
+                    // the git backend holds a lock on the index file until then and
+                    // writing the commit will read the index file
+                    {
+                        // the git backend needs a lock on the index file while it's updated
+                        var lock_maybe: ?fs.LockFile = null;
+                        defer if (lock_maybe) |*lock| lock.deinit(io);
+                        const write_state: rp.Repo(repo_kind, repo_opts).State(.read_write) = switch (repo_kind) {
+                            .git => blk: {
+                                const lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
+                                lock_maybe = lock;
+                                break :blk .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
+                            },
+                            .xit => state,
+                        };
 
-                            // read index
-                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                            defer index.deinit();
+                        // read index
+                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                        defer index.deinit();
 
-                            // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
+                        // update the work dir
+                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
 
-                            for (conflicts.keys(), conflicts.values()) |path, conflict| {
-                                // add conflict to index
-                                try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
-                                // write renamed file if necessary
-                                if (conflict.renamed) |renamed| {
-                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
-                                }
+                        for (conflicts.keys(), conflicts.values()) |path, conflict| {
+                            // add conflict to index
+                            try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
+                            // write renamed file if necessary
+                            if (conflict.renamed) |renamed| {
+                                try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
                             }
+                        }
 
-                            // update the index
-                            try index.write(allocator, .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } }, io);
+                        // update the index
+                        try index.write(allocator, write_state, io);
 
-                            // finish lock
-                            lock.success = true;
+                        // finish lock
+                        if (lock_maybe) |*lock| lock.success = true;
 
-                            // exit early if there were conflicts
-                            if (conflicts.count() > 0) {
-                                try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
+                        // exit early if there were conflicts
+                        if (conflicts.count() > 0) {
+                            try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
 
-                                const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
-                                defer merge_msg.close(io);
-                                try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
+                            const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
+                            defer merge_msg.close(io);
+                            try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
 
-                                return .{
-                                    .arena = arena,
-                                    .allocator = allocator,
-                                    .changes = clean_diff.changes,
-                                    .auto_resolved_conflicts = auto_resolved_conflicts,
-                                    .base_oid = base_oid,
-                                    .target_name = target_name,
-                                    .source_name = source_name,
-                                    .result = .{ .conflict = .{ .conflicts = conflicts } },
-                                };
-                            }
-                        },
-                        .xit => {
-                            // read index
-                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                            defer index.deinit();
-
-                            // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
-
-                            for (conflicts.keys(), conflicts.values()) |path, conflict| {
-                                // add conflict to index
-                                try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
-                                // write renamed file if necessary
-                                if (conflict.renamed) |renamed| {
-                                    try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
-                                }
-                            }
-
-                            // update the index
-                            try index.write(allocator, state, io);
-
-                            // exit early if there were conflicts
-                            if (conflicts.count() > 0) {
-                                try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
-
-                                const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
-                                defer merge_msg.close(io);
-                                try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
-
-                                return .{
-                                    .arena = arena,
-                                    .allocator = allocator,
-                                    .changes = clean_diff.changes,
-                                    .auto_resolved_conflicts = auto_resolved_conflicts,
-                                    .base_oid = base_oid,
-                                    .target_name = target_name,
-                                    .source_name = source_name,
-                                    .result = .{ .conflict = .{ .conflicts = conflicts } },
-                                };
-                            } else {
-                                // if any file conflicts were auto-resolved, there will be temporary state that must be cleaned up
-                                try removeMergeState(repo_kind, repo_opts, state, io);
-                            }
-                        },
+                            return .{
+                                .arena = arena,
+                                .allocator = allocator,
+                                .changes = clean_diff.changes,
+                                .auto_resolved_conflicts = auto_resolved_conflicts,
+                                .base_oid = base_oid,
+                                .target_name = target_name,
+                                .source_name = source_name,
+                                .result = .{ .conflict = .{ .conflicts = conflicts } },
+                            };
+                        } else if (repo_kind == .xit) {
+                            // if any file conflicts were auto-resolved, there will be temporary state that must be cleaned up
+                            try removeMergeState(repo_kind, repo_opts, state, io);
+                        }
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
