@@ -1204,9 +1204,9 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
         var ref_iter = try repo.listBranches(io, allocator, .beginning);
-        defer ref_iter.deinit(io);
+        defer ref_iter.deinit();
         var count: usize = 0;
-        while (try ref_iter.next(io)) |_| count += 1;
+        while (try ref_iter.next()) |_| count += 1;
         try std.testing.expectEqual(2, count);
     }
 
@@ -1286,10 +1286,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
         var ref_iter = try repo.listBranches(io, allocator, .beginning);
-        defer ref_iter.deinit(io);
+        defer ref_iter.deinit();
         var names: std.StringArrayHashMapUnmanaged(void) = .empty;
         defer names.deinit(allocator);
-        while (try ref_iter.next(io)) |ref| try names.put(allocator, ref.name, {});
+        while (try ref_iter.next()) |ref| try names.put(allocator, ref.name, {});
         try std.testing.expectEqual(3, names.count());
         try std.testing.expect(names.contains("a/b/c"));
         try std.testing.expect(names.contains("stuff"));
@@ -1297,21 +1297,19 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     }
 
     // list branches starting from a key/index
-    if (repo_kind == .xit) {
+    {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        var moment = try repo.core.latestMoment();
-        const state = rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
 
         // branches in sorted order: a/b/c, master, stuff
 
         // start from a key
         {
-            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, .head, .{ .key = "master" });
-            defer ref_iter.deinit(io);
+            var ref_iter = try repo.listBranches(io, allocator, .{ .key = "master" });
+            defer ref_iter.deinit();
             var names: std.ArrayList([]const u8) = .empty;
             defer names.deinit(allocator);
-            while (try ref_iter.next(io)) |ref| try names.append(allocator, ref.name);
+            while (try ref_iter.next()) |ref| try names.append(allocator, ref.name);
             try std.testing.expectEqual(2, names.items.len);
             try std.testing.expectEqualStrings("master", names.items[0]);
             try std.testing.expectEqualStrings("stuff", names.items[1]);
@@ -1319,11 +1317,11 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
 
         // start from an index
         {
-            var ref_iter = try rf.RefIterator(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, .head, .{ .index = 2 });
-            defer ref_iter.deinit(io);
+            var ref_iter = try repo.listBranches(io, allocator, .{ .index = 2 });
+            defer ref_iter.deinit();
             var names: std.ArrayList([]const u8) = .empty;
             defer names.deinit(allocator);
-            while (try ref_iter.next(io)) |ref| try names.append(allocator, ref.name);
+            while (try ref_iter.next()) |ref| try names.append(allocator, ref.name);
             try std.testing.expectEqual(1, names.items.len);
             try std.testing.expectEqualStrings("stuff", names.items[0]);
         }

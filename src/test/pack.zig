@@ -447,6 +447,9 @@ test "read packed refs" {
     defer packed_refs.close(io);
     try packed_refs.writeStreamingAll(io,
         \\# pack-refs with: peeled fully-peeled sorted
+        \\5246e54744f4e1824ca280e6a2630a87959d7cf4 refs/heads/master
+        \\1ea47a890400815b24a0073f110a41530322a44f refs/heads/feature/one
+        \\1f6190c71bd33b37cfd885491889a0410f849f5b refs/tags/1.0.0
         \\5246e54744f4e1824ca280e6a2630a87959d7cf4 refs/remotes/origin/master
         \\1ea47a890400815b24a0073f110a41530322a44f refs/remotes/sync/chunk
         \\5246e54744f4e1824ca280e6a2630a87959d7cf4 refs/remotes/sync/master
@@ -457,4 +460,46 @@ test "read packed refs" {
     try std.testing.expectEqualStrings("5246e54744f4e1824ca280e6a2630a87959d7cf4", &oid_maybe.?);
 
     try std.testing.expect(null == try r.readRef(io, .{ .kind = .{ .remote = "sync" }, .name = "foo" }));
+
+    // iterating branches and tags includes packed refs, in sorted order
+    {
+        var branch_iter = try r.listBranches(io, allocator, .beginning);
+        defer branch_iter.deinit();
+        try std.testing.expectEqualStrings("feature/one", ((try branch_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expectEqualStrings("master", ((try branch_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expect(null == try branch_iter.next());
+
+        var tag_iter = try r.listTags(io, allocator, .beginning);
+        defer tag_iter.deinit();
+        try std.testing.expectEqualStrings("1.0.0", ((try tag_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expect(null == try tag_iter.next());
+    }
+
+    // a loose ref with the same name as a packed ref is only emitted once
+    {
+        var heads_dir = try repo_dir.createDirPathOpen(io, "refs/heads", .{});
+        defer heads_dir.close(io);
+        var master_file = try heads_dir.createFile(io, "master", .{});
+        defer master_file.close(io);
+        try master_file.writeStreamingAll(io, "1ea47a890400815b24a0073f110a41530322a44f\n");
+
+        var branch_iter = try r.listBranches(io, allocator, .beginning);
+        defer branch_iter.deinit();
+        try std.testing.expectEqualStrings("feature/one", ((try branch_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expectEqualStrings("master", ((try branch_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expect(null == try branch_iter.next());
+    }
+
+    // start iterating from a key or index
+    {
+        var key_iter = try r.listBranches(io, allocator, .{ .key = "master" });
+        defer key_iter.deinit();
+        try std.testing.expectEqualStrings("master", ((try key_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expect(null == try key_iter.next());
+
+        var index_iter = try r.listBranches(io, allocator, .{ .index = 1 });
+        defer index_iter.deinit();
+        try std.testing.expectEqualStrings("master", ((try index_iter.next()) orelse return error.RefNotFound).name);
+        try std.testing.expect(null == try index_iter.next());
+    }
 }

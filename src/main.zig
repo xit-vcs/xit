@@ -297,9 +297,9 @@ fn runCommand(
         .tag => |tag_cmd| switch (tag_cmd) {
             .list => {
                 var ref_iter = try repo.listTags(io, allocator, .beginning);
-                defer ref_iter.deinit(io);
+                defer ref_iter.deinit();
 
-                while (try ref_iter.next(io)) |ref| {
+                while (try ref_iter.next()) |ref| {
                     try run_opts.out.print("{s}\n", .{ref.name});
                 }
             },
@@ -434,9 +434,9 @@ fn runCommand(
                     };
 
                     var ref_iter = try repo.listBranches(io, allocator, .beginning);
-                    defer ref_iter.deinit(io);
+                    defer ref_iter.deinit();
 
-                    while (try ref_iter.next(io)) |ref| {
+                    while (try ref_iter.next()) |ref| {
                         const prefix = if (std.mem.eql(u8, current_branch_name, ref.name)) "*" else " ";
                         try run_opts.out.print("{s} {s}\n", .{ prefix, ref.name });
                     }

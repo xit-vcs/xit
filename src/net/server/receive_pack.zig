@@ -191,9 +191,9 @@ const ReceivePack = struct {
         // heads and tags
         for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
             var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
-            defer iter.deinit(io);
+            defer iter.deinit();
 
-            while (try iter.next(io)) |ref| {
+            while (try iter.next()) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                     var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
                     const ref_path = try ref.toPath(&path_buf);

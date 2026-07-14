@@ -293,9 +293,9 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
                 var iter = try rf.RefIterator(.git, remote_repo_opts).init(state, io, allocator, ref_kind, .beginning);
-                defer iter.deinit(io);
+                defer iter.deinit();
 
-                while (try iter.next(io)) |ref| {
+                while (try iter.next()) |ref| {
                     try self.addHead(state, io, allocator, ref);
                 }
             }

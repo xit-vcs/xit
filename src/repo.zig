@@ -1316,10 +1316,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                     // add refs
                     {
-                        var ref_iter = try rf.AllRefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
-                        defer ref_iter.deinit(ctx.io);
+                        var ref_iter = try rf.AllRefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.allocator);
+                        defer ref_iter.deinit();
 
-                        while (try ref_iter.next(ctx.io)) |ref| {
+                        while (try ref_iter.next()) |ref| {
                             if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) |oid| {
                                 try obj_iter.include(&oid);
                             }

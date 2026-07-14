@@ -352,9 +352,9 @@ fn findLiveOids(
 
     // all refs under the "refs" key: heads, tags, remotes and any other kind
     {
-        var ref_iter = try rf.AllRefIterator(.xit, repo_opts).init(state, io, allocator);
-        defer ref_iter.deinit(io);
-        while (try ref_iter.next(io)) |ref| {
+        var ref_iter = try rf.AllRefIterator(.xit, repo_opts).init(state, allocator);
+        defer ref_iter.deinit();
+        while (try ref_iter.next()) |ref| {
             if (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) |oid| {
                 try obj_iter.include(&oid);
             }

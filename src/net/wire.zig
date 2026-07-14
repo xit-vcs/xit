@@ -394,9 +394,9 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
                 var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
-                defer iter.deinit(io);
+                defer iter.deinit();
 
-                while (try iter.next(io)) |ref| {
+                while (try iter.next()) |ref| {
                     if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
                         try obj_iter.include(oid);
                     }
