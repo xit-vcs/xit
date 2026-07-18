@@ -685,6 +685,8 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     .object_reader = obj_rdr,
                 },
                 .tree => {
+                    if (header.size > repo_opts.max_tree_size) return error.TreeTooLarge;
+
                     var entries: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
 
                     while (obj_rdr.interface.peekByte()) |_| {

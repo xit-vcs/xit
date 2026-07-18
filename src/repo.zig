@@ -65,6 +65,7 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         max_read_size: usize = 4096,
         max_line_size: usize = 10_000,
         max_line_count: usize = 10_000_000,
+        max_tree_size: u64 = 1_000_000, // max size in bytes of a single tree object before reading it is aborted with error.TreeTooLarge
         max_edit_count: usize = 1_000_000, // max edit distance before a diff is aborted with error.DiffTooLarge
         max_total_line_count: usize = 50_000_000, // max total lines across all files in a diff before it is aborted with error.DiffTooLarge
         delta_window_size: usize = 10, // how many previous objects to try delta-compressing against when writing a pack
