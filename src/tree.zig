@@ -243,3 +243,56 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         }
     };
 }
+
+// the immediate entries of one directory in a commit's tree
+pub fn TreeDir(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+    return struct {
+        // owns the entries' memory
+        object: obj.Object(repo_kind, repo_opts),
+        entries: std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)),
+        file_name: ?[]const u8,
+
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            oid: *const [hash.hexLen(repo_opts.hash)]u8,
+            path: []const u8,
+        ) !TreeDir(repo_kind, repo_opts) {
+            var commit_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, allocator, oid);
+            defer commit_object.deinit();
+
+            var object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &commit_object.content.commit.tree);
+            errdefer object.deinit();
+            if (object.content != .tree) return error.ObjectInvalid;
+
+            var file_name: ?[]const u8 = null;
+            var iter = std.mem.splitScalar(u8, path, '/');
+            while (iter.next()) |name| {
+                if (name.len == 0) continue;
+                const tree_entry = object.content.tree.entries.get(name) orelse return error.TreeEntryNotFound;
+                if (tree_entry.isTree()) {
+                    const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
+                    const next_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
+                    object.deinit();
+                    object = next_object;
+                    if (object.content != .tree) return error.ObjectInvalid;
+                } else {
+                    // a file ends the path; anything after it can't exist
+                    if (iter.next() != null) return error.TreeEntryNotFound;
+                    file_name = name;
+                }
+            }
+
+            return .{
+                .object = object,
+                .entries = object.content.tree.entries,
+                .file_name = file_name,
+            };
+        }
+
+        pub fn deinit(self: *TreeDir(repo_kind, repo_opts)) void {
+            self.object.deinit();
+        }
+    };
+}
