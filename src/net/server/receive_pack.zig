@@ -579,13 +579,21 @@ const Deny = enum {
 };
 
 fn writeMessage(writer: *std.Io.Writer, comptime prefix: [:0]const u8, comptime err: [:0]const u8, params: anytype) !void {
+    // the params can include client-supplied ref names, which are far
+    // bigger than this buffer, so the message is truncated if it overflows.
+    // the last byte is reserved so the newline can always be written.
     var buffer = [_]u8{0} ** 4096;
-    var fixed: std.Io.Writer = .fixed(&buffer);
+    var fixed: std.Io.Writer = .fixed(buffer[0 .. buffer.len - 1]);
 
-    try fixed.print(prefix ++ err ++ "\n", params);
+    fixed.print(prefix ++ err ++ "\n", params) catch {};
 
-    const msg = fixed.buffered();
-    try pkt.sendSideband(writer, 2, msg);
+    var len = fixed.buffered().len;
+    if (len == 0 or buffer[len - 1] != '\n') {
+        buffer[len] = '\n';
+        len += 1;
+    }
+
+    try pkt.sendSideband(writer, 2, buffer[0..len]);
 }
 
 fn writeWarning(writer: *std.Io.Writer, comptime err: [:0]const u8, params: anytype) !void {
