@@ -362,6 +362,10 @@ const ReceivePack = struct {
             for (ref_updates) |*update| {
                 if (update.error_message == null) {
                     blk: {
+                        // the name comes from the client, so it may not be a
+                        // ref at all. applyRefUpdate will reject it below.
+                        if (rf.Ref.initFromPath(update.ref_name, null) == null) break :blk;
+
                         var read_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
                         const ref_or_oid = rf.read(repo_kind, repo_opts, state.readOnly(), io, update.ref_name, &read_buf) catch |err| switch (err) {
                             error.RefNotFound => break :blk,
@@ -442,13 +446,30 @@ const ReceivePack = struct {
     ) !?[]const u8 {
         const name = ref_update.ref_name;
 
-        const name_after_refs = name["refs/".len..];
-        if (!std.mem.startsWith(u8, name, "refs/") or
-            !rf.validateName(name_after_refs) or
-            (!isNullOid(&ref_update.new_oid) and std.mem.indexOfScalar(u8, name_after_refs, '/') == null))
-        {
+        const is_funny_ref = if (std.mem.startsWith(u8, name, "refs/")) blk: {
+            const name_after_refs = name["refs/".len..];
+            break :blk !rf.validateName(name_after_refs) or
+                (!isNullOid(&ref_update.new_oid) and std.mem.indexOfScalar(u8, name_after_refs, '/') == null) or
+                // a name that doesn't parse as a ref can't be read or written
+                rf.Ref.initFromPath(name, null) == null;
+        } else true;
+
+        if (is_funny_ref) {
             try writeError(writer, "refusing to update funny ref '{s}' remotely", .{name});
             return "funny refname";
+        }
+
+        // the ref must still point at the old oid the client sent, so a stale
+        // or concurrent push can't clobber an update it never saw. a ref that
+        // doesn't exist reads as the null oid, which is what a create sends.
+        {
+            const ref = rf.Ref.initFromPath(name, null) orelse return "funny refname";
+            const current_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref }) orelse
+                [_]u8{'0'} ** hash.hexLen(repo_opts.hash);
+            if (!std.mem.eql(u8, &current_oid, &ref_update.old_oid)) {
+                try writeError(writer, "refusing to update '{s}', which has changed since you last fetched", .{name});
+                return "stale info";
+            }
         }
 
         var should_update_worktree = false;
@@ -528,7 +549,10 @@ const ReceivePack = struct {
         }
 
         if (isNullOid(&ref_update.new_oid)) {
-            try rf.remove(repo_kind, repo_opts, state, io, name);
+            rf.remove(repo_kind, repo_opts, state, io, name) catch |err| switch (err) {
+                error.RefNotFound => return "deletion of non-existent ref",
+                else => |e| return e,
+            };
         } else {
             try rf.write(repo_kind, repo_opts, state, io, name, .{ .oid = &ref_update.new_oid });
         }
