@@ -1656,6 +1656,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                 },
             }
+
+            try writer.flush();
         }
 
         pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, response_kind: server_http_backend.ResponseKind, options: server_http_backend.Options) !void {
@@ -1697,6 +1699,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                 },
             }
+
+            try writer.flush();
         }
 
         /// reclaims disk space by removing objects that can't be reached

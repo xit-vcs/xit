@@ -118,9 +118,8 @@ pub fn run(
             try pkt.sendSideband(writer, 1, buf.items);
         }
     }
-    try pkt.writePktFlush(writer);
+    try writer.writeAll("0000");
 
-    // the report has been sent, so all that's left is to roll the ref updates back
     if (atomic_failure) return error.CancelTransaction;
 }
 
