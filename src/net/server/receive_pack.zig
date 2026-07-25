@@ -503,6 +503,10 @@ const ReceivePack = struct {
             const current_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref }) orelse
                 [_]u8{'0'} ** hash.hexLen(repo_opts.hash);
             if (!std.mem.eql(u8, &current_oid, &ref_update.old_oid)) {
+                if (isNullOid(&ref_update.old_oid)) {
+                    try writeError(writer, "refusing to create '{s}', which already exists", .{name});
+                    return "already exists";
+                }
                 try writeError(writer, "refusing to update '{s}', which has changed since you last fetched", .{name});
                 return "stale info";
             }
@@ -567,7 +571,7 @@ const ReceivePack = struct {
             std.mem.startsWith(u8, name, "refs/heads/"))
         {
             const descendent = mrg.getDescendent(repo_kind, repo_opts, state.readOnly(), io, allocator, &ref_update.old_oid, &ref_update.new_oid) catch |err| switch (err) {
-                error.DescendentNotFound => return "bad ref",
+                error.DescendentNotFound => return "non-fast-forward",
                 else => |e| return e,
             };
 
