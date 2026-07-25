@@ -13,6 +13,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
     return struct {
         remote: *net.Remote(repo_kind, repo_opts),
         unpack_ok: bool,
+        ref_rejected: bool,
         obj_iter: obj.ObjectIterator(repo_kind, repo_opts),
 
         specs: std.ArrayList(PushSpec(repo_kind, repo_opts)),
@@ -29,6 +30,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             return Push(repo_kind, repo_opts){
                 .remote = remote,
                 .unpack_ok = false,
+                .ref_rejected = false,
                 .obj_iter = obj_iter,
                 .specs = .empty,
             };
@@ -153,6 +155,10 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
 
             if (!self.unpack_ok) {
                 return error.RemoteFailedToUnpack;
+            }
+
+            if (self.ref_rejected) {
+                return error.RemoteRejectedRef;
             }
         }
     };

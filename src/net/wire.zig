@@ -240,7 +240,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 self.wire_stream = stream;
             }
 
-            try self.addRefs(allocator, if (self.is_stateless) 2 else 1);
+            try self.addRefs(io, allocator, if (self.is_stateless) 2 else 1);
 
             self.have_refs = true;
 
@@ -583,6 +583,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
         fn addRefs(
             self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             flushes: c_int,
         ) !void {
@@ -604,7 +605,12 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                     self.buffer.consume(consumed);
 
                     switch (pkt.*) {
-                        .err => {
+                        .err => |msg| {
+                            if (repo_opts.ProgressCtx != void) {
+                                if (self.opts.progress_ctx) |progress_ctx| {
+                                    try progress_ctx.run(io, .{ .text = msg });
+                                }
+                            }
                             pkt.deinit(allocator);
                             return error.ServerReportedError;
                         },
@@ -769,14 +775,21 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                     var iter_over = false;
 
                     switch (pkt.*) {
-                        .data => |data| try handlePushSidebandPkt(allocator, git_push, data),
-                        .err => return error.ServerReportedError,
+                        .data => |data| try self.handlePushSidebandPkt(io, allocator, git_push, data),
+                        .err => |msg| {
+                            if (repo_opts.ProgressCtx != void) {
+                                if (self.opts.progress_ctx) |progress_ctx| {
+                                    try progress_ctx.run(io, .{ .text = msg });
+                                }
+                            }
+                            return error.ServerReportedError;
+                        },
                         .progress => |progress| if (repo_opts.ProgressCtx != void) {
                             if (self.opts.progress_ctx) |progress_ctx| {
                                 try progress_ctx.run(io, .{ .text = progress });
                             }
                         },
-                        else => iter_over = try handlePushPkt(git_push, pkt),
+                        else => iter_over = try self.handlePushPkt(io, git_push, pkt),
                     }
 
                     if (iter_over) {
@@ -793,11 +806,21 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         }
 
         fn handlePushPkt(
+            self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             git_push: *net_push.Push(repo_kind, repo_opts),
             pkt: *net_pkt.Pkt(repo_kind, repo_opts),
         ) !bool {
             switch (pkt.*) {
-                .ok, .ng => {},
+                .ok => {},
+                .ng => |msg| {
+                    git_push.ref_rejected = true;
+                    if (repo_opts.ProgressCtx != void) {
+                        if (self.opts.progress_ctx) |progress_ctx| {
+                            try progress_ctx.run(io, .{ .text = msg });
+                        }
+                    }
+                },
                 .unpack => |unpack| git_push.unpack_ok = unpack.unpack_ok,
                 .flush => return true,
                 else => return error.ProtocolError,
@@ -806,6 +829,8 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         }
 
         fn handlePushSidebandPkt(
+            self: *WireTransport(repo_kind, repo_opts),
+            io: std.Io,
             allocator: std.mem.Allocator,
             git_push: *net_push.Push(repo_kind, repo_opts),
             data_pkt: []const u8,
@@ -820,7 +845,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
                 line = line[consumed..];
 
-                _ = try handlePushPkt(git_push, &pkt);
+                _ = try self.handlePushPkt(io, git_push, &pkt);
             }
         }
     };

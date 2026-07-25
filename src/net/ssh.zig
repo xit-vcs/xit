@@ -191,6 +191,6 @@ fn spawnSsh(
         .argv = ssh_cmdline,
         .stdin = .pipe,
         .stdout = .pipe,
-        .stderr = .ignore,
+        .stderr = .inherit,
     });
 }

@@ -651,7 +651,7 @@ fn testFetch(
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
@@ -824,7 +824,7 @@ fn testPush(
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
@@ -947,7 +947,7 @@ fn testPush(
             const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
 
             // force push should be rejected by server due to denyNonFastForwards
-            try client_repo.push(
+            try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
                 io,
                 allocator,
                 "origin",
@@ -957,7 +957,7 @@ fn testPush(
                     .command = ssh_cmd_maybe,
                     .receive_pack_command = receive_pack_command,
                 } } },
-            );
+            ));
 
             // verify the server ref was not updated (push was denied)
             {
@@ -1116,7 +1116,7 @@ fn testClone(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1286,7 +1286,7 @@ fn testClone(
             const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
             defer allocator.free(priv_key_path);
 
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
         } else null;
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
@@ -1422,7 +1422,7 @@ fn testFetchLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1492,7 +1492,7 @@ fn testFetchLarge(
             const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
             defer allocator.free(priv_key_path);
 
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
         } else null;
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
@@ -1661,7 +1661,7 @@ fn testPushLarge(
     if (shell_out_to_git) {
         const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o IdentityFile={s}", .{priv_key_path});
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
 
         // shell out to git so it will send delta objects
@@ -1687,7 +1687,7 @@ fn testPushLarge(
             const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
             defer allocator.free(priv_key_path);
 
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
         } else null;
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
