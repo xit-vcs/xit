@@ -268,7 +268,6 @@ fn writePack(
 
 const UploadPack = struct {
     // config
-    allow_uor: AllowUor = .{},
     allow_filter: bool = false,
     allow_ref_in_want: bool = false,
     allow_sideband_all: bool = false,
@@ -320,20 +319,6 @@ const UploadPack = struct {
         defer config.deinit();
 
         if (config.sections.get("uploadpack")) |vars| {
-            if (vars.get("allowtipsha1inwant")) |v| {
-                self.allow_uor.tip_sha1 = common.parseBool(v);
-            }
-            if (vars.get("allowreachablesha1inwant")) |v| {
-                self.allow_uor.reachable_sha1 = common.parseBool(v);
-            }
-            if (vars.get("allowanysha1inwant")) |v| {
-                const allow = common.parseBool(v);
-                self.allow_uor = .{
-                    .tip_sha1 = allow,
-                    .reachable_sha1 = allow,
-                    .any_sha1 = allow,
-                };
-            }
             if (vars.get("allowfilter")) |v| {
                 self.allow_filter = common.parseBool(v);
             }
@@ -361,7 +346,7 @@ const UploadPack = struct {
         refname_nons: []const u8,
         oid: *const [hash.hexLen(repo_opts.hash)]u8,
     ) !void {
-        const v0_capabilities = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed";
+        const v0_capabilities = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed allow-tip-sha1-in-want allow-reachable-sha1-in-want";
 
         try our_refs.put(oid.*, {});
 
@@ -371,12 +356,6 @@ const UploadPack = struct {
             try line.print("{s} {s}", .{ oid, refname_nons });
             try line.writeByte(0);
             try line.writeAll(v0_capabilities);
-            if (self.allow_uor.tip_sha1) {
-                try line.writeAll(" allow-tip-sha1-in-want");
-            }
-            if (self.allow_uor.reachable_sha1) {
-                try line.writeAll(" allow-reachable-sha1-in-want");
-            }
             if (self.no_done) {
                 try line.writeAll(" no-done");
             }
@@ -1090,12 +1069,6 @@ const UploadPack = struct {
     }
 };
 
-const AllowUor = packed struct(u8) {
-    tip_sha1: bool = false,
-    reachable_sha1: bool = false,
-    any_sha1: bool = false,
-    _padding: u5 = 0,
-};
 const infinite_depth: usize = std.math.maxInt(usize);
 
 const MultiAck = enum(u8) { none = 0, multi_ack = 1, multi_ack_detailed = 2 };
