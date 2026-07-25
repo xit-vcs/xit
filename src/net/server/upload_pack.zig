@@ -1785,6 +1785,7 @@ fn getReachableShallows(
     }
 
     while (try obj_iter.next(allocator)) |object| {
+        defer object.deinit();
         if (remaining.contains(object.oid)) {
             try reachable.append(allocator, object.oid);
             _ = remaining.remove(object.oid);
