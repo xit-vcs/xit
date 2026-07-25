@@ -56,6 +56,8 @@ pub fn run(
 
     const ref_updates = try receive_pack.readRefUpdates(repo_opts.hash, &arena, reader);
 
+    var atomic_failure = false;
+
     if (ref_updates.items.len != 0) {
         {
             const delete_only = for (ref_updates.items) |update| {
@@ -82,6 +84,22 @@ pub fn run(
 
         try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options);
 
+        // an atomic push applies every ref update or none of them, so if any
+        // of them failed, the rest must be reported as failed as well
+        if (.xit == repo_kind and receive_pack.atomic) {
+            atomic_failure = for (ref_updates.items) |update| {
+                if (update.error_message != null) break true;
+            } else false;
+
+            if (atomic_failure) {
+                for (ref_updates.items) |*update| {
+                    if (update.error_message == null) {
+                        update.error_message = "atomic transaction failed";
+                    }
+                }
+            }
+        }
+
         if (receive_pack.report_status_v2 or receive_pack.report_status) {
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(allocator);
@@ -101,6 +119,9 @@ pub fn run(
         }
     }
     try pkt.writePktFlush(writer);
+
+    // the report has been sent, so all that's left is to roll the ref updates back
+    if (atomic_failure) return error.CancelTransaction;
 }
 
 const ReceivePack = struct {
@@ -115,6 +136,7 @@ const ReceivePack = struct {
     // protocol state
     sent_capabilities: bool = false,
     use_sideband: bool = false,
+    atomic: bool = false,
     report_status: bool = false,
     report_status_v2: bool = false,
     head_name: ?[]const u8 = null,
@@ -164,7 +186,11 @@ const ReceivePack = struct {
             var line: std.Io.Writer = .fixed(&line_buf);
             try line.print("{s} {s}", .{ oid, path });
             try line.writeByte(0);
-            try line.writeAll("report-status report-status-v2 delete-refs side-band-64k quiet atomic");
+            try line.writeAll("report-status report-status-v2 delete-refs side-band-64k quiet");
+            // only the xit backend can roll back a partially applied push
+            if (.xit == repo_kind) {
+                try line.writeAll(" atomic");
+            }
             if (self.prefer_ofs_delta) {
                 try line.writeAll(" ofs-delta");
             }
@@ -236,6 +262,9 @@ const ReceivePack = struct {
                     }
                     if (common.hasFeature(features, "side-band-64k")) {
                         self.use_sideband = true;
+                    }
+                    if (common.hasFeature(features, "atomic")) {
+                        self.atomic = true;
                     }
                     const obj_hash = common.getFeatureValue(features, "object-format") orelse "sha1";
                     const repo_hash_name = common.hashName(hash_kind);
