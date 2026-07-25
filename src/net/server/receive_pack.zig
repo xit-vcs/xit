@@ -246,7 +246,14 @@ const ReceivePack = struct {
         var ref_updates: std.ArrayList(RefUpdate(hash_kind)) = .empty;
         while (true) {
             var buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
-            const line = try pkt.readPktLine(reader, &buf) orelse break;
+            const line = switch (try pkt.readPktLineEx(reader, &buf)) {
+                .data => |data| data,
+                .flush => break,
+                // a client that hangs up before sending a command has nothing to push
+                .eof => if (ref_updates.items.len == 0) break else return error.UnexpectedEof,
+                .delim => return error.UnexpectedDelim,
+                .response_end => return error.UnexpectedResponseEnd,
+            };
 
             const null_pos = std.mem.indexOfScalar(u8, line, 0);
             const line_data = if (null_pos) |pos| line[0..pos] else line;

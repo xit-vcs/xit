@@ -190,21 +190,25 @@ fn uploadPack(
     if (!options.advertise_refs) {
         try upload_pack.receiveNeeds(writer, repo_kind, repo_opts, state, io, allocator, &our_refs, stdin_reader, &shallow_oids, &deepen_not, &want_obj);
 
-        if (!upload_pack.use_sideband) return error.SidebandProtocolRequired;
-
+        // sideband only rides along on a want line, so a client that wants
+        // nothing (an up-to-date fetch or ls-remote) never negotiates it
         if (want_obj.items.len != 0) {
+            if (!upload_pack.use_sideband) return error.SidebandProtocolRequired;
+
             // peek for eof before entering common commit negotiation
             var peek_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
             switch (try pkt.readPktLineEx(stdin_reader, &peek_buf)) {
                 .eof => {},
                 .data => |line| {
-                    try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                    if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line)) {
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                    }
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
-                    try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null);
-                    try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                    if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null)) {
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                    }
                 },
                 .delim => return error.UnexpectedDelim,
                 .response_end => return error.UnexpectedResponseEnd,
@@ -898,7 +902,13 @@ const UploadPack = struct {
         var line_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
 
         while (true) {
-            const line = try pkt.readPktLine(stdin_reader, &line_buf) orelse break;
+            const line = switch (try pkt.readPktLineEx(stdin_reader, &line_buf)) {
+                .data => |data| data,
+                // a client that hangs up has stopped caring about the response
+                .flush, .eof => break,
+                .delim => return error.UnexpectedDelim,
+                .response_end => return error.UnexpectedResponseEnd,
+            };
 
             if (try processShallow(repo_kind, repo_opts, state, io, allocator, line)) |oid| {
                 try shallow_oids.put(oid, {});
@@ -987,7 +997,7 @@ const UploadPack = struct {
         have_obj: *std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
         want_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
         first_line: ?[]const u8,
-    ) !void {
+    ) !bool {
         const hex_len = comptime hash.hexLen(repo_opts.hash);
         var last_hex: [hex_len]u8 = undefined;
         var got_common: bool = false;
@@ -1001,7 +1011,14 @@ const UploadPack = struct {
                 pending_line = null;
                 @memcpy(line_buf[0..pl.len], pl);
                 break :blk line_buf[0..pl.len];
-            } else pkt.readPktLine(stdin_reader, &line_buf) catch |err| return err;
+            } else switch (try pkt.readPktLineEx(stdin_reader, &line_buf)) {
+                .data => |data| data,
+                .flush => null,
+                // the client hung up mid-negotiation, so there is no pack to send
+                .eof => return false,
+                .delim => return error.UnexpectedDelim,
+                .response_end => return error.UnexpectedResponseEnd,
+            };
 
             const data = line orelse {
                 if (self.multi_ack == .multi_ack_detailed and
@@ -1019,9 +1036,11 @@ const UploadPack = struct {
 
                 if (self.no_done and sent_ready) {
                     try pkt.writePktLineFmt(writer, "ACK {s}\n", .{&last_hex});
-                    return;
+                    return true;
                 }
-                if (self.is_stateless) return error.StatelessServiceDone;
+                // in a stateless request this batch of haves is the whole
+                // negotiation; the client sends the next batch in a new request
+                if (self.is_stateless) return false;
                 got_common = false;
                 got_other = false;
                 continue;
@@ -1059,10 +1078,10 @@ const UploadPack = struct {
                     if (self.multi_ack != .none) {
                         try pkt.writePktLineFmt(writer, "ACK {s}\n", .{&last_hex});
                     }
-                    return;
+                    return true;
                 }
                 try pkt.writePktLineFmt(writer, "NAK\n", .{});
-                return;
+                return true;
             }
             return error.ProtocolErrorExpectedSha1;
         }
@@ -1325,7 +1344,10 @@ fn objectInfo(
         }
     }
 
-    if (oid_strs.items.len == 0) return;
+    if (oid_strs.items.len == 0) {
+        try pkt.writePktFlush(writer);
+        return;
+    }
 
     if (want_size) {
         try pkt.writePktLineFmt(writer, "size", .{});
