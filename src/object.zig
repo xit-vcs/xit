@@ -905,6 +905,22 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
+        // append the whole message to `list`
+        pub fn readMessage(
+            self: *Object(repo_kind, repo_opts),
+            allocator: std.mem.Allocator,
+            list: *std.ArrayList(u8),
+            limit: std.Io.Limit,
+        ) !void {
+            const position = switch (self.content) {
+                .blob, .tree => return error.ObjectHasNoMessage,
+                .commit => |commit| commit.message_position,
+                .tag => |tag| tag.message_position,
+            };
+            try self.object_reader.seekTo(position);
+            try self.object_reader.interface.appendRemaining(allocator, list, limit);
+        }
+
         pub fn deinit(self: *Object(repo_kind, repo_opts)) void {
             self.arena.deinit();
             self.allocator.destroy(self.arena);

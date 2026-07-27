@@ -1391,10 +1391,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             defer object.deinit();
             try std.testing.expectEqual(commit4, object.oid);
 
-            try object.object_reader.seekTo(object.content.commit.message_position);
-            const message = try object.object_reader.interface.allocRemaining(allocator, .limited(any_repo_opts.max_read_size));
-            defer allocator.free(message);
-            try std.testing.expectEqualStrings("fourth commit", message);
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(allocator);
+            try object.readMessage(allocator, &message, .limited(any_repo_opts.max_read_size));
+            try std.testing.expectEqualStrings("fourth commit", message.items);
         }
 
         {
@@ -1402,10 +1402,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             defer object.deinit();
             try std.testing.expectEqual(commit3, object.oid);
 
-            try object.object_reader.seekTo(object.content.commit.message_position);
-            const message = try object.object_reader.interface.allocRemaining(allocator, .limited(any_repo_opts.max_read_size));
-            defer allocator.free(message);
-            try std.testing.expectEqualStrings("third commit", message);
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(allocator);
+            try object.readMessage(allocator, &message, .limited(any_repo_opts.max_read_size));
+            try std.testing.expectEqualStrings("third commit", message.items);
         }
 
         {
@@ -1413,10 +1413,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             defer object.deinit();
             try std.testing.expectEqual(commit2, object.oid);
 
-            try object.object_reader.seekTo(object.content.commit.message_position);
-            const message = try object.object_reader.interface.allocRemaining(allocator, .limited(any_repo_opts.max_read_size));
-            defer allocator.free(message);
-            try std.testing.expectEqualStrings("second commit", message);
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(allocator);
+            try object.readMessage(allocator, &message, .limited(any_repo_opts.max_read_size));
+            try std.testing.expectEqualStrings("second commit", message.items);
         }
 
         {
@@ -1424,10 +1424,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             defer object.deinit();
             try std.testing.expectEqual(commit1, object.oid);
 
-            try object.object_reader.seekTo(object.content.commit.message_position);
-            const message = try object.object_reader.interface.allocRemaining(allocator, .limited(any_repo_opts.max_read_size));
-            defer allocator.free(message);
-            try std.testing.expectEqualStrings("first commit", message);
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(allocator);
+            try object.readMessage(allocator, &message, .limited(any_repo_opts.max_read_size));
+            try std.testing.expectEqualStrings("first commit", message.items);
         }
 
         try std.testing.expectEqual(null, try iter.next(allocator));
@@ -1626,10 +1626,10 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             var tag_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &tag_oid);
             defer tag_object.deinit();
 
-            try tag_object.object_reader.seekTo(tag_object.content.tag.message_position);
-            const message = try tag_object.object_reader.interface.allocRemaining(allocator, .limited(any_repo_opts.max_read_size));
-            defer allocator.free(message);
-            try std.testing.expectEqualStrings("this is an annotated tag", message);
+            var message: std.ArrayList(u8) = .empty;
+            defer message.deinit(allocator);
+            try tag_object.readMessage(allocator, &message, .limited(any_repo_opts.max_read_size));
+            try std.testing.expectEqualStrings("this is an annotated tag", message.items);
 
             // common ancester with a tag
             const ancestor_commit = try mrg.commonAncestor(repo_kind, any_repo_opts.toRepoOpts(), state, io, allocator, &tag_oid, &commit4_stuff);

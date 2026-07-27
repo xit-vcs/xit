@@ -503,23 +503,16 @@ fn runCommand(
                 }
                 try run_opts.out.print("\n", .{});
 
-                try commit_object.object_reader.seekTo(commit_object.content.commit.message_position);
+                var message: std.ArrayList(u8) = .empty;
+                defer message.deinit(allocator);
+                try commit_object.readMessage(allocator, &message, .unlimited);
 
                 // for each line...
-                while (commit_object.object_reader.interface.peekByte()) |_| {
-                    var line_writer = std.Io.Writer.Allocating.init(allocator);
-                    defer line_writer.deinit();
-                    _ = try commit_object.object_reader.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size));
-
-                    // skip delimiter
-                    if (commit_object.object_reader.interface.bufferedLen() > 0) {
-                        commit_object.object_reader.interface.toss(1);
-                    }
-
-                    try run_opts.out.print("    {s}\n", .{line_writer.written()});
-                } else |err| switch (err) {
-                    error.EndOfStream => {},
-                    else => |e| return e,
+                var lines = std.mem.splitScalar(u8, message.items, '\n');
+                while (lines.next()) |line| {
+                    // the last piece is empty when the message ends in a newline
+                    if (line.len == 0 and lines.peek() == null) break;
+                    try run_opts.out.print("    {s}\n", .{line});
                 }
 
                 try run_opts.out.print("\n", .{});
