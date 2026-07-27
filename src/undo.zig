@@ -55,6 +55,8 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
         },
         copy_objects,
         gc,
+        push,
+        custom: []const u8,
     };
 }
 
@@ -151,6 +153,8 @@ pub fn writeMessage(
         .fetch => |fetch_cmd| bufPrint(&message_buffer, "fetch {s}", .{fetch_cmd.remote_name}),
         .copy_objects => bufPrint(&message_buffer, "copy objects", .{}),
         .gc => bufPrint(&message_buffer, "gc", .{}),
+        .push => bufPrint(&message_buffer, "push", .{}),
+        .custom => |custom_cmd| bufPrint(&message_buffer, "{s}", .{custom_cmd}),
     };
 
     try state.extra.moment.put(hash.hashInt(repo_opts.hash, "undo-message"), .{ .bytes = message });

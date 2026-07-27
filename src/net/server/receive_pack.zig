@@ -118,6 +118,7 @@ pub fn run(
             try pkt.sendSideband(writer, 1, buf.items);
         }
     }
+
     try writer.writeAll("0000");
 
     if (atomic_failure) return error.CancelTransaction;

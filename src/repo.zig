@@ -1640,6 +1640,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try server_receive_pack.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
+                            try un.writeMessage(repo_opts, state, .push);
                         }
                     };
 
@@ -1683,6 +1684,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options);
+                            // every non-push request returns CancelTransaction,
+                            // so reaching this point means a push committed
+                            try un.writeMessage(repo_opts, state, .push);
                         }
                     };
 
