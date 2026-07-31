@@ -768,6 +768,11 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             defer delta_objects.deinit(allocator);
             var last_object = self;
             while (last_object.internal == .delta) {
+                // ref deltas create their base object with `init`, which fully
+                // initializes it and everything below it in the chain, so if we
+                // run into an already-initialized object we're done.
+                if (last_object.internal.delta.state != null) break;
+
                 try last_object.initDelta(io, allocator, state);
                 try delta_objects.append(allocator, last_object);
                 last_object = if (last_object.internal.delta.state) |delta_state|
