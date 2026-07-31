@@ -111,8 +111,8 @@ pub fn writeMessage(
             };
         },
         .reset_add => |reset_add_cmd| bufPrint(&message_buffer, "reset-add {s}", .{reset_add_cmd.name()}),
-        .commit => |commit_cmd| if (commit_cmd.message) |message|
-            bufPrint(&message_buffer, "commit -m \"{s}\"", .{message})
+        .commit => |commit_cmd| if (commit_cmd.message.len != 0)
+            bufPrint(&message_buffer, "commit -m \"{s}\"", .{commit_cmd.message})
         else
             bufPrint(&message_buffer, "commit", .{}),
         .tag => |tag_cmd| switch (tag_cmd) {

@@ -680,9 +680,9 @@ pub fn Command(comptime hash_kind: hash.HashKind) type {
                 .commit => {
                     if (cmd_args.positional_args.len > 0) return null;
                     // if a message is included, it must have a non-null value
-                    const message_maybe = if (cmd_args.get("-m")) |msg| (msg orelse return error.CommitMessageNotFound) else null;
+                    const message = if (cmd_args.get("-m")) |msg| (msg orelse return error.CommitMessageNotFound) else "";
                     return .{ .commit = .{
-                        .message = message_maybe,
+                        .message = message,
                         .allow_empty = cmd_args.contains("--allow-empty"),
                     } };
                 },
@@ -1039,7 +1039,7 @@ test "command" {
         defer cmd_args.deinit();
         const command = try CommandDispatch(hash_kind).init(&cmd_args);
         try std.testing.expectEqualStrings("cli", @tagName(command));
-        try std.testing.expectEqualStrings("let there be light", command.cli.commit.message.?);
+        try std.testing.expectEqualStrings("let there be light", command.cli.commit.message);
     }
 
     // extra config add args are joined

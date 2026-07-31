@@ -1117,7 +1117,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         // read commit
         var commit_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &commit2);
         defer commit_object.deinit();
-        try std.testing.expectEqualStrings("second commit", commit_object.content.commit.metadata.message.?);
+        try std.testing.expectEqualStrings("second commit", commit_object.content.commit.metadata.message);
 
         // read tree
         var tree_object = try obj.Object(repo_kind, any_repo_opts.toRepoOpts()).init(state, io, allocator, &commit_object.content.commit.tree);

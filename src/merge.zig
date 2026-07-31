@@ -1619,7 +1619,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                             const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
                             defer merge_msg.close(io);
-                            try merge_msg.writeStreamingAll(io, commit_metadata.message orelse "");
+                            try merge_msg.writeStreamingAll(io, commit_metadata.message);
 
                             return .{
                                 .arena = arena,

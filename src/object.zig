@@ -280,7 +280,7 @@ pub fn CommitMetadata(comptime hash_kind: hash.HashKind) type {
     return struct {
         author: ?[]const u8 = null,
         committer: ?[]const u8 = null,
-        message: ?[]const u8 = null,
+        message: []const u8 = "",
         parent_oids: ?[]const [hash.hexLen(hash_kind)]u8 = null,
         allow_empty: bool = false,
         timestamp: u64 = 0,
@@ -403,7 +403,7 @@ pub fn writeCommit(
         const committer = metadata.committer orelse author;
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "committer {s} {} +0000", .{ committer, ts }));
 
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message orelse ""}));
+        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
 
         // sign if key is in config
         if (config.sections.get("user")) |user_section| {
@@ -642,7 +642,7 @@ pub fn ObjectContent(comptime hash_kind: hash.HashKind) type {
             kind: ObjectKind,
             name: []const u8,
             tagger: []const u8,
-            message: ?[]const u8,
+            message: []const u8,
             message_position: u64,
         },
     };
@@ -784,7 +784,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
                     metadata.parent_oids = parent_oids.items;
 
-                    // read only the first line
+                    // read only the first line; an overlong line is left empty
                     {
                         var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
                         const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
@@ -797,7 +797,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                             obj_rdr.interface.toss(1);
                         }
 
-                        metadata.message = if (line_size_maybe != null) line_writer.written() else null;
+                        metadata.message = if (line_size_maybe != null) line_writer.written() else "";
                     }
 
                     return .{
@@ -852,12 +852,12 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                             .kind = try ObjectKind.init(fields.get("type") orelse return error.InvalidObject),
                             .name = fields.get("tag") orelse return error.InvalidObject,
                             .tagger = fields.get("tagger") orelse return error.InvalidObject,
-                            .message = null,
+                            .message = "",
                             .message_position = position,
                         },
                     };
 
-                    // read only the first line
+                    // read only the first line; an overlong line is left empty
                     {
                         var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
                         const line_size_maybe = obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size)) catch |err| switch (err) {
@@ -870,7 +870,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                             obj_rdr.interface.toss(1);
                         }
 
-                        content.tag.message = if (line_size_maybe != null) line_writer.written() else null;
+                        content.tag.message = if (line_size_maybe != null) line_writer.written() else "";
                     }
 
                     return .{

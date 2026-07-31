@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
 
         for (0..commits.items.len) |i| {
             var commit_object = commits.items[commits.items.len - i - 1];
-            try run_opts.out.print("Creating commit: {s}\n", .{commit_object.content.commit.metadata.message orelse ""});
+            try run_opts.out.print("Creating commit: {s}\n", .{commit_object.content.commit.metadata.message});
 
             var switch_result = try git_repo.switchDir(io, allocator, .{ .target = .{ .oid = &commit_object.oid }, .force = true });
             defer switch_result.deinit();
