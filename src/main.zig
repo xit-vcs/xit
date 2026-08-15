@@ -22,6 +22,7 @@ const work = @import("./workdir.zig");
 const mrg = @import("./merge.zig");
 const tr = @import("./tree.zig");
 const rf = @import("./ref.zig");
+const cfg = @import("./config.zig");
 const net_refspec = @import("./net/refspec.zig");
 const server_common = @import("./net/server/common.zig");
 const server_http_backend = @import("./net/server/http_backend.zig");
@@ -91,6 +92,11 @@ pub fn run(
     var cmd_args = try cmd.CommandArgs.init(allocator, args);
     defer cmd_args.deinit();
 
+    // the cli reads the user's config like git does. library users get
+    // nothing unless they ask for it, so tests stay unaffected by it.
+    const global_config_path = try cfg.globalConfigPath(io, allocator, run_opts.environ_map);
+    defer if (global_config_path) |path| allocator.free(path);
+
     switch (try cmd.CommandDispatch(any_repo_opts.toRepoOpts().hash).init(&cmd_args)) {
         .invalid => |invalid| switch (invalid) {
             .command => |command| {
@@ -106,12 +112,12 @@ pub fn run(
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
         .tui => |cmd_kind_maybe| if (any_repo_opts.hash) |hash_kind| {
-            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path });
+            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
             defer repo.deinit(io, allocator);
             try ui.start(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cmd_kind_maybe);
         } else {
             // if no hash was specified, use AnyRepo to detect the hash being used
-            var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = cwd_path });
+            var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
             defer any_repo.deinit(io, allocator);
             switch (any_repo) {
                 inline else => |*repo| try ui.start(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_kind_maybe),
@@ -126,7 +132,7 @@ pub fn run(
                     any_repo_opts.toRepoOpts();
                 const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, init_cmd.dir });
                 defer allocator.free(work_path);
-                var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path });
+                var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path, .global_config_path = global_config_path });
                 defer repo.deinit(io, allocator);
 
                 try run_opts.out.print(
@@ -149,6 +155,7 @@ pub fn run(
                     clone_cmd.url,
                     cwd_path,
                     work_path,
+                    global_config_path,
                     .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } },
                 );
                 defer repo.deinit(io, allocator);
@@ -178,12 +185,12 @@ pub fn run(
                 const work_path = work_path_maybe orelse cwd_path;
 
                 if (any_repo_opts.hash) |hash_kind| {
-                    var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = work_path });
+                    var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = work_path, .global_config_path = global_config_path });
                     defer repo.deinit(io, allocator);
                     try runCommand(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cli_cmd, run_opts);
                 } else {
                     // if no hash was specified, use AnyRepo to detect the hash being used
-                    var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = work_path });
+                    var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = work_path, .global_config_path = global_config_path });
                     defer any_repo.deinit(io, allocator);
                     switch (any_repo) {
                         inline else => |*repo| {
@@ -251,6 +258,12 @@ pub fn runPrint(
             \\
             \\    xit config add user.name foo
             \\    xit config add user.email foo@bar
+            \\
+            ,
+            error.SectionDoesNotExist =>
+            \\that variable isn't in this repo's config, so there's nothing to remove.
+            \\if you can see it in `xit config list`, it's coming from your global
+            \\config, and xit won't touch that.
             \\
             ,
             error.SubmodulesNotSupported => "repos with submodules aren't supported right now, sowwy\n",

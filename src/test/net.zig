@@ -1297,6 +1297,7 @@ fn testClone(
             remote_url,
             temp_path,
             client_path,
+            null,
             .{ .wire = .{ .ssh = .{
                 .command = ssh_cmd_maybe,
                 .upload_pack_command = upload_pack_command,

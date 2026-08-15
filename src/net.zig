@@ -627,12 +627,14 @@ pub fn clone(
     url: []const u8,
     cwd_path: []const u8,
     work_path: []const u8,
+    global_config_path: ?[]const u8,
     transport_opts: Opts(repo_opts.ProgressCtx),
 ) !rp.Repo(repo_kind, repo_opts) {
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{
         .cwd_path = cwd_path,
         .path = work_path,
         .create_default_branch = null,
+        .global_config_path = global_config_path,
     });
     errdefer repo.deinit(io, allocator);
 

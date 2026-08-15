@@ -418,7 +418,12 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                             defer allocator.free(value);
                             try self.repo.addConfig(self.io, allocator, .{ .name = item.name(), .value = value });
                         } else {
-                            try self.repo.removeConfig(self.io, allocator, .{ .name = item.name() });
+                            // rows that come from the global config aren't in
+                            // the repo, so there is nothing to remove
+                            self.repo.removeConfig(self.io, allocator, .{ .name = item.name() }) catch |err| switch (err) {
+                                error.SectionDoesNotExist => return,
+                                else => |e| return e,
+                            };
                         }
                     }
                     self.refresh_pending = true;
