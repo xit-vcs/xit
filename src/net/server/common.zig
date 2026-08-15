@@ -10,15 +10,6 @@ pub fn hashName(comptime hash_kind: hash.HashKind) []const u8 {
 
 pub const ProtocolVersion = enum { v0, v1, v2 };
 
-pub fn parseBool(value: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(value, "true") or
-        std.ascii.eqlIgnoreCase(value, "yes") or
-        std.ascii.eqlIgnoreCase(value, "on") or
-        std.mem.eql(u8, value, "1"))
-        return true;
-    return false;
-}
-
 pub fn hasFeature(features: []const u8, name: []const u8) bool {
     var iter = std.mem.splitScalar(u8, features, ' ');
     while (iter.next()) |feature| {

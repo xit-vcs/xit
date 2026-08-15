@@ -69,8 +69,11 @@ fn testSign(
         try pub_key_file.setPermissions(io, @enumFromInt(0o600));
     }
 
-    // add key to config
+    // add key to config and turn signing on
     try repo.addConfig(io, allocator, .{ .name = "user.signingkey", .value = pub_key_path });
+    try repo.addConfig(io, allocator, .{ .name = "gpg.format", .value = "ssh" });
+    try repo.addConfig(io, allocator, .{ .name = "commit.gpgsign", .value = "true" });
+    try repo.addConfig(io, allocator, .{ .name = "tag.gpgsign", .value = "true" });
 
     // make a commit
     const hello_txt = try repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });

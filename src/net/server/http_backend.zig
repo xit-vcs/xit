@@ -111,8 +111,8 @@ fn runRoute(
         defer config.deinit();
 
         if (config.sections.get("http")) |vars| {
-            if (vars.get("uploadpack")) |v| http_config.uploadpack = common.parseBool(v);
-            if (vars.get("receivepack")) |v| http_config.receivepack = common.parseBool(v);
+            if (vars.get("uploadpack")) |v| http_config.uploadpack = cfg.parseBool(v);
+            if (vars.get("receivepack")) |v| http_config.receivepack = cfg.parseBool(v);
         }
     }
 

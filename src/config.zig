@@ -277,6 +277,15 @@ fn fileExists(io: std.Io, path: []const u8) !bool {
 pub const Variables = std.StringArrayHashMapUnmanaged([]const u8);
 pub const Sections = std.StringArrayHashMapUnmanaged(Variables);
 
+pub fn parseBool(value: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(value, "true") or
+        std.ascii.eqlIgnoreCase(value, "yes") or
+        std.ascii.eqlIgnoreCase(value, "on") or
+        std.mem.eql(u8, value, "1"))
+        return true;
+    return false;
+}
+
 /// categories of characters parsed in the config file
 const CharKind = enum {
     whitespace,

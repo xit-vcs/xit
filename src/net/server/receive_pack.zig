@@ -147,10 +147,10 @@ const ReceivePack = struct {
 
         if (config.sections.get("receive")) |vars| {
             if (vars.get("denydeletes")) |v| {
-                self.deny_deletes = common.parseBool(v);
+                self.deny_deletes = cfg.parseBool(v);
             }
             if (vars.get("denynonfastforwards")) |v| {
-                self.deny_non_fast_forwards = common.parseBool(v);
+                self.deny_non_fast_forwards = cfg.parseBool(v);
             }
             if (vars.get("denycurrentbranch")) |v| {
                 self.deny_current_branch = Deny.parse(v);
@@ -161,12 +161,12 @@ const ReceivePack = struct {
         }
         if (config.sections.get("repack")) |vars| {
             if (vars.get("usedeltabaseoffset")) |v| {
-                self.prefer_ofs_delta = common.parseBool(v);
+                self.prefer_ofs_delta = cfg.parseBool(v);
             }
         }
         if (config.sections.get("core")) |vars| {
             if (vars.get("bare")) |v| {
-                self.is_bare = common.parseBool(v);
+                self.is_bare = cfg.parseBool(v);
             }
         }
     }
@@ -613,7 +613,7 @@ const Deny = enum {
         if (std.ascii.eqlIgnoreCase(value, "warn")) return .warn;
         if (std.ascii.eqlIgnoreCase(value, "refuse")) return .refuse;
         if (std.ascii.eqlIgnoreCase(value, "updateinstead")) return .update_instead;
-        if (common.parseBool(value)) return .refuse;
+        if (cfg.parseBool(value)) return .refuse;
         return .ignore;
     }
 };

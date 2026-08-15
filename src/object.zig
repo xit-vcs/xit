@@ -201,6 +201,28 @@ fn writeTree(
     try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .tree, .size = tree_contents.len }, hash_bytes_buffer);
 }
 
+/// returns the key to sign with, or null if signing isn't turned on for
+/// the given section. only ssh signing is supported.
+fn signingKey(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    config: *const cfg.Config(repo_kind, repo_opts),
+    section_name: []const u8,
+) !?[]const u8 {
+    const section = config.sections.get(section_name) orelse return null;
+    const gpgsign = section.get("gpgsign") orelse return null;
+    if (!cfg.parseBool(gpgsign)) return null;
+
+    const format = if (config.sections.get("gpg")) |gpg_section|
+        gpg_section.get("format") orelse "openpgp"
+    else
+        "openpgp";
+    if (!std.mem.eql(u8, format, "ssh")) return error.UnsupportedSigningFormat;
+
+    const user_section = config.sections.get("user") orelse return error.SigningKeyNotFound;
+    return user_section.get("signingkey") orelse error.SigningKeyNotFound;
+}
+
 fn sign(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -230,13 +252,13 @@ fn sign(
     }
     try content_file.writeStreamingAll(io, content);
 
-    // sign the file
-    const behavior: std.process.SpawnOptions.StdIo = if (repo_opts.is_test) .ignore else .inherit;
+    // sign the file. the child gets no stdio, so it can never block on a
+    // passphrase prompt or write to a terminal xit doesn't own.
     var process = try std.process.spawn(io, .{
         .argv = &.{ "ssh-keygen", "-Y", "sign", "-n", "git", "-f", signing_key, content_file_path },
-        .stdin = behavior,
-        .stdout = behavior,
-        .stderr = behavior,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
     });
     const term = try process.wait(io);
     if (0 != term.exited) {
@@ -405,25 +427,23 @@ pub fn writeCommit(
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
 
-        // sign if key is in config
-        if (config.sections.get("user")) |user_section| {
-            if (user_section.get("signingkey")) |signing_key| {
-                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
+        // sign if the config asks for it
+        if (try signingKey(repo_kind, repo_opts, &config, "commit")) |signing_key| {
+            const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
 
-                var header_lines: std.ArrayList([]const u8) = .empty;
-                defer header_lines.deinit(allocator);
-                for (sig_lines, 0..) |line, i| {
-                    const sig_line = if (i == 0)
-                        try std.fmt.allocPrint(arena.allocator(), "gpgsig {s}", .{line})
-                    else
-                        try std.fmt.allocPrint(arena.allocator(), " {s}", .{line});
-                    try header_lines.append(allocator, sig_line);
-                }
-
-                const message = metadata_lines.pop() orelse unreachable; // remove the message
-                try metadata_lines.appendSlice(arena.allocator(), header_lines.items); // add the sig
-                try metadata_lines.append(arena.allocator(), message); // add the message back
+            var header_lines: std.ArrayList([]const u8) = .empty;
+            defer header_lines.deinit(allocator);
+            for (sig_lines, 0..) |line, i| {
+                const sig_line = if (i == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "gpgsig {s}", .{line})
+                else
+                    try std.fmt.allocPrint(arena.allocator(), " {s}", .{line});
+                try header_lines.append(allocator, sig_line);
             }
+
+            const message = metadata_lines.pop() orelse unreachable; // remove the message
+            try metadata_lines.appendSlice(arena.allocator(), header_lines.items); // add the sig
+            try metadata_lines.append(arena.allocator(), message); // add the message back
         }
 
         break :blk try std.mem.join(allocator, "\n", metadata_lines.items);
@@ -484,12 +504,10 @@ pub fn writeTag(
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{input.message orelse ""}));
 
-        // sign if key is in config
-        if (config.sections.get("user")) |user_section| {
-            if (user_section.get("signingkey")) |signing_key| {
-                const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
-                try metadata_lines.appendSlice(arena.allocator(), sig_lines);
-            }
+        // sign if the config asks for it
+        if (try signingKey(repo_kind, repo_opts, &config, "tag")) |signing_key| {
+            const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
+            try metadata_lines.appendSlice(arena.allocator(), sig_lines);
         }
 
         break :blk try std.mem.join(allocator, "\n", metadata_lines.items);

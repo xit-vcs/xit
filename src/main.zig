@@ -260,6 +260,26 @@ pub fn runPrint(
             \\    xit config add user.email foo@bar
             \\
             ,
+            error.ObjectSigningFailed =>
+            \\ssh-keygen couldn't sign that. check that `user.signingkey` points at a
+            \\key it can read. to see why it failed, try signing a file by hand:
+            \\
+            \\    ssh-keygen -Y sign -n git -f <your key> <some file>
+            \\
+            ,
+            error.UnsupportedSigningFormat =>
+            \\you asked for signing, but xit only knows how to sign with ssh.
+            \\set `gpg.format` to ssh, or turn signing off:
+            \\
+            \\    xit config add gpg.format ssh
+            \\
+            ,
+            error.SigningKeyNotFound =>
+            \\you asked for signing, but there's no key to sign with. set one like this:
+            \\
+            \\    xit config add user.signingkey ~/.ssh/id_ed25519.pub
+            \\
+            ,
             error.SectionDoesNotExist =>
             \\that variable isn't in this repo's config, so there's nothing to remove.
             \\if you can see it in `xit config list`, it's coming from your global

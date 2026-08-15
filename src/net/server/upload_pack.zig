@@ -37,19 +37,19 @@ pub fn run(
                 defer config.deinit();
                 if (config.sections.get("uploadpack")) |vars| {
                     if (vars.get("allowfilter")) |v| {
-                        v2_config.allow_filter = common.parseBool(v);
+                        v2_config.allow_filter = cfg.parseBool(v);
                     }
                     if (vars.get("allowrefinwant")) |v| {
-                        v2_config.allow_ref_in_want = common.parseBool(v);
+                        v2_config.allow_ref_in_want = cfg.parseBool(v);
                     }
                     if (vars.get("allowsidebandall")) |v| {
-                        v2_config.allow_sideband_all = common.parseBool(v);
+                        v2_config.allow_sideband_all = cfg.parseBool(v);
                     }
                     if (vars.get("blobpackfileuri")) |_| {
                         v2_config.allow_packfile_uris = true;
                     }
                     if (vars.get("advertisebundleuris")) |v| {
-                        v2_config.advertise_bundle_uris = common.parseBool(v);
+                        v2_config.advertise_bundle_uris = cfg.parseBool(v);
                     }
                 }
                 if (config.sections.get("lsrefs")) |vars| {
@@ -59,10 +59,10 @@ pub fn run(
                 }
                 if (config.sections.get("transfer")) |vars| {
                     if (vars.get("advertisesid")) |v| {
-                        v2_config.advertise_sid = common.parseBool(v);
+                        v2_config.advertise_sid = cfg.parseBool(v);
                     }
                     if (vars.get("advertiseobjectinfo")) |v| {
-                        v2_config.advertise_object_info = common.parseBool(v);
+                        v2_config.advertise_object_info = cfg.parseBool(v);
                     }
                 }
             }
@@ -324,13 +324,13 @@ const UploadPack = struct {
 
         if (config.sections.get("uploadpack")) |vars| {
             if (vars.get("allowfilter")) |v| {
-                self.allow_filter = common.parseBool(v);
+                self.allow_filter = cfg.parseBool(v);
             }
             if (vars.get("allowrefinwant")) |v| {
-                self.allow_ref_in_want = common.parseBool(v);
+                self.allow_ref_in_want = cfg.parseBool(v);
             }
             if (vars.get("allowsidebandall")) |v| {
-                self.allow_sideband_all = common.parseBool(v);
+                self.allow_sideband_all = cfg.parseBool(v);
             }
             if (vars.get("blobpackfileuri")) |_| {
                 self.allow_packfile_uris = true;
