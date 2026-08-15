@@ -97,7 +97,7 @@ pub const Tree = struct {
     arena: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator) !Tree {
+    pub fn init(allocator: std.mem.Allocator) !Tree {
         const arena = try allocator.create(std.heap.ArenaAllocator);
         errdefer allocator.destroy(arena);
         arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -108,12 +108,12 @@ pub const Tree = struct {
         };
     }
 
-    fn deinit(self: *Tree) void {
+    pub fn deinit(self: *Tree) void {
         self.arena.deinit();
         self.allocator.destroy(self.arena);
     }
 
-    fn addBlobEntry(self: *Tree, mode: fs.Mode, name: []const u8, oid: []const u8) !void {
+    pub fn addBlobEntry(self: *Tree, mode: fs.Mode, name: []const u8, oid: []const u8) !void {
         const entry = try std.fmt.allocPrint(self.arena.allocator(), "{s} {s}\x00{s}", .{ mode.toStr(), name, oid });
         try self.entries.put(self.arena.allocator(), name, entry);
     }
