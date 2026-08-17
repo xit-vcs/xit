@@ -15,7 +15,6 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         iter_arena: std.heap.ArenaAllocator,
         file_iter: ?df.FileIterator(repo_kind, repo_opts),
         hunk_iter: ?df.HunkIterator(repo_kind, repo_opts),
-        bufs: std.ArrayList([]const u8),
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Diff(Widget, repo_kind, repo_opts) {
             var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
@@ -34,16 +33,11 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 .iter_arena = std.heap.ArenaAllocator.init(allocator),
                 .file_iter = null,
                 .hunk_iter = null,
-                .bufs = .empty,
             };
         }
 
         pub fn deinit(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
-            for (self.bufs.items) |buf| {
-                allocator.free(buf);
-            }
             self.iter_arena.deinit();
-            self.bufs.deinit(allocator);
             self.box.deinit(allocator);
         }
 
@@ -208,12 +202,6 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         }
 
         pub fn clearDiffs(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
-            // clear buffers
-            for (self.bufs.items) |buf| {
-                allocator.free(buf);
-            }
-            self.bufs.clearAndFree(allocator);
-
             // reset the arena
             self.file_iter = null;
             self.hunk_iter = null;
@@ -243,12 +231,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
                 break :blk try writer.toOwnedSlice();
             };
-
-            // add buffer
-            {
-                errdefer allocator.free(buf);
-                try self.bufs.append(allocator, buf);
-            }
+            defer allocator.free(buf);
 
             // add new diff widget
             var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
@@ -270,12 +253,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
                 break :blk try writer.toOwnedSlice();
             };
-
-            // add buffer
-            {
-                errdefer allocator.free(buf);
-                try self.bufs.append(allocator, buf);
-            }
+            defer allocator.free(buf);
 
             // add new diff widget
             var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
@@ -292,7 +270,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         }
 
         pub fn isEmpty(self: Diff(Widget, repo_kind, repo_opts)) bool {
-            return self.bufs.items.len == 0;
+            return self.box.children.values()[0].widget.scroll.child.box.children.count() == 0;
         }
     };
 }

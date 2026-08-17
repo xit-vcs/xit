@@ -13,19 +13,11 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
     return struct {
         scroll: wgt.Scroll(Widget),
         repo: *rp.Repo(repo_kind, repo_opts),
-        txes: std.ArrayList(?[]const u8),
+        loaded_tx_count: usize,
         tx_count: usize,
-        arena: *std.heap.ArenaAllocator,
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !UndoList(Widget, repo_kind, repo_opts) {
             var self = blk: {
-                const arena = try allocator.create(std.heap.ArenaAllocator);
-                errdefer allocator.destroy(arena);
-                arena.* = std.heap.ArenaAllocator.init(allocator);
-
-                // init txes
-                const txes: std.ArrayList(?[]const u8) = .empty;
-
                 var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
@@ -39,9 +31,8 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 break :blk UndoList(Widget, repo_kind, repo_opts){
                     .scroll = scroll,
                     .repo = repo,
-                    .txes = txes,
+                    .loaded_tx_count = 0,
                     .tx_count = tx_count,
-                    .arena = arena,
                 };
             };
             errdefer self.deinit(allocator);
@@ -55,8 +46,6 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
         }
 
         pub fn deinit(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
-            self.arena.deinit();
-            allocator.destroy(self.arena);
             self.scroll.deinit(allocator);
         }
 
@@ -130,7 +119,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
 
             const history = try rp.Repo(repo_kind, repo_opts).DB.ArrayList(.read_only).init(self.repo.core.db.rootCursor().readOnly());
 
-            const tx_remain_count = self.tx_count - self.txes.items.len;
+            const tx_remain_count = self.tx_count - self.loaded_tx_count;
             const tx_add_count = @min(tx_remain_count, max_txes);
 
             for (0..tx_add_count) |i| {
@@ -145,14 +134,15 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                     try allocator.dupe(u8, "(empty message)");
                 defer allocator.free(msg_value);
 
-                const msg = try std.fmt.allocPrint(self.arena.allocator(), "{} - {s}", .{ ii, msg_value });
-                try self.txes.append(self.arena.allocator(), msg);
+                const msg = try std.fmt.allocPrint(allocator, "{} - {s}", .{ ii, msg_value });
+                defer allocator.free(msg);
 
                 const inner_box = &self.scroll.child.box;
                 var text_box = try wgt.TextBox(Widget).init(allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                self.loaded_tx_count += 1;
             }
         }
     };

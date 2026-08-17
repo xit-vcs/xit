@@ -178,20 +178,12 @@ pub fn StatusList(comptime Widget: type) type {
 pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         box: wgt.Box(Widget),
-        arena: *std.heap.ArenaAllocator,
 
         const tab_count = @typeInfo(work.IndexStatusKind).@"enum".fields.len;
 
         pub fn init(allocator: std.mem.Allocator, status: *work.Status(repo_kind, repo_opts)) !StatusTabs(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
-
-            const arena = try allocator.create(std.heap.ArenaAllocator);
-            arena.* = std.heap.ArenaAllocator.init(allocator);
-            errdefer {
-                arena.deinit();
-                allocator.destroy(arena);
-            }
 
             const counts = [_]usize{
                 status.index_added.count() + status.index_modified.count() + status.index_deleted.count() + status.resolved_conflicts.count(),
@@ -211,25 +203,21 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                     .not_added => "not added",
                     .not_tracked => "not tracked",
                 };
-                const label = try std.fmt.allocPrint(arena.allocator(), "{s} ({})", .{ name, counts[i] });
+                var label_buf: [64]u8 = undefined;
+                const label = try std.fmt.bufPrint(&label_buf, "{s} ({})", .{ name, counts[i] });
                 var text_box = try wgt.TextBox(Widget).init(allocator, label, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
 
-            var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){
-                .box = box,
-                .arena = arena,
-            };
+            var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){ .box = box };
             ui_status_tabs.getFocus().child_id = box.children.keys()[@intFromEnum(selected_maybe orelse .added)];
             return ui_status_tabs;
         }
 
         pub fn deinit(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
-            self.arena.deinit();
-            allocator.destroy(self.arena);
         }
 
         pub fn build(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {

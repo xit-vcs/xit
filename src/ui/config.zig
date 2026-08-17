@@ -257,7 +257,6 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
     return struct {
         box: wgt.Box(Widget),
         config: cfg.Config(repo_kind, repo_opts),
-        arena: *std.heap.ArenaAllocator,
         repo: *rp.Repo(repo_kind, repo_opts),
         io: std.Io,
         // set by input() after a successful addConfig/removeConfig. build()
@@ -272,13 +271,6 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !ConfigList(Widget, repo_kind, repo_opts) {
             var config = try repo.listConfig(io, allocator);
             errdefer config.deinit();
-
-            const arena = try allocator.create(std.heap.ArenaAllocator);
-            arena.* = std.heap.ArenaAllocator.init(allocator);
-            errdefer {
-                arena.deinit();
-                allocator.destroy(arena);
-            }
 
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
@@ -295,7 +287,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
-                try appendConfigItems(&inner_box, allocator, arena.allocator(), &config);
+                try appendConfigItems(&inner_box, allocator, &config);
 
                 var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .{ .direction = .vert });
                 errdefer scroll.deinit(allocator);
@@ -312,7 +304,6 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             return ConfigList(Widget, repo_kind, repo_opts){
                 .box = box,
                 .config = config,
-                .arena = arena,
                 .repo = repo,
                 .io = io,
                 .refresh_pending = false,
@@ -322,8 +313,6 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         pub fn deinit(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
             self.config.deinit();
-            self.arena.deinit();
-            allocator.destroy(self.arena);
         }
 
         pub fn build(self: *ConfigList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -340,10 +329,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 }
                 inner_box.children.clearAndFree(allocator);
 
-                // the arena only held the previous "section.name" strings
-                _ = self.arena.reset(.retain_capacity);
-
-                try appendConfigItems(inner_box, allocator, self.arena.allocator(), &new_config);
+                try appendConfigItems(inner_box, allocator, &new_config);
 
                 self.config.deinit();
                 self.config = new_config;
@@ -616,12 +602,12 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         fn appendConfigItems(
             inner_box: *wgt.Box(Widget),
             allocator: std.mem.Allocator,
-            arena_allocator: std.mem.Allocator,
             config: *const cfg.Config(repo_kind, repo_opts),
         ) !void {
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {
                 for (variables.keys(), variables.values()) |name, value| {
-                    const full_name = try std.fmt.allocPrint(arena_allocator, "{s}.{s}", .{ section_name, name });
+                    const full_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section_name, name });
+                    defer allocator.free(full_name);
                     var config_item = try ConfigListItem(Widget).init(allocator, full_name, value);
                     errdefer config_item.deinit(allocator);
                     try inner_box.children.put(allocator, config_item.getFocus().id, .{ .widget = .{ .ui_config_list_item = config_item }, .rect = null, .min_size = null });
