@@ -85,7 +85,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const work_path = try std.fs.path.resolve(allocator, &.{ state.core.cwd_path, path });
             defer allocator.free(work_path);
 
-            var remote_repo = try rp.Repo(.git, remote_repo_opts).open(io, allocator, .{ .path = work_path });
+            var remote_repo = try rp.Repo(.git, remote_repo_opts).open(io, allocator, .{ .path = work_path, .require_repo_root = true });
             errdefer remote_repo.deinit(io, allocator);
 
             try self.addRefs(.{ .core = &remote_repo.core, .extra = .{} }, io, allocator);
@@ -118,7 +118,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 const work_path = try std.fs.path.resolve(allocator, &.{ state.core.cwd_path, path });
                 defer allocator.free(work_path);
 
-                var any_repo = try rp.AnyRepo(.git, .{ .hash = null, .ProgressCtx = repo_opts.ProgressCtx }).open(io, allocator, .{ .path = work_path });
+                var any_repo = try rp.AnyRepo(.git, .{ .hash = null, .ProgressCtx = repo_opts.ProgressCtx }).open(io, allocator, .{ .path = work_path, .require_repo_root = true });
                 defer any_repo.deinit(io, allocator);
 
                 const obj_iter: *obj.ObjectIterator(repo_kind, repo_opts) = &git_push.obj_iter;
@@ -176,7 +176,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const work_path = try std.fs.path.resolve(allocator, &.{ state.core.cwd_path, path });
             defer allocator.free(work_path);
 
-            var repo = try rp.Repo(.git, remote_repo_opts).open(io, allocator, .{ .path = work_path });
+            var repo = try rp.Repo(.git, remote_repo_opts).open(io, allocator, .{ .path = work_path, .require_repo_root = true });
             defer repo.deinit(io, allocator);
 
             var obj_iter = try obj.ObjectIterator(.git, remote_repo_opts).init(.{ .core = &repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });

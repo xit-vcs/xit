@@ -114,6 +114,7 @@ pub const InitOpts = struct {
     cwd_path: ?[]const u8 = null,
     path: []const u8,
     create_default_branch: ?[]const u8 = "master",
+    require_repo_root: bool = false,
     /// path of the config file to read beneath the repo's own config.
     /// this is null by default so nothing outside the repo can affect it
     /// unless the caller asks for it (see `cfg.globalConfigPath`).
@@ -374,6 +375,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                 var repo_dir = work_dir.openDir(io, repo_dir_name, .{}) catch |err| switch (err) {
                     error.FileNotFound => {
+                        if (opts.require_repo_root) return error.RepoNotFound;
                         dir_path_maybe = std.fs.path.dirname(dir_path);
                         continue;
                     },
