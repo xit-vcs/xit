@@ -597,7 +597,7 @@ fn runCommand(
                 return error.HandledError;
             },
             .xit => {
-                const result = try repo.garbageCollect(io, allocator);
+                const result = try repo.garbageCollect(io, allocator, &.{});
                 try run_opts.out.print(
                     \\db:     {} -> {} bytes
                     \\chunks: {} -> {} bytes

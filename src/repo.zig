@@ -1726,9 +1726,14 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             try writer.flush();
         }
 
-        /// reclaims disk space by removing objects that can't be reached
-        pub fn garbageCollect(self: *Repo(.xit, repo_opts), io: std.Io, allocator: std.mem.Allocator) !gc.GcResult {
-            return try gc.run(repo_opts, self, io, allocator);
+        /// reclaims objects unreachable from repo state or `extra_roots`
+        pub fn garbageCollect(
+            self: *Repo(.xit, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+        ) !gc.GcResult {
+            return try gc.run(repo_opts, self, io, allocator, extra_roots);
         }
     };
 }

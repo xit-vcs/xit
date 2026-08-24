@@ -81,7 +81,16 @@ test "gc" {
     // through the index, so this verifies the index is a gc root.
     try addFile(.xit, repo_opts, &repo, io, allocator, "staged.bin", staged_content);
 
-    const result = try repo.garbageCollect(io, allocator);
+    // an otherwise unreachable object survives while supplied as an extra root
+    _ = try repo.garbageCollect(io, allocator, &.{side_commit});
+    {
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        var side_commit_object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &side_commit);
+        side_commit_object.deinit();
+    }
+
+    const result = try repo.garbageCollect(io, allocator, &.{});
 
     // the deleted branch's objects are gone, so both files shrank
     try std.testing.expect(result.db_size_after < result.db_size_before);
@@ -133,7 +142,7 @@ test "gc" {
 
     // a second gc runs fine and everything still reads back
     {
-        _ = try repo.garbageCollect(io, allocator);
+        _ = try repo.garbageCollect(io, allocator, &.{});
 
         var work_dir = try temp_dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
@@ -233,7 +242,7 @@ test "gc crash recovery" {
 
         var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        _ = try repo.garbageCollect(io, allocator);
+        _ = try repo.garbageCollect(io, allocator, &.{});
 
         const actual = try repo.core.work_dir.readFileAlloc(io, "hello.md", allocator, .limited(1024));
         defer allocator.free(actual);
@@ -294,7 +303,7 @@ test "gc shared chunk store not supported" {
 
     // a shared store contains chunks referenced by other repos, so
     // gc must refuse to run
-    try std.testing.expectError(error.SharedChunkStoreNotSupported, repo2.garbageCollect(io, allocator));
+    try std.testing.expectError(error.SharedChunkStoreNotSupported, repo2.garbageCollect(io, allocator, &.{}));
 }
 
 test "gc with patches" {
@@ -374,7 +383,7 @@ test "gc with patches" {
     // create patches for all commits, then gc. the dead commit's patch
     // snapshot is removed, and the live ones must stay usable.
     try repo.patchAll(io, allocator, null);
-    const result = try repo.garbageCollect(io, allocator);
+    const result = try repo.garbageCollect(io, allocator, &.{});
     try std.testing.expect(result.db_size_after < result.db_size_before);
 
     // patch-based merging still works after gc

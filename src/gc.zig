@@ -1,6 +1,6 @@
 //! garbage collection for the xit backend. objects that can't be reached
-//! from the roots (HEAD, refs, the index, and in-progress merge heads) are
-//! removed, chunks that no live object references are removed, and both
+//! from the supplied roots, HEAD, refs, the index, or in-progress merge heads
+//! are removed, chunks that no live object references are removed, and both
 //! database files are compacted, discarding all transaction history.
 
 const std = @import("std");
@@ -61,6 +61,7 @@ pub fn run(
     repo: *rp.Repo(.xit, repo_opts),
     io: std.Io,
     allocator: std.mem.Allocator,
+    extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
 ) !GcResult {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const repo_dir = repo.core.repo_dir;
@@ -111,7 +112,7 @@ pub fn run(
     // find every object reachable from the roots
     var live_oids = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
     defer live_oids.deinit();
-    try findLiveOids(repo_opts, state, io, allocator, &live_oids);
+    try findLiveOids(repo_opts, state, io, allocator, extra_roots, &live_oids);
 
     // find every chunk record referenced by a live object
     var referenced_offsets = std.AutoHashMap(u64, void).init(allocator);
@@ -331,18 +332,20 @@ pub fn run(
     };
 }
 
-// finds every object reachable from the roots: HEAD, all refs (including
-// remote-tracking refs), in-progress merge heads, and blobs staged in the
-// index. anything else is garbage.
+// finds every object reachable from the supplied roots, HEAD, all refs,
+// in-progress merge heads, and blobs staged in the index
 fn findLiveOids(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
     allocator: std.mem.Allocator,
+    extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
     live_oids: *std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
 ) !void {
     var obj_iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
+
+    for (extra_roots) |*oid| try obj_iter.include(oid);
 
     // HEAD. this covers a detached HEAD; a symbolic HEAD points at a
     // ref that is included below.
