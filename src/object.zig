@@ -318,6 +318,44 @@ pub fn CommitMetadata(comptime hash_kind: hash.HashKind) type {
     };
 }
 
+// write an unsigned commit around an existing tree without updating a ref
+pub fn writeCommitWithoutRef(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    metadata: CommitMetadata(repo_opts.hash),
+    tree_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) ![hash.hexLen(repo_opts.hash)]u8 {
+    var tree_reader = try ObjectReader(repo_kind, repo_opts).init(state.readOnly(), io, allocator, tree_oid);
+    defer tree_reader.deinit();
+    if (tree_reader.header().kind != .tree) return error.InvalidTreeObject;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var metadata_lines: std.ArrayList([]const u8) = .empty;
+    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tree {s}", .{tree_oid}));
+    for (metadata.parent_oids orelse &.{}) |parent_oid| {
+        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "parent {s}", .{parent_oid}));
+    }
+
+    const author = metadata.author orelse return error.AuthorNotFound;
+    const timestamp: i64 = @intCast(metadata.timestamp);
+    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "author {s} {} +0000", .{ author, timestamp }));
+    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "committer {s} {} +0000", .{ metadata.committer orelse author, timestamp }));
+    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
+
+    const commit_contents = try std.mem.join(allocator, "\n", metadata_lines.items);
+    defer allocator.free(commit_contents);
+
+    var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var reader = std.Io.Reader.fixed(commit_contents);
+    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .commit, .size = commit_contents.len }, &oid_bytes);
+    return std.fmt.bytesToHex(oid_bytes, .lower);
+}
+
 pub fn writeCommitAtHead(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
