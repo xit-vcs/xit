@@ -118,7 +118,7 @@ pub const Tree = struct {
         try self.entries.put(self.arena.allocator(), name, entry);
     }
 
-    fn addTreeEntry(self: *Tree, name: []const u8, oid: []const u8) !void {
+    pub fn addTreeEntry(self: *Tree, name: []const u8, oid: []const u8) !void {
         const entry = try std.fmt.allocPrint(self.arena.allocator(), "40000 {s}\x00{s}", .{ name, oid });
         // git sorts tree names as if they had a trailing slash
         const sort_name = try std.fmt.allocPrint(self.arena.allocator(), "{s}/", .{name});
