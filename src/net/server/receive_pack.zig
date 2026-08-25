@@ -16,6 +16,7 @@ pub const Options = struct {
     skip_connectivity_check: bool = false,
     advertise_refs: bool = false,
     is_stateless: bool = false,
+    allowed_ref: ?[]const u8 = null,
 };
 
 pub fn run(
@@ -56,9 +57,25 @@ pub fn run(
 
     const ref_updates = try receive_pack.readRefUpdates(repo_opts.hash, &arena, reader);
 
-    var atomic_failure = false;
+    var transaction_failure = false;
 
     if (ref_updates.items.len != 0) {
+        if (options.allowed_ref) |allowed_ref| {
+            var disallowed = false;
+            for (ref_updates.items) |*update| {
+                if (!std.mem.eql(u8, update.ref_name, allowed_ref)) {
+                    update.error_message = "ref update not allowed";
+                    disallowed = true;
+                }
+            }
+            if (disallowed) {
+                transaction_failure = true;
+                for (ref_updates.items) |*update| {
+                    if (update.error_message == null) update.error_message = "atomic transaction failed";
+                }
+            }
+        }
+
         {
             const delete_only = for (ref_updates.items) |update| {
                 if (!isNullOid(&update.new_oid)) break false;
@@ -87,11 +104,12 @@ pub fn run(
         // an atomic push applies every ref update or none of them, so if any
         // of them failed, the rest must be reported as failed as well
         if (.xit == repo_kind and receive_pack.atomic) {
-            atomic_failure = for (ref_updates.items) |update| {
+            const atomic_failure = for (ref_updates.items) |update| {
                 if (update.error_message != null) break true;
             } else false;
 
             if (atomic_failure) {
+                transaction_failure = true;
                 for (ref_updates.items) |*update| {
                     if (update.error_message == null) {
                         update.error_message = "atomic transaction failed";
@@ -121,7 +139,7 @@ pub fn run(
 
     try writer.writeAll("0000");
 
-    if (atomic_failure) return error.CancelTransaction;
+    if (transaction_failure) return error.CancelTransaction;
 }
 
 const ReceivePack = struct {
