@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) !void {
     const test_filters = b.option([]const []const u8, "test-filter", "Skip tests that do not match any filter") orelse &[0][]const u8{};
 
     // main
-    const install_main_exe = blk: {
+    {
         const exe = b.addExecutable(.{
             .name = "xit",
             .root_module = b.createModule(.{
@@ -16,16 +16,14 @@ pub fn build(b: *std.Build) !void {
                 // default to ReleaseSafe unless an explicit -Doptimize is passed
                 .optimize = if (b.user_input_options.contains("optimize")) optimize else .ReleaseSafe,
             }),
+            .use_llvm = true,
         });
         exe.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
         exe.root_module.addImport("xitui", b.dependency("xitui", .{}).module("xitui"));
-        exe.use_llvm = true;
 
         const install_exe = b.addInstallArtifact(exe, .{});
         b.getInstallStep().dependOn(&install_exe.step);
-
-        break :blk install_exe;
-    };
+    }
 
     // test
     {
@@ -77,9 +75,9 @@ pub fn build(b: *std.Build) !void {
                 .target = target,
                 .optimize = optimize,
             }),
+            .use_llvm = true,
         });
         exe.root_module.addImport("xit", xit);
-        exe.use_llvm = true;
         const try_install = b.addInstallArtifact(exe, .{});
 
         const run_cmd = b.addRunArtifact(exe);
@@ -94,6 +92,19 @@ pub fn build(b: *std.Build) !void {
 
     // testnet
     {
+        const server_exe = b.addExecutable(.{
+            .name = "xit",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = .Debug,
+            }),
+            .use_llvm = true,
+        });
+        server_exe.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
+        server_exe.root_module.addImport("xitui", b.dependency("xitui", .{}).module("xitui"));
+        const install_server_exe = b.addInstallArtifact(server_exe, .{});
+
         const unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/testnet.zig"),
@@ -106,8 +117,8 @@ pub fn build(b: *std.Build) !void {
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;
+        run_unit_tests.step.dependOn(&install_server_exe.step);
         const test_step = b.step("testnet", "Run network unit tests");
-        test_step.dependOn(&install_main_exe.step);
         test_step.dependOn(&run_unit_tests.step);
     }
 }
