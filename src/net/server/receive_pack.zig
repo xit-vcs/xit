@@ -17,6 +17,40 @@ pub const Options = struct {
     advertise_refs: bool = false,
     is_stateless: bool = false,
     allowed_ref: ?[]const u8 = null,
+    applied_ref_updates: ?*AppliedRefUpdates = null,
+};
+
+pub const AppliedRefUpdate = struct {
+    ref_name: []u8,
+    old_oid: []u8,
+    new_oid: []u8,
+};
+
+pub const AppliedRefUpdates = struct {
+    arena: std.heap.ArenaAllocator,
+    items: std.ArrayList(AppliedRefUpdate) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) AppliedRefUpdates {
+        return .{ .arena = .init(allocator) };
+    }
+
+    pub fn deinit(self: *AppliedRefUpdates) void {
+        self.arena.deinit();
+    }
+
+    fn append(
+        self: *AppliedRefUpdates,
+        ref_name: []const u8,
+        old_oid: []const u8,
+        new_oid: []const u8,
+    ) !void {
+        const allocator = self.arena.allocator();
+        try self.items.append(allocator, .{
+            .ref_name = try allocator.dupe(u8, ref_name),
+            .old_oid = try allocator.dupe(u8, old_oid),
+            .new_oid = try allocator.dupe(u8, new_oid),
+        });
+    }
 };
 
 pub fn run(
@@ -140,6 +174,13 @@ pub fn run(
     try writer.writeAll("0000");
 
     if (transaction_failure) return error.CancelTransaction;
+
+    if (options.applied_ref_updates) |updates| {
+        for (ref_updates.items) |update| {
+            if (update.error_message != null or update.skip_update) continue;
+            try updates.append(update.ref_name, &update.old_oid, &update.new_oid);
+        }
+    }
 }
 
 const ReceivePack = struct {
