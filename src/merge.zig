@@ -1395,8 +1395,11 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             io: std.Io,
             allocator: std.mem.Allocator,
             merge_input: MergeInput(repo_opts.hash),
+            target_ref_maybe: ?rf.Ref, // null means HEAD
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !Merge(repo_kind, repo_opts) {
+            if (target_ref_maybe != null and merge_input.action != .new) return error.CannotContinueMergeAtRef;
+
             // TODO: exit early if work dir is dirty
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -1406,14 +1409,26 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 allocator.destroy(arena);
             }
 
-            // get the current branch name and oid
+            // get the target name, path, and oid
             const target_buffer = try arena.allocator().alloc(u8, rf.MAX_REF_CONTENT_SIZE);
-            const target_ref_or_oid = try rf.readHead(repo_kind, repo_opts, state.readOnly(), io, target_buffer) orelse return error.TargetNotFound;
-            const target_name = switch (target_ref_or_oid) {
-                .ref => |ref| ref.name,
-                .oid => |oid| oid,
+            const target_name, const target_path, const target_oid_maybe = if (target_ref_maybe) |target_ref| blk: {
+                const target_path = try target_ref.toPath(target_buffer);
+                break :blk .{
+                    try arena.allocator().dupe(u8, target_ref.name),
+                    target_path,
+                    try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = target_ref }),
+                };
+            } else blk: {
+                const target_ref_or_oid = try rf.readHead(repo_kind, repo_opts, state.readOnly(), io, target_buffer) orelse return error.TargetNotFound;
+                break :blk .{
+                    switch (target_ref_or_oid) {
+                        .ref => |ref| ref.name,
+                        .oid => |oid| oid,
+                    },
+                    "HEAD",
+                    try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, target_ref_or_oid),
+                };
             };
-            const target_oid_maybe = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, target_ref_or_oid);
 
             // init the diff that we will use for the migration and the conflicts maps.
             // they're using the arena because they'll be included in the result.
@@ -1469,18 +1484,20 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // get the source and target oid
                     const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
                     const target_oid = target_oid_maybe orelse {
-                        // the target branch is completely empty, so just set it to the source oid
-                        try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &source_oid);
-
                         // make a TreeDiff that adds all files from source
                         try clean_diff.compare(state.readOnly(), io, null, &source_oid, null);
 
-                        // read index
-                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                        defer index.deinit();
+                        // the target branch is completely empty, so just set it to the source oid
+                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
 
-                        // update the work dir
-                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
+                        if (target_ref_maybe == null) {
+                            // read index
+                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                            defer index.deinit();
+
+                            // update the work dir
+                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
+                        }
 
                         return .{
                             .arena = arena,
@@ -1575,10 +1592,29 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         },
                     };
 
-                    // this block must end before the commit is written below, because
-                    // the git backend holds a lock on the index file until then and
-                    // writing the commit will read the index file
-                    {
+                    if (target_ref_maybe != null) {
+                        if (repo_kind == .xit and merge_algo == .patch) {
+                            // patch merging can leave temporary state behind
+                            try removeMergeState(repo_kind, repo_opts, state, io);
+                        }
+
+                        if (conflicts.count() > 0) {
+                            return .{
+                                .arena = arena,
+                                .allocator = allocator,
+                                .changes = clean_diff.changes,
+                                .auto_resolved_conflicts = auto_resolved_conflicts,
+                                .base_oid = base_oid,
+                                .target_name = target_name,
+                                .source_name = source_name,
+                                .result = .{ .conflict = .{ .conflicts = conflicts } },
+                            };
+                        }
+                    } else {
+                        // this block must end before the commit is written below, because
+                        // the git backend holds a lock on the index file until then and
+                        // writing the commit will read the index file
+
                         // the git backend needs a lock on the index file while it's updated
                         var lock_maybe: ?fs.LockFile = null;
                         defer if (lock_maybe) |*lock| lock.deinit(io);
@@ -1638,8 +1674,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
-                        // the base ancestor is the target oid, so just update HEAD
-                        try rf.writeRecur(repo_kind, repo_opts, state, io, "HEAD", &source_oid);
+                        // the base ancestor is the target oid, so just update the target
+                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
                         return .{
                             .arena = arena,
                             .allocator = allocator,
@@ -1657,7 +1693,16 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
+                    // build the merged tree without changing the index or work dir
+                    const commit_oid = if (target_ref_maybe) |target_ref| blk: {
+                        var index = try idx.Index(repo_kind, repo_opts).initFromCommit(state.readOnly(), io, allocator, &target_oid);
+                        defer index.deinit();
+                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, false, null);
+
+                        var tree = try obj.Tree.initFromIndex(repo_kind, repo_opts, state, io, allocator, &index);
+                        defer tree.deinit();
+                        break :blk try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata, &tree, target_ref);
+                    } else try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
                     return .{
                         .arena = arena,

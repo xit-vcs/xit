@@ -1120,8 +1120,30 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             input: mrg.MergeInput(repo_opts.hash),
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !mrg.Merge(repo_kind, repo_opts) {
+            return self.mergeAtRefOrHead(io, allocator, input, null, progress_ctx_maybe);
+        }
+
+        pub fn mergeAtRef(
+            self: *Repo(repo_kind, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            input: mrg.MergeInput(repo_opts.hash),
+            ref: rf.Ref,
+            progress_ctx_maybe: ?repo_opts.ProgressCtx,
+        ) !mrg.Merge(repo_kind, repo_opts) {
+            return self.mergeAtRefOrHead(io, allocator, input, ref, progress_ctx_maybe);
+        }
+
+        fn mergeAtRefOrHead(
+            self: *Repo(repo_kind, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            input: mrg.MergeInput(repo_opts.hash),
+            ref_maybe: ?rf.Ref,
+            progress_ctx_maybe: ?repo_opts.ProgressCtx,
+        ) !mrg.Merge(repo_kind, repo_opts) {
             switch (repo_kind) {
-                .git => return try mrg.Merge(repo_kind, repo_opts).init(.{ .core = &self.core, .extra = .{} }, io, allocator, input, progress_ctx_maybe),
+                .git => return try mrg.Merge(repo_kind, repo_opts).init(.{ .core = &self.core, .extra = .{} }, io, allocator, input, ref_maybe, progress_ctx_maybe),
                 .xit => {
                     var merge_result: mrg.Merge(repo_kind, repo_opts) = undefined;
 
@@ -1130,6 +1152,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         io: std.Io,
                         allocator: std.mem.Allocator,
                         input: mrg.MergeInput(repo_opts.hash),
+                        ref_maybe: ?rf.Ref,
                         merge_result: *mrg.Merge(repo_kind, repo_opts),
                         progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
@@ -1137,13 +1160,15 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
-                            ctx.merge_result.* = try mrg.Merge(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, ctx.input, ctx.progress_ctx_maybe);
+                            ctx.merge_result.* = try mrg.Merge(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, ctx.input, ctx.ref_maybe, ctx.progress_ctx_maybe);
 
                             switch (ctx.merge_result.result) {
                                 .success => {},
                                 // no need to make a new transaction if nothing was done
                                 .nothing => return error.CancelTransaction,
-                                .fast_forward, .conflict => {},
+                                .fast_forward => {},
+                                // mergeAtRef does not store conflict state
+                                .conflict => if (ctx.ref_maybe != null) return error.CancelTransaction,
                             }
 
                             try un.writeMessage(repo_opts, state, .{ .merge = .{ .input = ctx.input, .allocator = ctx.allocator } });
@@ -1159,7 +1184,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .input = input, .progress_ctx_maybe = progress_ctx_maybe, .merge_result = &merge_result },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .input = input, .ref_maybe = ref_maybe, .progress_ctx_maybe = progress_ctx_maybe, .merge_result = &merge_result },
                     ) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,

@@ -84,14 +84,10 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             }
         };
 
-        pub fn init(
-            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-        ) !Index(repo_kind, repo_opts) {
+        fn initEmpty(io: std.Io, allocator: std.mem.Allocator) !Index(repo_kind, repo_opts) {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
-            var self = Index(repo_kind, repo_opts){
+            return .{
                 .version = 2,
                 .entries = .empty,
                 .dirty_paths = .empty,
@@ -103,6 +99,14 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 .allocator = allocator,
                 .arena = arena,
             };
+        }
+
+        pub fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+        ) !Index(repo_kind, repo_opts) {
+            var self = try initEmpty(io, allocator);
             errdefer self.deinit();
 
             switch (repo_kind) {
@@ -219,6 +223,27 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             }
 
             // the entries loaded above are not dirty
+            self.dirty_paths.clearRetainingCapacity();
+
+            return self;
+        }
+
+        pub fn initFromCommit(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            oid: *const [hash.hexLen(repo_opts.hash)]u8,
+        ) !Index(repo_kind, repo_opts) {
+            var self = try initEmpty(io, allocator);
+            errdefer self.deinit();
+
+            var tree = try tr.Tree(repo_kind, repo_opts).init(state, io, allocator, oid);
+            defer tree.deinit();
+            for (tree.entries.keys(), tree.entries.values()) |path, *tree_entry| {
+                const path_parts = try fs.splitPath(allocator, path);
+                defer allocator.free(path_parts);
+                try self.addTreeEntryFile(tree_entry, path_parts, 0, 0);
+            }
             self.dirty_paths.clearRetainingCapacity();
 
             return self;
@@ -441,7 +466,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             file_size: u64,
             stage: u2,
         ) !void {
-            if (tree_entry.mode.content.object_type != .regular_file) {
+            if (tree_entry.mode.content.object_type == .tree or tree_entry.mode.content.object_type == .gitlink) {
                 return error.InvalidObjectKind;
             }
             const path = if (path_parts.len == 0) return error.InvalidPath else try fs.joinPath(self.arena.allocator(), path_parts);

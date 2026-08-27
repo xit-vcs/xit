@@ -261,6 +261,107 @@ test "merge" {
     try testMerge(.xit, .{ .is_test = true });
 }
 
+test "merge at ref" {
+    try testMergeAtRef(.git, .{ .is_test = true });
+    try testMergeAtRef(.xit, .{ .is_test = true });
+}
+
+fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const temp_dir_name = "temp-test-repo-merge-at-ref";
+
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    defer allocator.free(work_path);
+
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "base.txt", "base");
+    const base_oid = try repo.commit(io, allocator, .{ .message = "base" });
+    try repo.addBranch(io, .{ .name = "target" });
+    try repo.addBranch(io, .{ .name = "source" });
+
+    {
+        var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
+        defer switch_result.deinit();
+    }
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "target.txt", "target");
+    _ = try repo.commit(io, allocator, .{ .message = "target" });
+
+    {
+        var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "source" } } });
+        defer switch_result.deinit();
+    }
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "source.txt", "source");
+    _ = try repo.commit(io, allocator, .{ .message = "source" });
+
+    {
+        var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+        defer switch_result.deinit();
+    }
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "current.txt", "current");
+
+    {
+        var merge = try repo.mergeAtRef(io, allocator, .{
+            .kind = .full,
+            .action = .{ .new = .{
+                .source = &.{.{ .ref = .{ .kind = .head, .name = "source" } }},
+                .algo = .diff3,
+            } },
+        }, .{ .kind = .head, .name = "target" }, null);
+        defer merge.deinit();
+        try std.testing.expect(.success == merge.result);
+    }
+
+    const head_oid = try repo.readRef(io, .{ .kind = .none, .name = "HEAD" }) orelse return error.RefNotFound;
+    try std.testing.expectEqualStrings(&base_oid, &head_oid);
+    const current_content = try repo.core.work_dir.readFileAlloc(io, "current.txt", allocator, .limited(1024));
+    defer allocator.free(current_content);
+    try std.testing.expectEqualStrings("current", current_content);
+    try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "target.txt", .{ .mode = .read_only }));
+    try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "source.txt", .{ .mode = .read_only }));
+
+    _ = try repo.commit(io, allocator, .{ .message = "current" });
+
+    {
+        var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
+        defer switch_result.deinit();
+    }
+    for ([_]struct { path: []const u8, content: []const u8 }{
+        .{ .path = "base.txt", .content = "base" },
+        .{ .path = "target.txt", .content = "target" },
+        .{ .path = "source.txt", .content = "source" },
+    }) |expected| {
+        const content = try repo.core.work_dir.readFileAlloc(io, expected.path, allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings(expected.content, content);
+    }
+    try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "current.txt", .{ .mode = .read_only }));
+
+    {
+        var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+        defer switch_result.deinit();
+    }
+    try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "target.txt", .{ .mode = .read_only }));
+    try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "source.txt", .{ .mode = .read_only }));
+    const restored_current_content = try repo.core.work_dir.readFileAlloc(io, "current.txt", allocator, .limited(1024));
+    defer allocator.free(restored_current_content);
+    try std.testing.expectEqualStrings("current", restored_current_content);
+}
+
 fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;

@@ -113,6 +113,20 @@ pub const Tree = struct {
         self.allocator.destroy(self.arena);
     }
 
+    pub fn initFromIndex(
+        comptime repo_kind: rp.RepoKind,
+        comptime repo_opts: rp.RepoOpts(repo_kind),
+        state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        index: *const idx.Index(repo_kind, repo_opts),
+    ) !Tree {
+        var tree = try Tree.init(allocator);
+        errdefer tree.deinit();
+        try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, index, "", index.root_children.keys());
+        return tree;
+    }
+
     pub fn addBlobEntry(self: *Tree, mode: fs.Mode, name: []const u8, oid: []const u8) !void {
         const entry = try std.fmt.allocPrint(self.arena.allocator(), "{s} {s}\x00{s}", .{ mode.toStr(), name, oid });
         try self.entries.put(self.arena.allocator(), name, entry);
@@ -372,9 +386,8 @@ pub fn writeCommitAtHead(
     defer index.deinit();
 
     // create tree and add index entries
-    var tree = try Tree.init(allocator);
+    var tree = try Tree.initFromIndex(repo_kind, repo_opts, state, io, allocator, &index);
     defer tree.deinit();
-    try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, &index, "", index.root_children.keys());
 
     return try writeCommit(repo_kind, repo_opts, state, io, allocator, metadata, &tree, .{ .kind = .none, .name = "HEAD" });
 }

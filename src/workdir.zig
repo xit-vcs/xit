@@ -801,12 +801,16 @@ pub fn migrate(
     }
 
     for (add_files.keys(), add_files.values()) |path, tree_entry| {
-        // update work dir
         if (update_work_dir) {
+            // update the work dir and index from the new file
             try objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, path, tree_entry);
+            try index.addPath(state, io, path, &tree_entry);
+        } else {
+            // update the index directly from the tree
+            const path_parts = try fs.splitPath(allocator, path);
+            defer allocator.free(path_parts);
+            try index.addTreeEntry(state.readOnly(), io, allocator, &tree_entry, path_parts);
         }
-        // update index
-        try index.addPath(state, io, path, &tree_entry);
     }
 }
 
