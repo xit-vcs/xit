@@ -1398,7 +1398,10 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             target_ref_maybe: ?rf.Ref, // null means HEAD
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !Merge(repo_kind, repo_opts) {
-            if (target_ref_maybe != null and merge_input.action != .new) return error.CannotContinueMergeAtRef;
+            if (target_ref_maybe != null) switch (merge_input.action) {
+                .new => {},
+                .cont => return error.CannotContinueMergeAtRef,
+            };
 
             // TODO: exit early if work dir is dirty
 

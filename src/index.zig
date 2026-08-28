@@ -466,8 +466,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             file_size: u64,
             stage: u2,
         ) !void {
-            if (tree_entry.mode.content.object_type == .tree or tree_entry.mode.content.object_type == .gitlink) {
-                return error.InvalidObjectKind;
+            switch (tree_entry.mode.content.object_type) {
+                .regular_file, .symbolic_link => {},
+                .tree, .gitlink => return error.InvalidObjectKind,
             }
             const path = if (path_parts.len == 0) return error.InvalidPath else try fs.joinPath(self.arena.allocator(), path_parts);
             const entry = Entry{

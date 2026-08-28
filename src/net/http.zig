@@ -217,28 +217,15 @@ pub const HttpStream = struct {
         head: std.http.Client.Response.Head,
         allow_replay: bool,
     ) !void {
-        const is_redirect = head.status == .moved_permanently or
-            head.status == .found or
-            head.status == .see_other or
-            head.status == .temporary_redirect or
-            head.status == .permanent_redirect;
-
-        if (allow_replay and is_redirect) {
-            if (head.location) |_| {
-                return error.HttpRedirectNotImplemented;
-            } else {
+        switch (head.status) {
+            .moved_permanently, .found, .see_other, .temporary_redirect, .permanent_redirect => {
+                if (!allow_replay) return error.HttpRedirectUnexpected;
+                if (head.location != null) return error.HttpRedirectNotImplemented;
                 return error.HttpRedirectWithoutLocation;
-            }
-        } else if (is_redirect) {
-            return error.HttpRedirectUnexpected;
-        }
-
-        if (head.status == .unauthorized or head.status == .proxy_auth_required) {
-            return error.HttpUnauthorized;
-        }
-
-        if (head.status != .ok) {
-            return error.HttpStatusCodeUnexpected;
+            },
+            .unauthorized, .proxy_auth_required => return error.HttpUnauthorized,
+            .ok => {},
+            else => return error.HttpStatusCodeUnexpected,
         }
 
         if (head.content_type) |content_type| {
