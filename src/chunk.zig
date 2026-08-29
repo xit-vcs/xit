@@ -320,6 +320,7 @@ fn makeChunkRecord(
 pub fn writeChunks(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
+    allocator: std.mem.Allocator,
     hashed: anytype,
     object_len: usize,
     object_kind_name: []const u8,
@@ -327,7 +328,6 @@ pub fn writeChunks(
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
-    const allocator = state.core.db.core.memory.buffer.allocator;
     var chunk_info = std.Io.Writer.Allocating.init(allocator);
     defer chunk_info.deinit();
 

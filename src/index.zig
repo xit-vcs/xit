@@ -305,7 +305,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try obj.writeObject(repo_kind, repo_opts, state, self.io, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
+                    try obj.writeObject(repo_kind, repo_opts, state, self.io, self.allocator, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     // get the mode
                     // on windows, if a tree entry was supplied to this fn and its hash
@@ -365,7 +365,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
                     var reader = std.Io.Reader.fixed(target_path);
-                    try obj.writeObject(repo_kind, repo_opts, state, self.io, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
+                    try obj.writeObject(repo_kind, repo_opts, state, self.io, self.allocator, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     try self.addEntry(Entry.init(meta, meta.mode, oid, path));
                 },

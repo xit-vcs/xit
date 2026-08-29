@@ -29,6 +29,7 @@ pub fn writeObject(
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
+    allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     header: ObjectHeader,
     hash_bytes_buffer: *[hash.byteLen(repo_opts.hash)]u8,
@@ -87,7 +88,7 @@ pub fn writeObject(
             compressed_lock.success = true;
         },
         .xit => {
-            try chunk.writeChunks(repo_opts, state, &hashed, header.size, header.kind.name(), hash_bytes_buffer);
+            try chunk.writeChunks(repo_opts, state, allocator, &hashed, header.size, header.kind.name(), hash_bytes_buffer);
         },
     }
 }
@@ -212,7 +213,7 @@ fn writeTree(
     defer allocator.free(tree_contents);
 
     var reader = std.Io.Reader.fixed(tree_contents);
-    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .tree, .size = tree_contents.len }, hash_bytes_buffer);
+    try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .tree, .size = tree_contents.len }, hash_bytes_buffer);
 }
 
 /// returns the key to sign with, or null if signing isn't turned on for
@@ -366,7 +367,7 @@ pub fn writeCommitWithoutRef(
 
     var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
     var reader = std.Io.Reader.fixed(commit_contents);
-    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .commit, .size = commit_contents.len }, &oid_bytes);
+    try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &oid_bytes);
     return std.fmt.bytesToHex(oid_bytes, .lower);
 }
 
@@ -503,7 +504,7 @@ pub fn writeCommit(
 
     var commit_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
     var reader = std.Io.Reader.fixed(commit_contents);
-    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .commit, .size = commit_contents.len }, &commit_hash_bytes_buffer);
+    try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &commit_hash_bytes_buffer);
 
     // write commit id to ref
     var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
@@ -567,7 +568,7 @@ pub fn writeTag(
 
     var tag_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
     var reader = std.Io.Reader.fixed(tag_contents);
-    try writeObject(repo_kind, repo_opts, state, io, &reader, .{ .kind = .tag, .size = tag_contents.len }, &tag_hash_bytes_buffer);
+    try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .tag, .size = tag_contents.len }, &tag_hash_bytes_buffer);
 
     return std.fmt.bytesToHex(tag_hash_bytes_buffer, .lower);
 }
@@ -1222,6 +1223,7 @@ pub fn copyFromObjectIterator(
             repo_opts,
             state,
             io,
+            obj_iter.allocator,
             &object.object_reader.interface,
             object.object_reader.header(),
             &oid,
@@ -1296,7 +1298,7 @@ pub fn copyFromPackIterator(
 
         var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
         const header = pack_obj_rdr.header();
-        try writeObject(repo_kind, repo_opts, state, io, &stream.interface, header, &oid);
+        try writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
 
         try offset_to_oid.put(allocator, pack_iter.start_position, oid);
 

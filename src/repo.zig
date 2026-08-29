@@ -1680,7 +1680,38 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             allocator: std.mem.Allocator,
             extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
         ) !gc.GcResult {
-            return try gc.run(repo_opts, self, io, allocator, extra_roots);
+            const Ctx = struct {
+                core: *Repo(repo_kind, repo_opts).Core,
+                io: std.Io,
+                allocator: std.mem.Allocator,
+                extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+
+                pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    var moment = try DB.HashMap(.read_write).init(cursor.*);
+                    const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                    try gc.prune(repo_opts, state, ctx.io, ctx.allocator, ctx.extra_roots);
+                    try un.writeMessage(repo_opts, state, .gc);
+                }
+            };
+
+            // unlike the other commands, the lock is still needed after the
+            // transaction, so no other process can write while the pruned
+            // database is compacted and swapped in
+            try self.core.db_file.lock(io, .exclusive);
+            defer self.core.db_file.unlock(io);
+
+            const size_before = try self.core.db_file.length(io);
+
+            const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+            try history.appendContext(
+                .{ .slot = try history.getSlot(-1) },
+                Ctx{ .core = &self.core, .io = io, .allocator = allocator, .extra_roots = extra_roots },
+            );
+
+            return .{
+                .size_before = size_before,
+                .size_after = try gc.compactDatabase(repo_opts, self, io, allocator),
+            };
         }
     };
 }
