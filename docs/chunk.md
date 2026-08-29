@@ -14,6 +14,6 @@ The above issues were very straight-forward to solve in xit:
 
 Currently, the the max chunk size is 64k. It is likely that xit will eventually vary max chunk size based on the size of the file, so really large files can be stored with larger chunk sizes.
 
-All chunks are stored in a single append-only file called the chunk store, located at `.xit/chunks`. It is a xitdb file containing a map of chunk hash -> chunk record. A chunk store can even be shared by multiple repos, deduplicating chunks across all of them. To do that, replace `.xit/chunks` with a symlink to a common store file.
+Chunk records are stored alongside the rest of the repository data in the append-only xitdb file at `.xit/db`. The database contains a map of chunk hash -> chunk record, so repeated chunks are only stored once. Storing chunk records and the objects that reference them in the same database makes each change a single atomic transaction.
 
 It's important to note that xit only does chunking locally. When you push to a git host, they will likely store your objects in a standard git repo, and thus will still have performance problems with large files. You won't see the full benefit of this design until there is a host that stores objects the way xit does.

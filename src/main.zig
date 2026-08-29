@@ -232,11 +232,6 @@ pub fn runPrint(
             \\and the format has changed since then.
             \\
             ,
-            error.SharedChunkStoreNotSupported =>
-            \\this repo shares its chunk store with other repos,
-            \\so it can't be garbage collected on its own.
-            \\
-            ,
             error.RepoAlreadyExists =>
             \\repo already exists, dummy.
             \\two repos in the same directory makes no sense.
@@ -599,14 +594,11 @@ fn runCommand(
             .xit => {
                 const result = try repo.garbageCollect(io, allocator, &.{});
                 try run_opts.out.print(
-                    \\db:     {} -> {} bytes
-                    \\chunks: {} -> {} bytes
+                    \\.xit/db: {} -> {} bytes
                     \\
                 , .{
-                    result.db_size_before,
-                    result.db_size_after,
-                    result.chunk_store_size_before,
-                    result.chunk_store_size_after,
+                    result.size_before,
+                    result.size_after,
                 });
             },
         },

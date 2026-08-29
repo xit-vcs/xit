@@ -234,56 +234,48 @@ test "fastcdc sekien 64k chunks" {
 // the compress kind and the adler32 checksum of the uncompressed chunk
 const chunk_record_header_size = @sizeOf(CompressKind) + @sizeOf(u32);
 
-// chunk info entries contain (record offset, record size, end offset):
-// the location of the chunk record in the chunk store file, and the end
-// position of the chunk within the object
+// Chunk info entries contain (record position, record size, end offset): the
+// location of the chunk record and its end position within the object.
 const chunk_entry_size = @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u64);
 
-// where a chunk record lives in the chunk store file
 const ChunkLocation = struct {
-    offset: u64,
+    position: u64,
     size: u32,
 };
 
-// a chunk record is stored in the chunk store as a xitdb byte array:
-// a u64 length header followed by the bytes themselves, laid out
-// contiguously. the record's location can therefore be derived from the
-// cursor's slot, allowing readers to find it with a single positional read.
-pub fn chunkRecordOffset(cursor: anytype) !u64 {
+// Return the position of a chunk record's xitdb byte-array header. Using the
+// structural position directly means xitdb's compaction map can relocate it.
+pub fn chunkRecordPosition(cursor: anytype) !u64 {
     const slot = cursor.slot();
-    // byte arrays small enough to be inlined into the slot (short_bytes)
-    // have no file location, so they must never be used for chunk records
     if (slot.tag != .bytes) return error.UnexpectedTag;
-    return slot.value + @sizeOf(u64);
+    return slot.value;
 }
 
 fn chunkLocation(cursor: anytype, size: u64) !ChunkLocation {
     return .{
-        .offset = try chunkRecordOffset(cursor),
+        .position = try chunkRecordPosition(cursor),
         .size = @intCast(size),
     };
 }
 
-// collect the chunk store offset of every record referenced by a chunk
-// info buffer. used by gc to find the records that must be kept.
-pub fn collectRecordOffsets(chunk_info: []const u8, offsets: *std.AutoHashMap(u64, void)) !void {
+// Collect every chunk record position referenced by a chunk info buffer.
+pub fn collectRecordPositions(chunk_info: []const u8, positions: *std.AutoHashMap(u64, void)) !void {
     if (chunk_info.len % chunk_entry_size != 0) return error.WrongChunkInfoSize;
     var position: usize = 0;
     while (position < chunk_info.len) : (position += chunk_entry_size) {
-        const record_offset = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
-        try offsets.put(record_offset, {});
+        const record_position = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
+        try positions.put(record_position, {});
     }
 }
 
-// rewrite every record offset in a chunk info buffer using the offset map
-// produced by compacting the chunk store
-pub fn rewriteRecordOffsets(chunk_info: []u8, offset_map: *const std.AutoHashMap(u64, u64)) !void {
+// Rewrite chunk record positions using a source-to-target compaction map.
+pub fn rewriteRecordPositions(chunk_info: []u8, position_map: *const std.AutoHashMap(u64, u64)) !void {
     if (chunk_info.len % chunk_entry_size != 0) return error.WrongChunkInfoSize;
     var position: usize = 0;
     while (position < chunk_info.len) : (position += chunk_entry_size) {
-        const record_offset = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
-        const new_position = offset_map.get(record_offset - @sizeOf(u64)) orelse return error.ChunkNotFound;
-        std.mem.writeInt(u64, chunk_info[position..][0..@sizeOf(u64)], new_position + @sizeOf(u64), .big);
+        const record_position = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
+        const new_position = position_map.get(record_position) orelse return error.ChunkNotFound;
+        std.mem.writeInt(u64, chunk_info[position..][0..@sizeOf(u64)], new_position, .big);
     }
 }
 
@@ -328,7 +320,6 @@ fn makeChunkRecord(
 pub fn writeChunks(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    io: std.Io,
     hashed: anytype,
     object_len: usize,
     object_kind_name: []const u8,
@@ -336,87 +327,60 @@ pub fn writeChunks(
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
-    // get a writer to the value slot
-    var temp_chunk_info_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object.temp"));
-    var write_buffer: [repo_opts.buffer_size]u8 = undefined;
-    var writer = try temp_chunk_info_cursor.writer(&write_buffer);
+    const allocator = state.core.db.core.memory.buffer.allocator;
+    var chunk_info = std.Io.Writer.Allocating.init(allocator);
+    defer chunk_info.deinit();
 
-    // write the chunks to the chunk store and their locations to the chunk info
-    {
-        const Ctx = struct {
-            hashed: @TypeOf(hashed),
-            object_len: usize,
-            chunk_info_writer: *DB.Cursor(.read_write).Writer,
+    // write chunks and their locations as part of the repo transaction
+    const chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
+    const chunk_map = try DB.HashMap(.read_write).init(chunk_map_cursor);
 
-            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
-                const chunk_map = try DB.HashMap(.read_write).init(cursor.*);
+    var chunk_buffer = [_]u8{0} ** repo_opts.extra.chunk_opts.max_size;
+    var record_buffer = [_]u8{0} ** (chunk_record_header_size + repo_opts.extra.chunk_opts.max_size);
+    var iter = FastCdc(repo_opts.extra.chunk_opts).init(object_len);
+    var end_offset: u64 = 0;
+    while (try iter.next(&hashed.reader, &chunk_buffer)) |chunk| {
+        // hash the chunk
+        var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
+        const chunk_hash_int = hash.bytesToInt(repo_opts.hash, &chunk_hash_bytes);
 
-                var chunk_buffer = [_]u8{0} ** repo_opts.extra.chunk_opts.max_size;
-                var record_buffer = [_]u8{0} ** (chunk_record_header_size + repo_opts.extra.chunk_opts.max_size);
-                var iter = FastCdc(repo_opts.extra.chunk_opts).init(ctx.object_len);
-                var end_offset: u64 = 0;
-                var wrote_chunk = false;
-                while (try iter.next(&ctx.hashed.reader, &chunk_buffer)) |chunk| {
-                    // hash the chunk
-                    var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
-                    const chunk_hash_int = hash.bytesToInt(repo_opts.hash, &chunk_hash_bytes);
-
-                    // write the chunk record unless it already exists
-                    const location = if (try chunk_map.getCursor(chunk_hash_int)) |chunk_cursor|
-                        try chunkLocation(chunk_cursor, try chunk_cursor.count())
-                    else blk: {
-                        const record = makeChunkRecord(repo_opts, chunk, &record_buffer);
-                        var chunk_cursor = try chunk_map.putCursor(chunk_hash_int);
-                        var record_writer = try chunk_cursor.writer(&.{});
-                        try record_writer.interface.writeAll(record);
-                        try record_writer.finish();
-                        wrote_chunk = true;
-                        break :blk try chunkLocation(chunk_cursor, record.len);
-                    };
-
-                    // write the chunk's location and end offset.
-                    // note: we are storing the offset at the *end* of this chunk.
-                    // this is useful so we can find the total size of the object
-                    // by looking at the last offset.
-                    end_offset += chunk.len;
-                    try ctx.chunk_info_writer.interface.writeInt(u64, location.offset, .big);
-                    try ctx.chunk_info_writer.interface.writeInt(u32, location.size, .big);
-                    try ctx.chunk_info_writer.interface.writeInt(u64, end_offset, .big);
-                }
-
-                if (!wrote_chunk) return error.CancelTransaction;
-            }
+        // write the chunk record unless it already exists
+        const location = if (try chunk_map.getCursor(chunk_hash_int)) |chunk_cursor|
+            try chunkLocation(chunk_cursor, try chunk_cursor.count())
+        else blk: {
+            const record = makeChunkRecord(repo_opts, chunk, &record_buffer);
+            var chunk_cursor = try chunk_map.putCursor(chunk_hash_int);
+            var record_writer = try chunk_cursor.writer(&.{});
+            try record_writer.interface.writeAll(record);
+            try record_writer.finish();
+            break :blk try chunkLocation(chunk_cursor, record.len);
         };
 
-        try state.core.chunk_store_file.lock(io, .exclusive);
-        defer state.core.chunk_store_file.unlock(io);
-
-        const store_history = try DB.ArrayList(.read_write).init(state.core.chunk_store_db.rootCursor());
-        store_history.appendContext(
-            .{ .slot = try store_history.getSlot(-1) },
-            Ctx{ .hashed = hashed, .object_len = object_len, .chunk_info_writer = &writer },
-        ) catch |err| switch (err) {
-            error.CancelTransaction => {},
-            else => |e| return e,
-        };
+        // write the chunk's location and end offset.
+        // note: we are storing the offset at the *end* of this chunk.
+        // this is useful so we can find the total size of the object
+        // by looking at the last offset.
+        end_offset += chunk.len;
+        try chunk_info.writer.writeInt(u64, location.position, .big);
+        try chunk_info.writer.writeInt(u32, location.size, .big);
+        try chunk_info.writer.writeInt(u64, end_offset, .big);
     }
-
-    // finish writing to db
-    try writer.finish();
 
     hashed.hasher.final(object_hash_bytes);
 
-    // write slot to the map
-    const blob_id_to_chunk_info_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
-    const blob_id_to_chunk_info = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(blob_id_to_chunk_info_cursor);
-
+    // Write chunk info directly into the object map after every chunk record is
+    // finished. xitdb byte writers must be contiguous and cannot be interleaved.
+    const object_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
+    const object_map = try DB.HashMap(.read_write).init(object_map_cursor);
     const object_hash = hash.bytesToInt(repo_opts.hash, object_hash_bytes);
-    try blob_id_to_chunk_info.putKey(object_hash, .{ .bytes = object_kind_name });
-    try blob_id_to_chunk_info.put(object_hash, .{ .slot = temp_chunk_info_cursor.slot() });
+    try object_map.putKey(object_hash, .{ .bytes = object_kind_name });
 
-    // remove temp object
-    _ = try state.extra.moment.remove(hash.hashInt(repo_opts.hash, "object.temp"));
+    var chunk_info_cursor = try object_map.putCursor(object_hash);
+    var write_buffer: [repo_opts.buffer_size]u8 = undefined;
+    var writer = try chunk_info_cursor.writer(&write_buffer);
+    try writer.interface.writeAll(chunk_info.written());
+    try writer.finish();
 }
 
 // find the index of the chunk covering `position` in the object, or null if
@@ -452,25 +416,18 @@ pub const ChunkSpan = struct {
     len: usize,
 };
 
-// read the chunk record at `chunk_index` from the chunk store file with a
-// single positional read, decompress it into `buf` (which must be at least
-// one byte larger than the object's largest chunk, so at most
-// chunk_opts.max_size + 1 bytes) and return its span. callers cache the
-// result so a chunk is only read and decompressed once even when the
-// object is scanned line by line.
+// Read the chunk record at `chunk_index` directly from its database position,
+// decompress it into `buf`, and return its span. Callers cache the result so a
+// chunk is only read and decompressed once.
 pub fn loadChunk(
     comptime repo_opts: rp.RepoOpts(.xit),
     chunk_info: []const u8,
-    io: std.Io,
-    chunk_store_file: std.Io.File,
+    db: *rp.Repo(.xit, repo_opts).DB,
     chunk_index: usize,
     buf: []u8,
 ) !ChunkSpan {
-    // find the chunk's location in the chunk store and its span in the object.
-    // since entries store *end* offsets, the offset of this chunk is the
-    // end offset of the previous one.
     const entry = chunk_info[chunk_index * chunk_entry_size ..][0..chunk_entry_size];
-    const record_offset = std.mem.readInt(u64, entry[0..@sizeOf(u64)], .big);
+    const record_position = std.mem.readInt(u64, entry[0..@sizeOf(u64)], .big);
     const record_size = std.mem.readInt(u32, entry[@sizeOf(u64)..][0..@sizeOf(u32)], .big);
     const end_offset = std.mem.readInt(u64, entry[chunk_entry_size - @sizeOf(u64) ..], .big);
     const object_offset = if (chunk_index == 0)
@@ -479,14 +436,14 @@ pub fn loadChunk(
         std.mem.readInt(u64, chunk_info[chunk_index * chunk_entry_size - @sizeOf(u64) ..][0..@sizeOf(u64)], .big);
     const chunk_size: usize = @intCast(end_offset - object_offset);
 
-    // read the whole chunk record with a single positional read
     var reader_buffer = [_]u8{0} ** (chunk_record_header_size + repo_opts.extra.chunk_opts.max_size);
     if (record_size < chunk_record_header_size or record_size > reader_buffer.len or chunk_size > buf.len) {
         return error.WrongChunkSize;
     }
-    var reader = chunk_store_file.reader(io, &reader_buffer);
-    try reader.seekTo(record_offset);
-    const record = try reader.interface.take(record_size);
+    var reader = db.core.reader();
+    try reader.seekTo(record_position + @sizeOf(u64));
+    try reader.interface.readSliceAll(reader_buffer[0..record_size]);
+    const record = reader_buffer[0..record_size];
 
     // parse the record header
     const compress_kind = std.enums.fromInt(CompressKind, record[0]) orelse return error.InvalidEnumTag;
@@ -524,13 +481,11 @@ pub fn loadChunk(
 
 pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
-        io: std.Io,
-        chunk_store_file: std.Io.File,
+        db: *rp.Repo(.xit, repo_opts).DB,
         allocator: std.mem.Allocator,
         chunk_info_cursor: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-        // the object's chunk info entries (chunk location + end offset),
-        // read into memory on the first read so that finding chunks never
-        // has to touch the db again. it's tiny compared to the object
+        // the object's chunk info entries (chunk location + end offset), read
+        // into memory on the first read. It's tiny compared to the object
         // (one entry per chunk, and chunks are thousands of bytes).
         chunk_info: ?[]u8,
         position: u64,
@@ -544,7 +499,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
         pub fn init(
             state: rp.Repo(.xit, repo_opts).State(.read_only),
-            io: std.Io,
+            _: std.Io,
             allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !ChunkObjectReader(repo_opts) {
@@ -578,8 +533,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             errdefer allocator.free(chunk_cache);
 
             return .{
-                .io = io,
-                .chunk_store_file = state.core.chunk_store_file,
+                .db = &state.core.db,
                 .allocator = allocator,
                 .chunk_info_cursor = chunk_info_kv_pair.value_cursor,
                 .chunk_info = null,
@@ -630,7 +584,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 };
 
                 const chunk_index = findChunkIndex(chunk_info, self.position) orelse return 0;
-                const span = try loadChunk(repo_opts, chunk_info, self.io, self.chunk_store_file, chunk_index, self.chunk_cache);
+                const span = try loadChunk(repo_opts, chunk_info, self.db, chunk_index, self.chunk_cache);
                 self.cache_start = span.object_offset;
                 self.cache_end = span.object_offset + span.len;
                 if (self.position < self.cache_start or self.position >= self.cache_end) return 0;

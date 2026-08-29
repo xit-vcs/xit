@@ -87,7 +87,7 @@ pub fn writeObject(
             compressed_lock.success = true;
         },
         .xit => {
-            try chunk.writeChunks(repo_opts, state, io, &hashed, header.size, header.kind.name(), hash_bytes_buffer);
+            try chunk.writeChunks(repo_opts, state, &hashed, header.size, header.kind.name(), hash_bytes_buffer);
         },
     }
 }

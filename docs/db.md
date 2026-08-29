@@ -38,7 +38,7 @@ The good
 
 The xit
 
-* The heart of xit is [xitdb](https://github.com/xit-vcs/xitdb), an immutable database that it uses for all its data (besides the objects themselves, such as files, which are stored as separate [chunks](chunk.md)). The database stores everything in a single file located at `.xit/db`.
+* The heart of xit is [xitdb](https://github.com/xit-vcs/xitdb), an immutable database that stores all repository data in a single file located at `.xit/db`.
 
 * xitdb has all the trappings of a "real" database, including atomicity: the database will never be left in an inconsistent state if a transaction fails. More importantly, it has general-purpose data structures (a hashmap and an arraylist) that can be nested arbitrarily.
 
