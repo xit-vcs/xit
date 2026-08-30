@@ -13,12 +13,14 @@ pub fn ConfigListItem(comptime Widget: type) type {
         box: wgt.Box(Widget),
         // only the focusable cells are tracked here
         nav_ids: [2]usize,
-        // ids of the two action buttons hosted in the action Stack.
-        remove_id: usize,
+        // ids of the action buttons hosted in the action Stack. global items
+        // don't have a remove button.
+        remove_id: ?usize,
         update_id: usize,
         // bytes are owned by ConfigList's arena (same lifetime as this row)
         full_name: []const u8,
         original_value: []const u8,
+        is_global: bool,
 
         pub const value_index: usize = 0;
         pub const action_index: usize = 1;
@@ -28,7 +30,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
         const value_child_index: usize = 1;
         const action_child_index: usize = 2;
 
-        pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8) !ConfigListItem(Widget) {
+        pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8, is_global: bool) !ConfigListItem(Widget) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
@@ -42,7 +44,11 @@ pub fn ConfigListItem(comptime Widget: type) type {
             }
 
             {
-                var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28 });
+                var value_input = try wgt.TextInput.init(allocator, .{
+                    .visible_width = 28,
+                    .bottom_label = if (is_global) " global " else "",
+                    .read_only = is_global,
+                });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().focusable = true;
                 try value_input.setContent(allocator, value);
@@ -51,18 +57,19 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 try box.children.put(allocator, value_input.getFocus().id, .{ .widget = .{ .text_input = value_input }, .rect = null, .min_size = null });
             }
 
-            var remove_id: usize = undefined;
+            var remove_id: ?usize = null;
             var update_id: usize = undefined;
             {
                 var stack = try wgt.Stack(Widget).init(allocator);
                 errdefer stack.deinit(allocator);
 
-                {
+                if (!is_global) {
                     var remove_button = try wgt.TextBox.init(allocator, "remove", .{ .border_style = .single, .wrap_kind = .none });
                     errdefer remove_button.deinit(allocator);
                     remove_button.getFocus().focusable = true;
-                    remove_id = remove_button.getFocus().id;
-                    try stack.children.put(allocator, remove_id, .{ .text_box = remove_button });
+                    const id = remove_button.getFocus().id;
+                    remove_id = id;
+                    try stack.children.put(allocator, id, .{ .text_box = remove_button });
                 }
 
                 {
@@ -87,6 +94,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 .update_id = update_id,
                 .full_name = full_name,
                 .original_value = value,
+                .is_global = is_global,
             };
             self.getFocus().child_id = nav_ids[value_index];
             return self;
@@ -101,7 +109,15 @@ pub fn ConfigListItem(comptime Widget: type) type {
             // flip the action Stack between "remove" and "update" based on
             // whether the user has edited the value cell.
             const stack = &self.box.children.values()[action_child_index].widget.stack;
-            stack.focus.child_id = if (self.isValueModified()) self.update_id else self.remove_id;
+            stack.focus.child_id = if (self.is_global)
+                null
+            else if (self.isValueModified())
+                self.update_id
+            else
+                self.remove_id;
+            if (stack.focus.child_id == null and self.box.focus.child_id == self.nav_ids[action_index]) {
+                self.box.focus.child_id = self.nav_ids[value_index];
+            }
             try self.box.build(allocator, constraint, root_focus);
         }
 
@@ -114,11 +130,15 @@ pub fn ConfigListItem(comptime Widget: type) type {
             }
         }
 
-        pub fn indexOf(self: ConfigListItem(Widget), child_id: usize) ?usize {
-            for (self.nav_ids, 0..) |id, i| {
+        pub fn indexOf(self: *const ConfigListItem(Widget), child_id: usize) ?usize {
+            for (self.nav_ids[0..self.navCount()], 0..) |id, i| {
                 if (id == child_id) return i;
             }
             return null;
+        }
+
+        pub fn navCount(self: *const ConfigListItem(Widget)) usize {
+            return if (self.is_global) 1 else self.nav_ids.len;
         }
 
         pub fn name(self: *const ConfigListItem(Widget)) []const u8 {
@@ -405,6 +425,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                             defer allocator.free(value);
                             try self.repo.addConfig(self.io, allocator, .{ .name = item.name(), .value = value });
                         } else {
+                            if (item.is_global) return;
                             // rows that come from the global config aren't in
                             // the repo, so there is nothing to remove
                             self.repo.removeConfig(self.io, allocator, .{ .name = item.name() }) catch |err| switch (err) {
@@ -513,7 +534,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             return .{
                 .child_id = id,
                 .col = col,
-                .col_count = row.nav_ids.len,
+                .col_count = row.navCount(),
                 .action_index = ConfigListItem(Widget).action_index,
             };
         }
@@ -533,18 +554,22 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         // returns the focused cell's index in row-major order
         pub fn getSelectedIndex(self: ConfigList(Widget, repo_kind, repo_opts)) ?usize {
             const current_row = self.currentRowIndex() orelse return null;
+            var row_start: usize = 0;
+            for (0..current_row) |row| {
+                row_start += self.rowColCount(row);
+            }
             if (current_row == 0) {
                 const row = &self.box.children.values()[add_idx].widget.ui_config_add_list_item;
-                const col_id = row.box.focus.child_id orelse return current_row * row.nav_ids.len;
+                const col_id = row.box.focus.child_id orelse return row_start;
                 const col_idx = row.indexOf(col_id) orelse 0;
-                return current_row * row.nav_ids.len + col_idx;
+                return row_start + col_idx;
             }
             const inner_box = &self.box.children.values()[scroll_idx].widget.scroll.child.box;
             if ((current_row - 1) >= inner_box.children.count()) return null;
             const row = &inner_box.children.values()[current_row - 1].widget.ui_config_list_item;
-            const col_id = row.box.focus.child_id orelse return current_row * row.nav_ids.len;
+            const col_id = row.box.focus.child_id orelse return row_start;
             const col_idx = row.indexOf(col_id) orelse 0;
-            return current_row * row.nav_ids.len + col_idx;
+            return row_start + col_idx;
         }
 
         // total number of rows: 1 (add) + the scroll's items.
@@ -566,7 +591,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         fn rowColCount(self: *const ConfigList(Widget, repo_kind, repo_opts), row: usize) usize {
             if (row == 0) return self.addItemPtr().nav_ids.len;
             const item = self.configItemPtr(row - 1) orelse return 0;
-            return item.nav_ids.len;
+            return item.navCount();
         }
 
         fn rowChildIdAt(self: *const ConfigList(Widget, repo_kind, repo_opts), row: usize, col: usize) ?usize {
@@ -576,7 +601,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 return r.nav_ids[col];
             }
             const r = self.configItemPtr(row - 1) orelse return null;
-            if (col >= r.nav_ids.len) return null;
+            if (col >= r.navCount()) return null;
             return r.nav_ids[col];
         }
 
@@ -608,7 +633,11 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {
                 for (variables.keys(), variables.values()) |name, value| {
                     const full_name = try std.fmt.allocPrint(config.arena.allocator(), "{s}.{s}", .{ section_name, name });
-                    var config_item = try ConfigListItem(Widget).init(allocator, full_name, value);
+                    const is_global = if (config.local_sections.get(section_name)) |local_variables|
+                        !local_variables.contains(name)
+                    else
+                        true;
+                    var config_item = try ConfigListItem(Widget).init(allocator, full_name, value, is_global);
                     errdefer config_item.deinit(allocator);
                     try inner_box.children.put(allocator, config_item.getFocus().id, .{ .widget = .{ .ui_config_list_item = config_item }, .rect = null, .min_size = null });
                 }
