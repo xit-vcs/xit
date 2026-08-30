@@ -29,7 +29,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                     .config => "config",
                     .undo => if (repo_kind == .xit) "undo" else continue,
                 };
-                var text_box = try wgt.TextBox(Widget).init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
+                var text_box = try wgt.TextBox.init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });

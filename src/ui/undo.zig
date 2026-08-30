@@ -138,7 +138,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 defer allocator.free(msg);
 
                 const inner_box = &self.scroll.child.box;
-                var text_box = try wgt.TextBox(Widget).init(allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
+                var text_box = try wgt.TextBox.init(allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().focusable = true;
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });

@@ -234,7 +234,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             defer allocator.free(buf);
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -256,7 +256,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             defer allocator.free(buf);
 
             // add new diff widget
-            var text_box = try wgt.TextBox(Widget).init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }

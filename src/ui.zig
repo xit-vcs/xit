@@ -17,10 +17,10 @@ const rp = @import("./repo.zig");
 
 pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return union(enum) {
-        text: wgt.Text(Widget(repo_kind, repo_opts)),
+        text: wgt.Text,
         box: wgt.Box(Widget(repo_kind, repo_opts)),
-        text_box: wgt.TextBox(Widget(repo_kind, repo_opts)),
-        text_input: wgt.TextInput(Widget(repo_kind, repo_opts)),
+        text_box: wgt.TextBox,
+        text_input: wgt.TextInput,
         scroll: wgt.Scroll(Widget(repo_kind, repo_opts)),
         stack: wgt.Stack(Widget(repo_kind, repo_opts)),
         ui_root: ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts),
@@ -163,13 +163,9 @@ pub fn start(
     term.setActive(&terminal);
     defer term.setActive(null);
 
-    var last_size = layout.Size{ .width = 0, .height = 0 };
-    var last_grid = try Grid.init(allocator, last_size);
-    defer last_grid.deinit();
-
     while (!term.quit.load(.monotonic)) {
         // render to tty
-        const grid_changed = try terminal.render(&root, &last_grid, &last_size);
+        const grid_changed = try terminal.render(&root);
 
         // process any inputs.
         //
@@ -233,7 +229,7 @@ pub fn start(
         // rebuild widget
         try root.build(allocator, .{
             .min_size = .{ .width = null, .height = null },
-            .max_size = .{ .width = last_size.width, .height = last_size.height },
+            .max_size = .{ .width = terminal.size.width, .height = terminal.size.height },
         }, root.getFocus());
     }
 }

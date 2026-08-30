@@ -153,7 +153,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     const inner_box = &self.scroll.child.box;
                     const message = commit_object.content.commit.metadata.message;
                     const line = if (message.len != 0) message else "(empty message)";
-                    var text_box = try wgt.TextBox(Widget).init(allocator, line, .{ .border_style = .hidden, .wrap_kind = .word });
+                    var text_box = try wgt.TextBox.init(allocator, line, .{ .border_style = .hidden, .wrap_kind = .word });
                     errdefer text_box.deinit(allocator);
                     text_box.getFocus().focusable = true;
                     try inner_box.children.put(allocator, text_box.getFocus().id, .{

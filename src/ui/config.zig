@@ -17,6 +17,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
         remove_id: usize,
         update_id: usize,
         // bytes are owned by ConfigList's arena (same lifetime as this row)
+        full_name: []const u8,
         original_value: []const u8,
 
         pub const value_index: usize = 0;
@@ -34,14 +35,14 @@ pub fn ConfigListItem(comptime Widget: type) type {
             var nav_ids: [2]usize = undefined;
 
             {
-                var name_text = try wgt.TextBox(Widget).init(allocator, full_name, .{ .border_style = .hidden, .wrap_kind = .none });
+                var name_text = try wgt.TextBox.init(allocator, full_name, .{ .border_style = .hidden, .wrap_kind = .none });
                 errdefer name_text.deinit(allocator);
                 // match the value TextInput's rendered width (visible_width 28 + 1-cell border on each side)
                 try box.children.put(allocator, name_text.getFocus().id, .{ .widget = .{ .text_box = name_text }, .rect = null, .min_size = .{ .width = 30, .height = null } });
             }
 
             {
-                var value_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28 });
+                var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28 });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().focusable = true;
                 try value_input.setContent(allocator, value);
@@ -57,7 +58,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 errdefer stack.deinit(allocator);
 
                 {
-                    var remove_button = try wgt.TextBox(Widget).init(allocator, "remove", .{ .border_style = .single, .wrap_kind = .none });
+                    var remove_button = try wgt.TextBox.init(allocator, "remove", .{ .border_style = .single, .wrap_kind = .none });
                     errdefer remove_button.deinit(allocator);
                     remove_button.getFocus().focusable = true;
                     remove_id = remove_button.getFocus().id;
@@ -65,7 +66,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 }
 
                 {
-                    var update_button = try wgt.TextBox(Widget).init(allocator, "update", .{ .border_style = .single, .wrap_kind = .none });
+                    var update_button = try wgt.TextBox.init(allocator, "update", .{ .border_style = .single, .wrap_kind = .none });
                     errdefer update_button.deinit(allocator);
                     update_button.getFocus().focusable = true;
                     update_id = update_button.getFocus().id;
@@ -84,6 +85,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 .nav_ids = nav_ids,
                 .remove_id = remove_id,
                 .update_id = update_id,
+                .full_name = full_name,
                 .original_value = value,
             };
             self.getFocus().child_id = nav_ids[value_index];
@@ -120,10 +122,10 @@ pub fn ConfigListItem(comptime Widget: type) type {
         }
 
         pub fn name(self: *const ConfigListItem(Widget)) []const u8 {
-            return self.box.children.values()[name_child_index].widget.text_box.content;
+            return self.full_name;
         }
 
-        pub fn valueInput(self: *ConfigListItem(Widget)) *wgt.TextInput(Widget) {
+        pub fn valueInput(self: *ConfigListItem(Widget)) *wgt.TextInput {
             return &self.box.children.values()[value_child_index].widget.text_input;
         }
 
@@ -131,13 +133,12 @@ pub fn ConfigListItem(comptime Widget: type) type {
         // allocating a contiguous copy.
         pub fn isValueModified(self: *const ConfigListItem(Widget)) bool {
             const value_input = &self.box.children.values()[value_child_index].widget.text_input;
-            var i: usize = 0;
+            var original = std.unicode.Utf8View.init(self.original_value) catch return true;
+            var original_iter = original.iterator();
             for (value_input.content.items) |cp| {
-                if (i + cp.len > self.original_value.len) return true;
-                if (!std.mem.eql(u8, cp, self.original_value[i..][0..cp.len])) return true;
-                i += cp.len;
+                if (original_iter.nextCodepoint() != cp) return true;
             }
-            return i != self.original_value.len;
+            return original_iter.nextCodepoint() != null;
         }
 
         pub fn clearGrid(self: *ConfigListItem(Widget)) void {
@@ -170,7 +171,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             var nav_ids: [3]usize = undefined;
 
             {
-                var name_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28, .label = " name " });
+                var name_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " name " });
                 errdefer name_input.deinit(allocator);
                 name_input.getFocus().focusable = true;
                 nav_ids[name_index] = name_input.getFocus().id;
@@ -178,7 +179,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             }
 
             {
-                var value_input = try wgt.TextInput(Widget).init(allocator, .{ .visible_width = 28, .label = " value " });
+                var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " value " });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().focusable = true;
                 nav_ids[value_index] = value_input.getFocus().id;
@@ -186,7 +187,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             }
 
             {
-                var add_button = try wgt.TextBox(Widget).init(allocator, "add", .{ .border_style = .single, .wrap_kind = .none });
+                var add_button = try wgt.TextBox.init(allocator, "add", .{ .border_style = .single, .wrap_kind = .none });
                 errdefer add_button.deinit(allocator);
                 add_button.getFocus().focusable = true;
                 nav_ids[action_index] = add_button.getFocus().id;
@@ -226,11 +227,11 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             return null;
         }
 
-        pub fn nameInput(self: *ConfigAddListItem(Widget)) *wgt.TextInput(Widget) {
+        pub fn nameInput(self: *ConfigAddListItem(Widget)) *wgt.TextInput {
             return &self.box.children.values()[name_index].widget.text_input;
         }
 
-        pub fn valueInput(self: *ConfigAddListItem(Widget)) *wgt.TextInput(Widget) {
+        pub fn valueInput(self: *ConfigAddListItem(Widget)) *wgt.TextInput {
             return &self.box.children.values()[value_index].widget.text_input;
         }
 
@@ -606,8 +607,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         ) !void {
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {
                 for (variables.keys(), variables.values()) |name, value| {
-                    const full_name = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ section_name, name });
-                    defer allocator.free(full_name);
+                    const full_name = try std.fmt.allocPrint(config.arena.allocator(), "{s}.{s}", .{ section_name, name });
                     var config_item = try ConfigListItem(Widget).init(allocator, full_name, value);
                     errdefer config_item.deinit(allocator);
                     try inner_box.children.put(allocator, config_item.getFocus().id, .{ .widget = .{ .ui_config_list_item = config_item }, .rect = null, .min_size = null });
