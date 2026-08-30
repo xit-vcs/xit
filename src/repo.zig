@@ -381,15 +381,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 },
                 .xit => {
                     // repos from older formats kept chunks in a separate entry.
-                    // reject files, directories, and symlinks before opening the
-                    // db, whose chunk offsets now refer to the db file itself.
-                    var link_target_buffer = [_]u8{0} ** std.fs.max_path_bytes;
-                    if (repo_dir.readLink(io, "chunks", &link_target_buffer)) |_| {
-                        return error.RepoFormatTooOld;
-                    } else |err| switch (err) {
-                        error.NotLink, error.FileNotFound => {},
-                        else => |e| return e,
-                    }
                     if (repo_dir.access(io, "chunks", .{})) |_| {
                         return error.RepoFormatTooOld;
                     } else |err| switch (err) {
