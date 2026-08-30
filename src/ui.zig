@@ -189,6 +189,7 @@ pub fn start(
                         const new_repo = try rp.Repo(repo_kind, repo_opts).open(io, allocator, .{
                             .cwd_path = repo.core.cwd_path,
                             .path = repo.core.work_path,
+                            .global_config_path = repo.core.global_config_path,
                         });
                         repo.deinit(io, allocator);
                         repo.* = new_repo;
