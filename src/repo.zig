@@ -121,6 +121,13 @@ pub const InitOpts = struct {
     global_config_path: ?[]const u8 = null,
 };
 
+pub fn LogOptions(comptime hash_kind: hash.HashKind) type {
+    return struct {
+        start_oids: ?[]const [hash.hexLen(hash_kind)]u8 = null,
+        first_parent: bool = false,
+    };
+}
+
 pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind)) type {
     return struct {
         comptime self_repo_kind: RepoKind = repo_kind,
@@ -1061,14 +1068,17 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             self: *Repo(repo_kind, repo_opts),
             io: std.Io,
             allocator: std.mem.Allocator,
-            start_oids_maybe: ?[]const [hash.hexLen(repo_opts.hash)]u8,
+            options: LogOptions(repo_opts.hash),
         ) !obj.ObjectIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            var iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
+            var iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{
+                .kind = .commit,
+                .first_parent = options.first_parent,
+            });
             errdefer iter.deinit();
 
-            const start_oids = start_oids_maybe orelse if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |head_oid| &.{head_oid} else &.{};
+            const start_oids = options.start_oids orelse if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |head_oid| &.{head_oid} else &.{};
             for (start_oids) |*start_oid| {
                 try iter.include(start_oid);
             }

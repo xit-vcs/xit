@@ -124,7 +124,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
     // assert that all commits have been found in the log
     {
-        var commit_iter = try repo.log(io, allocator, null);
+        var commit_iter = try repo.log(io, allocator, .{});
         defer commit_iter.deinit();
         while (try commit_iter.next(allocator)) |commit_object| {
             defer commit_object.deinit();
@@ -309,7 +309,7 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
 
     // c has no parents
     {
-        var obj_iter = try repo.log(io, allocator, &.{commit_c});
+        var obj_iter = try repo.log(io, allocator, .{ .start_oids = &.{commit_c} });
         defer obj_iter.deinit();
         var count: usize = 0;
         while (try obj_iter.next(allocator)) |commit| {
@@ -478,9 +478,9 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     //             G --- H [bar]
 
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "master.md", "a");
-    _ = try repo.commit(io, allocator, .{ .message = "a" });
+    const commit_a = try repo.commit(io, allocator, .{ .message = "a" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "master.md", "b");
-    _ = try repo.commit(io, allocator, .{ .message = "b" });
+    const commit_b = try repo.commit(io, allocator, .{ .message = "b" });
     try repo.addBranch(io, .{ .name = "foo" });
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "foo" } } });
@@ -502,7 +502,7 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         defer result.deinit();
     }
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "master.md", "c");
-    _ = try repo.commit(io, allocator, .{ .message = "c" });
+    const commit_c = try repo.commit(io, allocator, .{ .message = "c" });
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "foo" } } });
         defer result.deinit();
@@ -527,6 +527,19 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     if (repo_kind == .xit) {
         try std.testing.expectEqual(4, try repo.commitCount(io, allocator, .{ .oid = &commit_j }));
         try std.testing.expectEqual(5, try repo.commitCount(io, allocator, .{ .oid = &commit_k }));
+    }
+
+    // first-parent logs skip the merged branch.
+    {
+        const expected_oids = [_][hash.hexLen(repo_opts.hash)]u8{ commit_k, commit_j, commit_c, commit_b, commit_a };
+        var commit_iter = try repo.log(io, allocator, .{ .start_oids = &.{commit_k}, .first_parent = true });
+        defer commit_iter.deinit();
+        for (expected_oids) |expected_oid| {
+            const commit_object = (try commit_iter.next(allocator)) orelse return error.ExpectedObject;
+            defer commit_object.deinit();
+            try std.testing.expectEqual(expected_oid, commit_object.oid);
+        }
+        try std.testing.expectEqual(null, try commit_iter.next(allocator));
     }
 
     var moment = try repo.core.latestMoment();
@@ -584,7 +597,7 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         defer dest_repo.deinit(io, allocator);
         try dest_repo.copyObjects(repo_kind, repo_opts, &obj_iter, io, null);
 
-        var dest_obj_iter = try dest_repo.log(io, allocator, &.{commit_k});
+        var dest_obj_iter = try dest_repo.log(io, allocator, .{ .start_oids = &.{commit_k} });
         defer dest_obj_iter.deinit();
         const dest_commit_k = (try dest_obj_iter.next(allocator)) orelse return error.ExpectedObject;
         defer dest_commit_k.deinit();
@@ -3038,7 +3051,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
     // assert that all commits have been found in the log
     // and they aren't repeated
     {
-        var commit_iter = try repo.log(io, allocator, null);
+        var commit_iter = try repo.log(io, allocator, .{});
         defer commit_iter.deinit();
         while (try commit_iter.next(allocator)) |commit_object| {
             defer commit_object.deinit();
@@ -3057,7 +3070,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
     // assert that only some commits have been found in the log
     // and they aren't repeated
     {
-        var commit_iter = try repo.log(io, allocator, &.{commit_g});
+        var commit_iter = try repo.log(io, allocator, .{ .start_oids = &.{commit_g} });
         defer commit_iter.deinit();
         try commit_iter.exclude(&commit_b);
         while (try commit_iter.next(allocator)) |commit_object| {

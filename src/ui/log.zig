@@ -30,7 +30,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 }
 
                 // walk the commits
-                var commit_iter = try repo.log(io, allocator, null);
+                var commit_iter = try repo.log(io, allocator, .{});
                 errdefer commit_iter.deinit();
 
                 var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });

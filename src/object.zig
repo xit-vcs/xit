@@ -1063,6 +1063,7 @@ pub const ObjectIteratorOptions = struct {
         all,
         commit,
     },
+    first_parent: bool = false,
     max_depth: ?usize = null,
 };
 
@@ -1178,8 +1179,14 @@ pub fn ObjectIterator(
                 },
                 .commit => |commit_content| {
                     if (commit_content.metadata.parent_oids) |parent_oids| {
-                        for (parent_oids) |*parent_oid| {
-                            try self.includeAtDepth(parent_oid, child_depth);
+                        if (self.options.first_parent) {
+                            if (parent_oids.len > 0) {
+                                try self.includeAtDepth(&parent_oids[0], child_depth);
+                            }
+                        } else {
+                            for (parent_oids) |*parent_oid| {
+                                try self.includeAtDepth(parent_oid, child_depth);
+                            }
                         }
                     }
                     switch (self.options.kind) {
@@ -1234,8 +1241,14 @@ pub fn ObjectIterator(
                 },
                 .commit => |commit| {
                     if (commit.metadata.parent_oids) |parent_oids| {
-                        for (parent_oids) |parent_oid| {
-                            try self.oid_excludes.put(parent_oid, {});
+                        if (self.options.first_parent) {
+                            if (parent_oids.len > 0) {
+                                try self.oid_excludes.put(parent_oids[0], {});
+                            }
+                        } else {
+                            for (parent_oids) |parent_oid| {
+                                try self.oid_excludes.put(parent_oid, {});
+                            }
                         }
                     }
                     switch (self.options.kind) {

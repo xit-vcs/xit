@@ -1386,7 +1386,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        var iter = try repo.log(io, allocator, null);
+        var iter = try repo.log(io, allocator, .{});
         defer iter.deinit();
 
         {

@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
             commits.deinit(allocator);
         }
 
-        var log_iter = try git_repo.log(io, allocator, &.{"34695c9f87c5c5eb4650fc55c04a23dfadaa64a6".*});
+        var log_iter = try git_repo.log(io, allocator, .{ .start_oids = &.{"34695c9f87c5c5eb4650fc55c04a23dfadaa64a6".*} });
         defer log_iter.deinit();
         var commit_count: usize = 0;
         while (try log_iter.next(allocator)) |commit| {

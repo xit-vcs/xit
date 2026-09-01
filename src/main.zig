@@ -521,7 +521,7 @@ fn runCommand(
                 start_oids.appendAssumeCapacity(oid);
             }
 
-            var commit_iter = try repo.log(io, allocator, if (start_oids.items.len > 0) start_oids.items else null);
+            var commit_iter = try repo.log(io, allocator, .{ .start_oids = if (start_oids.items.len > 0) start_oids.items else null });
             defer commit_iter.deinit();
             while (try commit_iter.next(allocator)) |commit_object| {
                 defer commit_object.deinit();
