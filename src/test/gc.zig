@@ -3,6 +3,7 @@
 const std = @import("std");
 const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
+const hash = @import("../hash.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -61,7 +62,7 @@ test "gc" {
     // commit a file on master, and another on a branch that is then deleted,
     // making its objects unreachable
     try addFile(.xit, repo_opts, &repo, io, allocator, "keep.bin", keep_content);
-    _ = try repo.commit(io, allocator, .{ .message = "keep" });
+    const keep_commit = try repo.commit(io, allocator, .{ .message = "keep" });
 
     try repo.addBranch(io, .{ .name = "side" });
     {
@@ -82,6 +83,7 @@ test "gc" {
 
     // an otherwise unreachable object survives while supplied as an extra root
     _ = try repo.garbageCollect(io, allocator, &.{side_commit});
+    try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &side_commit }));
     {
         var moment = try repo.core.latestMoment();
         const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
@@ -107,6 +109,17 @@ test "gc" {
             else => |e| return e,
         }
     }
+
+    // its derived depth entry was pruned with it, while the live commit's
+    // entry remains available.
+    {
+        var moment = try repo.core.latestMoment();
+        const depths_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return error.CommitDepthNotFound;
+        const depths = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(depths_cursor);
+        try std.testing.expectEqual(null, try depths.getCursor(try hash.hexToInt(repo_opts.hash, &side_commit)));
+        try std.testing.expect((try depths.getCursor(try hash.hexToInt(repo_opts.hash, &keep_commit))) != null);
+    }
+    try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &keep_commit }));
 
     // committed content survived and reads back through the rewritten
     // chunk record positions

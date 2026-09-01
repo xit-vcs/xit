@@ -836,6 +836,49 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref });
         }
 
+        /// returns the number of commits on the target's first-parent chain.
+        /// this index is only stored by the xit backend.
+        pub fn commitCount(
+            self: *Repo(.xit, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            target: rf.RefOrOid(repo_opts.hash),
+        ) !u64 {
+            var moment = try self.core.latestMoment();
+            const state = Repo(.xit, repo_opts).State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
+
+            const oid = switch (target) {
+                .oid => |oid| oid.*,
+                .ref => |ref| blk: {
+                    switch (ref.kind) {
+                        .head, .tag => {},
+                        else => return error.UnsupportedRefKind,
+                    }
+                    break :blk try rf.readRecurExisting(.xit, repo_opts, state, io, .{ .ref = ref }) orelse {
+                        if (ref.kind == .head) return 0;
+                        return error.CommitNotFound;
+                    };
+                },
+            };
+
+            const depths_maybe: ?DB.HashMap(.read_only) = if (try moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) |cursor|
+                try DB.HashMap(.read_only).init(cursor)
+            else
+                null;
+            if (depths_maybe) |depths| {
+                if (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) |depth_cursor| {
+                    return try depth_cursor.readUint();
+                }
+            }
+
+            var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+            defer commit_object.deinit();
+
+            const depths = depths_maybe orelse return error.CommitDepthNotFound;
+            const depth_cursor = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return error.CommitDepthNotFound;
+            return try depth_cursor.readUint();
+        }
+
         pub fn listBranches(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, start: rf.RefIteratorStart) !rf.RefIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };

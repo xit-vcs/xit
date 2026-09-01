@@ -69,6 +69,15 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     try repo.remove(io, allocator, &.{"README.md"}, .{});
     const commit_c = try repo.commit(io, allocator, .{ .message = "c" });
 
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &commit_a }));
+        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_b }));
+        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
+        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "master" } }));
+        try std.testing.expectError(error.RefNotFound, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
+        try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
+    }
+
     {
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .log);
         defer root.deinit(allocator);
@@ -128,6 +137,9 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         var result = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &commit_b } });
         defer result.deinit();
     }
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "master" } }));
+    }
 
     {
         const readme_md_content = try repo.core.work_dir.readFileAlloc(io, "README.md", allocator, .limited(1024));
@@ -159,7 +171,11 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         else => |e| return e,
     }
 
-    _ = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
+    const tag_oid = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .tag, .name = "1.0.0" } }));
+        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &tag_oid }));
+    }
 
     // we can enable patches after adding a tag
     if (repo_kind == .xit) {
@@ -180,6 +196,61 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 test "empty branch" {
     try testEmptyBranch(.git, .{ .is_test = true });
     try testEmptyBranch(.xit, .{ .is_test = true });
+}
+
+test "commit count missing legacy index" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const temp_dir_name = "temp-test-repo-commit-count-legacy";
+    const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
+    const DB = rp.Repo(.xit, repo_opts).DB;
+
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    defer allocator.free(work_path);
+
+    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "a");
+    _ = try repo.commit(io, allocator, .{ .message = "a" });
+    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "b");
+    const commit_b = try repo.commit(io, allocator, .{ .message = "b" });
+
+    // simulate a repository created before the depth index existed.
+    const Ctx = struct {
+        pub fn run(_: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            if (!try moment.remove(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) {
+                return error.CommitDepthNotFound;
+            }
+        }
+    };
+    {
+        try repo.core.db_file.lock(io, .exclusive);
+        defer repo.core.db_file.unlock(io);
+        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+        try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{});
+    }
+
+    try std.testing.expectError(error.CommitDepthNotFound, repo.commitCount(io, allocator, .{ .oid = &commit_b }));
+
+    // a later write fills the missing chain before indexing the new commit.
+    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "c");
+    const commit_c = try repo.commit(io, allocator, .{ .message = "c" });
+    try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_b }));
+    try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
 }
 
 fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
@@ -219,6 +290,9 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
 
     // create empty branch with no target, so it doesn't point to anything
     try repo.addBranch(io, .{ .name = "foo", .target = .none });
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(0, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "foo" } }));
+    }
 
     // make an empty commit at foo without checking it out
     const commit_c = try repo.commitAtRef(io, allocator, .{ .message = "c" }, null, .{ .kind = .head, .name = "foo" });
@@ -247,6 +321,10 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
 
     // make another empty commit at foo without checking it out
     const commit_d = try repo.commitAtRef(io, allocator, .{ .message = "d" }, null, .{ .kind = .head, .name = "foo" });
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
+        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_d }));
+    }
 
     // foo points to d
     {
@@ -446,6 +524,11 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "master.md", "k");
     const commit_k = try repo.commit(io, allocator, .{ .message = "k" });
 
+    if (repo_kind == .xit) {
+        try std.testing.expectEqual(4, try repo.commitCount(io, allocator, .{ .oid = &commit_j }));
+        try std.testing.expectEqual(5, try repo.commitCount(io, allocator, .{ .oid = &commit_k }));
+    }
+
     var moment = try repo.core.latestMoment();
     const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
 
@@ -505,6 +588,10 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         defer dest_obj_iter.deinit();
         const dest_commit_k = (try dest_obj_iter.next(allocator)) orelse return error.ExpectedObject;
         defer dest_commit_k.deinit();
+
+        if (repo_kind == .xit) {
+            try std.testing.expectEqual(5, try dest_repo.commitCount(io, allocator, .{ .oid = &commit_k }));
+        }
     }
 }
 

@@ -1377,6 +1377,9 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         var moment = try repo.core.latestMoment();
         const state = rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
         try std.testing.expectEqual(commit4, try rf.readRecur(repo_kind, any_repo_opts.toRepoOpts(), state, io, .{ .ref = .{ .kind = .head, .name = "master" } }));
+        if (repo_kind == .xit) {
+            try std.testing.expectEqual(4, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "master" } }));
+        }
     }
 
     // log

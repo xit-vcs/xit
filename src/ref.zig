@@ -502,19 +502,29 @@ pub fn readRecur(
     io: std.Io,
     input: RefOrOid(repo_opts.hash),
 ) !?[hash.hexLen(repo_opts.hash)]u8 {
+    return readRecurExisting(repo_kind, repo_opts, state, io, input) catch |err| switch (err) {
+        error.RefNotFound => null,
+        else => |e| return e,
+    };
+}
+
+pub fn readRecurExisting(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    input: RefOrOid(repo_opts.hash),
+) !?[hash.hexLen(repo_opts.hash)]u8 {
     switch (input) {
         .ref => |ref| {
             var ref_path_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
             const ref_path = try ref.toPath(&ref_path_buffer);
 
             var read_buffer = [_]u8{0} ** MAX_REF_CONTENT_SIZE;
-            const ref_or_oid_maybe = read(repo_kind, repo_opts, state, io, ref_path, &read_buffer) catch |err| switch (err) {
-                error.RefNotFound => return null,
-                else => |e| return e,
-            };
+            const ref_or_oid_maybe = try read(repo_kind, repo_opts, state, io, ref_path, &read_buffer);
 
             if (ref_or_oid_maybe) |next_input| {
-                return try readRecur(repo_kind, repo_opts, state, io, next_input);
+                return try readRecurExisting(repo_kind, repo_opts, state, io, next_input);
             } else {
                 return null;
             }

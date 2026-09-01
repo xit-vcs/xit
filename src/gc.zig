@@ -18,6 +18,27 @@ pub const GcResult = struct {
     size_after: u64,
 };
 
+fn pruneOidMap(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    live_oids: *const std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
+    map_name: []const u8,
+) !void {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const map_key = hash.hashInt(repo_opts.hash, map_name);
+    const old_cursor = (try state.extra.moment.getCursor(map_key)) orelse return;
+    const old_map = try DB.HashMap(.read_only).init(old_cursor);
+    const new_map = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(map_key));
+
+    var iter = try old_map.iterator();
+    while (try iter.next()) |*entry_cursor| {
+        const kv_pair = try entry_cursor.readKeyValuePair();
+        if (!live_oids.contains(kv_pair.hash)) {
+            _ = try new_map.remove(kv_pair.hash);
+        }
+    }
+}
+
 // the new repo db, ready to be renamed over "db"
 const db_new_name = "db.gc";
 
@@ -46,35 +67,12 @@ pub fn prune(
     // because entries can't be removed while the map is being iterated.
     // writing copies the map, so the cursor keeps seeing every entry.
 
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) |old_map_cursor| {
-        const old_map = try DB.HashMap(.read_only).init(old_map_cursor);
-        const new_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
-        const new_map = try DB.HashMap(.read_write).init(new_map_cursor);
-
-        var iter = try old_map.iterator();
-        while (try iter.next()) |*entry_cursor| {
-            const kv_pair = try entry_cursor.readKeyValuePair();
-            if (!live_oids.contains(kv_pair.hash)) {
-                _ = try new_map.remove(kv_pair.hash);
-            }
-        }
-    }
+    try pruneOidMap(repo_opts, state, &live_oids, "object-id->chunk-info");
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |old_snapshots_cursor| {
-        const old_snapshots = try DB.HashMap(.read_only).init(old_snapshots_cursor);
-        const new_snapshots_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"));
-        const new_snapshots = try DB.HashMap(.read_write).init(new_snapshots_cursor);
-
-        var iter = try old_snapshots.iterator();
-        while (try iter.next()) |*entry_cursor| {
-            const kv_pair = try entry_cursor.readKeyValuePair();
-            if (!live_oids.contains(kv_pair.hash)) {
-                _ = try new_snapshots.remove(kv_pair.hash);
-            }
-        }
-    }
+    try pruneOidMap(repo_opts, state, &live_oids, "commit-id->snapshot");
+    try pruneOidMap(repo_opts, state, &live_oids, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
 
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"))) |old_chunk_map_cursor| {
         const old_chunk_map = try DB.HashMap(.read_only).init(old_chunk_map_cursor);
