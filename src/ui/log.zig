@@ -155,7 +155,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     const line = if (message.len != 0) message else "(empty message)";
                     var text_box = try wgt.TextBox.init(allocator, line, .{ .border_style = .hidden, .wrap_kind = .word });
                     errdefer text_box.deinit(allocator);
-                    text_box.getFocus().focusable = true;
+                    text_box.getFocus().mode = .all;
                     try inner_box.children.put(allocator, text_box.getFocus().id, .{
                         .widget = .{ .text_box = text_box },
                         .rect = null,
@@ -196,7 +196,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
             {
                 var diff = Widget{ .ui_diff = try ui_diff.Diff(Widget, repo_kind, repo_opts).init(allocator, repo) };
                 errdefer diff.deinit(allocator);
-                diff.getFocus().focusable = true;
+                diff.getFocus().mode = .all;
                 try box.children.put(allocator, diff.getFocus().id, .{ .widget = diff, .rect = null, .min_size = .{ .width = diff_min_width, .height = null } });
             }
 

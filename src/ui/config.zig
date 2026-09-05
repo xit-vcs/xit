@@ -50,7 +50,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                     .read_only = is_global,
                 });
                 errdefer value_input.deinit(allocator);
-                value_input.getFocus().focusable = true;
+                value_input.getFocus().mode = .all;
                 try value_input.setContent(allocator, value);
                 value_input.cursor = 0;
                 nav_ids[value_index] = value_input.getFocus().id;
@@ -66,7 +66,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 if (!is_global) {
                     var remove_button = try wgt.TextBox.init(allocator, "remove", .{ .border_style = .single, .wrap_kind = .none });
                     errdefer remove_button.deinit(allocator);
-                    remove_button.getFocus().focusable = true;
+                    remove_button.getFocus().mode = .all;
                     const id = remove_button.getFocus().id;
                     remove_id = id;
                     try stack.children.put(allocator, id, .{ .text_box = remove_button });
@@ -75,7 +75,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 {
                     var update_button = try wgt.TextBox.init(allocator, "update", .{ .border_style = .single, .wrap_kind = .none });
                     errdefer update_button.deinit(allocator);
-                    update_button.getFocus().focusable = true;
+                    update_button.getFocus().mode = .all;
                     update_id = update_button.getFocus().id;
                     try stack.children.put(allocator, update_id, .{ .text_box = update_button });
                 }
@@ -193,7 +193,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             {
                 var name_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " name " });
                 errdefer name_input.deinit(allocator);
-                name_input.getFocus().focusable = true;
+                name_input.getFocus().mode = .all;
                 nav_ids[name_index] = name_input.getFocus().id;
                 try box.children.put(allocator, name_input.getFocus().id, .{ .widget = .{ .text_input = name_input }, .rect = null, .min_size = null });
             }
@@ -201,7 +201,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             {
                 var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " value " });
                 errdefer value_input.deinit(allocator);
-                value_input.getFocus().focusable = true;
+                value_input.getFocus().mode = .all;
                 nav_ids[value_index] = value_input.getFocus().id;
                 try box.children.put(allocator, value_input.getFocus().id, .{ .widget = .{ .text_input = value_input }, .rect = null, .min_size = null });
             }
@@ -209,7 +209,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             {
                 var add_button = try wgt.TextBox.init(allocator, "add", .{ .border_style = .single, .wrap_kind = .none });
                 errdefer add_button.deinit(allocator);
-                add_button.getFocus().focusable = true;
+                add_button.getFocus().mode = .all;
                 nav_ids[action_index] = add_button.getFocus().id;
                 try box.children.put(allocator, add_button.getFocus().id, .{ .widget = .{ .text_box = add_button }, .rect = null, .min_size = null });
             }

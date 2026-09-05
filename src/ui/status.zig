@@ -97,7 +97,7 @@ pub fn StatusList(comptime Widget: type) type {
             for (statuses) |item| {
                 var list_item = try StatusListItem(Widget).init(allocator, item);
                 errdefer list_item.deinit(allocator);
-                list_item.getFocus().focusable = true;
+                list_item.getFocus().mode = .all;
                 try inner_box.children.put(allocator, list_item.getFocus().id, .{ .widget = .{ .ui_status_list_item = list_item }, .rect = null, .min_size = null });
             }
 
@@ -207,7 +207,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 const label = try std.fmt.bufPrint(&label_buf, "{s} ({})", .{ name, counts[i] });
                 var text_box = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
-                text_box.getFocus().focusable = true;
+                text_box.getFocus().mode = .all;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
             }
 
@@ -340,7 +340,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     .diff => {
                         var diff = try ui_diff.Diff(Widget, repo_kind, repo_opts).init(allocator, repo);
                         errdefer diff.deinit(allocator);
-                        diff.getFocus().focusable = true;
+                        diff.getFocus().mode = .all;
                         try box.children.put(allocator, diff.getFocus().id, .{ .widget = .{ .ui_diff = diff }, .rect = null, .min_size = .{ .width = 60, .height = null } });
                     },
                 }
