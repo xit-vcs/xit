@@ -1007,6 +1007,44 @@ fn testPush(
 
     // make sure push was successful
     try std.testing.expect(null == try server_repo.readRef(io, .{ .kind = .tag, .name = "1.0.0" }));
+
+    // updateInstead must reject a push that would overwrite local changes
+    if (server_repo_kind == .xit) switch (transport_def) {
+        .file => {},
+        .wire => |wire_kind| if (.http == wire_kind) {
+            {
+                const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
+                defer hello_txt.close(io);
+                try hello_txt.writeStreamingAll(io, "local server change");
+            }
+            {
+                const hello_txt = try client_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
+                defer hello_txt.close(io);
+                try hello_txt.writeStreamingAll(io, "new client change");
+            }
+            try client_repo.add(io, allocator, &.{"hello.txt"});
+            _ = try client_repo.commit(io, allocator, .{ .message = "change hello" });
+
+            try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
+                io,
+                allocator,
+                "origin",
+                "master",
+                false,
+                .{ .wire = .{ .ssh = .{
+                    .command = ssh_cmd_maybe,
+                    .receive_pack_command = receive_pack_command,
+                } } },
+            ));
+
+            const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
+            try std.testing.expectEqualStrings(&commit2, &oid_master);
+
+            const hello = try server_repo.core.work_dir.readFileAlloc(io, "hello.txt", allocator, .limited(1024));
+            defer allocator.free(hello);
+            try std.testing.expectEqualStrings("local server change", hello);
+        },
+    };
 }
 
 fn testClone(

@@ -487,6 +487,8 @@ pub fn objectToFile(
     path: []const u8,
     tree_entry: tr.TreeEntry(repo_opts.hash),
 ) !void {
+    if (!validWorktreePath(path)) return error.InvalidObject;
+
     const oid_hex = std.fmt.bytesToHex(tree_entry.oid, .lower);
 
     switch (tree_entry.mode.content.object_type) {
@@ -567,6 +569,21 @@ pub fn objectToFile(
         // TODO: handle submodules
         .gitlink => return error.SubmodulesNotSupported,
     }
+}
+
+fn validWorktreePath(path: []const u8) bool {
+    if (path.len == 0 or std.fs.path.isAbsolute(path)) return false;
+
+    var parts = std.mem.splitAny(u8, path, if (.windows == builtin.os.tag) "/\\" else "/");
+    while (parts.next()) |part| {
+        if (part.len == 0 or
+            std.mem.eql(u8, part, ".") or
+            std.mem.eql(u8, part, ".."))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 pub const TreeToWorkDirChange = enum {
@@ -688,6 +705,7 @@ pub fn migrate(
     tree_diff: tr.TreeDiff(repo_kind, repo_opts),
     index: *idx.Index(repo_kind, repo_opts),
     update_work_dir: bool,
+    dry_run: bool,
     switch_result_maybe: ?*Switch(repo_kind, repo_opts),
 ) !void {
     var add_files: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
@@ -786,6 +804,8 @@ pub fn migrate(
         }
     }
 
+    if (dry_run) return;
+
     for (remove_files.keys()) |path| {
         // update work dir
         if (update_work_dir) {
@@ -860,6 +880,7 @@ pub fn SwitchInput(comptime hash_kind: hash.HashKind) type {
         target: ?rf.RefOrOid(hash_kind),
         update_work_dir: bool = true,
         force: bool = false,
+        dry_run: bool = false,
     };
 }
 
@@ -933,12 +954,14 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 defer index.deinit();
 
                 // update the work dir
-                try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, if (input.force) null else &switch_result);
+                try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, input.dry_run, if (input.force) null else &switch_result);
 
                 // return early if conflict
                 if (.conflict == switch_result.result) {
                     return switch_result;
                 }
+
+                if (input.dry_run) return switch_result;
 
                 // update the index
                 try index.write(allocator, write_state, io);

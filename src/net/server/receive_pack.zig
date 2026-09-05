@@ -516,11 +516,47 @@ const ReceivePack = struct {
             break :blk try target_ref.toPath(&head_path_buf);
         };
 
-        for (ref_updates) |*update| {
-            if (update.error_message != null or update.skip_update) continue;
+        if (.xit == repo_kind and self.atomic) {
+            // validate the whole transaction, including updateInstead's
+            // worktree check, before changing any ref or filesystem entry.
+            for (ref_updates) |*update| {
+                if (update.error_message != null or update.skip_update) continue;
+                update.error_message = try self.applyRefUpdate(writer, repo_kind, repo_opts, state, io, allocator, update, true);
+            }
 
-            update.error_message = try self.applyRefUpdate(writer, repo_kind, repo_opts, state, io, allocator, update);
+            for (ref_updates) |update| {
+                if (update.error_message != null) return;
+            }
+
+            // apply the checked-out branch last. if another ref write fails,
+            // the transaction can still abort without touching the worktree.
+            for (ref_updates) |*update| {
+                if (update.error_message != null or update.skip_update or self.isHeadUpdate(repo_opts.hash, update)) continue;
+                update.error_message = try self.applyRefUpdate(writer, repo_kind, repo_opts, state, io, allocator, update, false);
+            }
+
+            for (ref_updates) |update| {
+                if (update.error_message != null) return;
+            }
+            for (ref_updates) |*update| {
+                if (update.error_message != null or update.skip_update or !self.isHeadUpdate(repo_opts.hash, update)) continue;
+                update.error_message = try self.applyRefUpdate(writer, repo_kind, repo_opts, state, io, allocator, update, false);
+            }
+        } else {
+            for (ref_updates) |*update| {
+                if (update.error_message != null or update.skip_update) continue;
+                update.error_message = try self.applyRefUpdate(writer, repo_kind, repo_opts, state, io, allocator, update, false);
+            }
         }
+    }
+
+    fn isHeadUpdate(
+        self: *const ReceivePack,
+        comptime hash_kind: hash.HashKind,
+        ref_update: *const RefUpdate(hash_kind),
+    ) bool {
+        const head_name = self.head_name orelse return false;
+        return std.mem.eql(u8, ref_update.ref_name, head_name);
     }
 
     fn applyRefUpdate(
@@ -532,6 +568,7 @@ const ReceivePack = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         ref_update: *RefUpdate(repo_opts.hash),
+        dry_run: bool,
     ) !?[]const u8 {
         const name = ref_update.ref_name;
 
@@ -571,7 +608,7 @@ const ReceivePack = struct {
             if (std.mem.eql(u8, name, head_name)) {
                 switch (self.deny_current_branch) {
                     .ignore => {},
-                    .warn => try writeWarning(writer, "updating the current branch", .{}),
+                    .warn => if (!dry_run) try writeWarning(writer, "updating the current branch", .{}),
                     .refuse, .unconfigured => {
                         try writeError(writer, "refusing to update checked out branch: {s}", .{name});
                         if (self.deny_current_branch == .unconfigured) {
@@ -606,7 +643,7 @@ const ReceivePack = struct {
                 if (std.mem.eql(u8, name, head_name)) {
                     switch (self.deny_delete_current) {
                         .ignore => {},
-                        .warn => try writeWarning(writer, "deleting the current branch", .{}),
+                        .warn => if (!dry_run) try writeWarning(writer, "deleting the current branch", .{}),
                         .refuse, .unconfigured, .update_instead => {
                             if (self.deny_delete_current == .unconfigured) {
                                 try writeError(writer, deny_delete_current_msg, .{});
@@ -637,9 +674,20 @@ const ReceivePack = struct {
         if (should_update_worktree) {
             if (self.is_bare) return "denyCurrentBranch = updateInstead needs a worktree";
 
-            var res = try work.Switch(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .reset, .target = .{ .oid = &ref_update.new_oid } });
+            var res = try work.Switch(repo_kind, repo_opts).init(state, io, allocator, .{
+                .kind = .reset,
+                .target = .{ .oid = &ref_update.new_oid },
+                .dry_run = dry_run,
+            });
             defer res.deinit();
+
+            if (.conflict == res.result) {
+                try writeError(writer, "refusing to update checked out branch: worktree contains local changes", .{});
+                return "working directory has unstaged changes";
+            }
         }
+
+        if (dry_run) return null;
 
         if (isNullOid(&ref_update.new_oid)) {
             rf.remove(repo_kind, repo_opts, state, io, name) catch |err| switch (err) {

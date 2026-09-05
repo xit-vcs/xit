@@ -41,8 +41,21 @@ pub const routes = [_]Route{
 
 const Config = struct {
     uploadpack: bool = true,
-    receivepack: bool = false,
+    // null uses git's default: enabled for authenticated users and disabled
+    // for anonymous users. an explicit value wins over the default.
+    receivepack: ?bool = null,
 };
+
+fn receivePackEnabled(config: *const Config, has_remote_user: bool) bool {
+    return config.receivepack orelse has_remote_user;
+}
+
+test "receive-pack authentication defaults do not override config" {
+    try std.testing.expect(!receivePackEnabled(&.{}, false));
+    try std.testing.expect(receivePackEnabled(&.{}, true));
+    try std.testing.expect(!receivePackEnabled(&.{ .receivepack = false }, true));
+    try std.testing.expect(receivePackEnabled(&.{ .receivepack = true }, false));
+}
 
 pub fn resolveDir(
     allocator: std.mem.Allocator,
@@ -114,11 +127,6 @@ fn runRoute(
             if (vars.get("uploadpack")) |v| http_config.uploadpack = cfg.parseBool(v);
             if (vars.get("receivepack")) |v| http_config.receivepack = cfg.parseBool(v);
         }
-    }
-
-    // auto-enable receivepack for authenticated users
-    if (options.has_remote_user) {
-        http_config.receivepack = true;
     }
 
     switch (options.handler) {
@@ -240,7 +248,7 @@ fn getInfoRefs(
     }
 
     if (std.mem.startsWith(u8, options.query_string, "service=git-receive-pack")) {
-        if (!http_config.receivepack) return error.ServiceNotEnabled;
+        if (!receivePackEnabled(http_config, options.has_remote_user)) return error.ServiceNotEnabled;
         try httpStatus(response_kind, writer, 200, "OK");
         try writeHeader(writer, "Content-Type", "application/x-git-receive-pack-advertisement");
         try writeNocacheHeaders(writer);
@@ -287,7 +295,7 @@ fn runService(
     if (!is_upload and !is_receive) return error.BadRequest;
 
     if (is_upload and !http_config.uploadpack) return error.ServiceNotEnabled;
-    if (is_receive and !http_config.receivepack) return error.ServiceNotEnabled;
+    if (is_receive and !receivePackEnabled(http_config, options.has_remote_user)) return error.ServiceNotEnabled;
 
     // validate content-type
     var expected_ct_buf: [64]u8 = undefined;

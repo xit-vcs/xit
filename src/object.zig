@@ -831,6 +831,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         obj_rdr.interface.toss(1); // skip delimiter
 
                         const entry_name = entry_name_writer.written();
+                        if (!validTreeEntryName(entry_name)) return error.InvalidObject;
                         var entry_oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
                         try obj_rdr.interface.readSliceAll(&entry_oid);
                         try entries.put(arena.allocator(), entry_name, .{ .oid = entry_oid, .mode = entry_mode });
@@ -1056,6 +1057,30 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             self.object_reader.deinit();
         }
     };
+}
+
+fn validTreeEntryName(name: []const u8) bool {
+    if (name.len == 0 or
+        std.mem.eql(u8, name, ".") or
+        std.mem.eql(u8, name, ".."))
+    {
+        return false;
+    }
+
+    // a tree entry is one path component. backslash is a separator on
+    // windows, but a valid filename byte elsewhere.
+    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
+    if (.windows == builtin.os.tag and std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    return true;
+}
+
+test "validate tree entry names" {
+    try std.testing.expect(validTreeEntryName("file.txt"));
+    try std.testing.expect(validTreeEntryName(".gitignore"));
+    for (&[_][]const u8{ "", ".", "..", "../outside" }) |name| {
+        try std.testing.expect(!validTreeEntryName(name));
+    }
+    try std.testing.expectEqual(.windows != builtin.os.tag, validTreeEntryName("..\\outside"));
 }
 
 pub const ObjectIteratorOptions = struct {

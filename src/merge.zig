@@ -1499,7 +1499,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             defer index.deinit();
 
                             // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
+                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, false, null);
                         }
 
                         return .{
@@ -1635,7 +1635,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         defer index.deinit();
 
                         // update the work dir
-                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, null);
+                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, false, null);
 
                         for (conflicts.keys(), conflicts.values()) |path, conflict| {
                             // add conflict to index
@@ -1700,7 +1700,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     const commit_oid = if (target_ref_maybe) |target_ref| blk: {
                         var index = try idx.Index(repo_kind, repo_opts).initFromCommit(state.readOnly(), io, allocator, &target_oid);
                         defer index.deinit();
-                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, false, null);
+                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, false, false, null);
 
                         var tree = try obj.Tree.initFromIndex(repo_kind, repo_opts, state, io, allocator, &index);
                         defer tree.deinit();
