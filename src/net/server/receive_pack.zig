@@ -217,11 +217,7 @@ const ReceivePack = struct {
                 self.prefer_ofs_delta = cfg.parseBool(v);
             }
         }
-        if (config.sections.get("core")) |vars| {
-            if (vars.get("bare")) |v| {
-                self.is_bare = cfg.parseBool(v);
-            }
-        }
+        self.is_bare = try state.isBare(io, allocator);
     }
 
     fn advertiseRef(
@@ -505,6 +501,7 @@ const ReceivePack = struct {
         var head_read_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         var head_path_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         self.head_name = blk: {
+            if (self.is_bare) break :blk null;
             const ref_or_oid = rf.read(repo_kind, repo_opts, state.readOnly(), io, "HEAD", &head_read_buf) catch |err| switch (err) {
                 error.RefNotFound => break :blk null,
                 else => |e| return e,
@@ -609,14 +606,11 @@ const ReceivePack = struct {
                 switch (self.deny_current_branch) {
                     .ignore => {},
                     .warn => if (!dry_run) try writeWarning(writer, "updating the current branch", .{}),
-                    .refuse, .unconfigured => {
+                    .refuse => {
                         try writeError(writer, "refusing to update checked out branch: {s}", .{name});
-                        if (self.deny_current_branch == .unconfigured) {
-                            try writeError(writer, deny_current_branch_msg, .{});
-                        }
                         return "branch is currently checked out";
                     },
-                    .update_instead => {
+                    .unconfigured, .update_instead => {
                         should_update_worktree = true;
                     },
                 }
@@ -672,8 +666,6 @@ const ReceivePack = struct {
         }
 
         if (should_update_worktree) {
-            if (self.is_bare) return "denyCurrentBranch = updateInstead needs a worktree";
-
             var res = try work.Switch(repo_kind, repo_opts).init(state, io, allocator, .{
                 .kind = .reset,
                 .target = .{ .oid = &ref_update.new_oid },
@@ -759,22 +751,6 @@ fn RefUpdate(comptime hash_kind: hash.HashKind) type {
 fn isNullOid(oid: []const u8) bool {
     return std.mem.allEqual(u8, oid, '0');
 }
-
-const deny_current_branch_msg =
-    \\By default, updating the current branch in a non-bare repository
-    \\is denied, because it will make the index and work tree inconsistent
-    \\with what you pushed, and will require 'git reset --hard' to match
-    \\the work tree to HEAD.
-    \\
-    \\You can set the 'receive.denyCurrentBranch' configuration variable
-    \\to 'ignore' or 'warn' in the remote repository to allow pushing into
-    \\its current branch; however, this is not recommended unless you
-    \\arranged to update its work tree to match what you pushed in some
-    \\other way.
-    \\
-    \\To squelch this message and still keep the default behaviour, set
-    \\'receive.denyCurrentBranch' configuration variable to 'refuse'."
-;
 
 const deny_delete_current_msg =
     \\By default, deleting the current branch is denied, because the next

@@ -363,8 +363,8 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         }
                     }
                 } else {
-                    git_push.unpack_ok = true;
-                    return;
+                    const empty = pack.emptyPack(repo_opts.hash);
+                    try stream.write(allocator, &empty, empty.len);
                 }
             }
 
@@ -748,6 +748,22 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 }
 
                 try self.heads.append(allocator, ref.head);
+            }
+            // an unborn HEAD can be advertised only through its symref capability.
+            for (symrefs) |spec| {
+                if (!std.mem.eql(u8, spec.src, "HEAD")) continue;
+                const has_head = for (self.heads.items) |head| {
+                    if (std.mem.eql(u8, head.name, "HEAD")) break true;
+                } else false;
+                if (has_head) continue;
+                var head = net.RemoteHead(repo_kind, repo_opts).init(try allocator.dupe(u8, "HEAD"));
+                errdefer allocator.free(head.name);
+                head.symref = try allocator.dupe(u8, spec.dst);
+                errdefer allocator.free(head.symref.?);
+                try self.refs.ensureUnusedCapacity(allocator, 1);
+                try self.heads.ensureUnusedCapacity(allocator, 1);
+                self.refs.appendAssumeCapacity(.{ .head = head, .capabilities = null });
+                self.heads.appendAssumeCapacity(head);
             }
         }
 

@@ -111,6 +111,7 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
 }
 
 pub const InitOpts = struct {
+    bare: bool = false,
     cwd_path: ?[]const u8 = null,
     path: []const u8,
     create_default_branch: ?[]const u8 = "master",
@@ -208,6 +209,16 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     },
                 };
 
+                pub fn isBare(self: @This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+                    const state = if (write_mode == .read_write) self.readOnly() else self;
+                    var config = try cfg.Config(repo_kind, repo_opts).init(state, io, allocator);
+                    defer config.deinit();
+                    if (config.local_sections.get("core")) |vars| {
+                        if (vars.get("bare")) |value| return cfg.parseBool(value);
+                    }
+                    return false;
+                }
+
                 pub fn readOnly(self: State(.read_write)) State(.read_only) {
                     return switch (repo_kind) {
                         .git => .{ .core = self.core, .extra = .{} },
@@ -236,16 +247,23 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             const work_path_resolved = try std.fs.path.resolve(allocator, &.{ opts.path, "." });
             errdefer allocator.free(work_path_resolved);
 
-            var work_dir = try cwd.createDirPathOpen(io, work_path_resolved, .{});
+            var work_dir = try cwd.createDirPathOpen(io, work_path_resolved, .{ .open_options = .{ .iterate = opts.bare } });
             errdefer work_dir.close(io);
 
-            const repo_dir_name = switch (repo_kind) {
+            if (repo_kind == .git and !opts.bare and try isGitDirectory(io, work_dir)) return error.RepoAlreadyExists;
+
+            if (opts.bare) {
+                var entries = work_dir.iterate();
+                if (try entries.next(io) != null) return error.UnexpectedFilesInTargetDirectory;
+            }
+
+            const repo_dir_name: []const u8 = if (repo_kind == .git and opts.bare) "." else switch (repo_kind) {
                 .git => ".git",
                 .xit => ".xit",
             };
 
             // return if dir already exists
-            {
+            if (!(repo_kind == .git and opts.bare)) {
                 var repo_dir_or_err = work_dir.openDir(io, repo_dir_name, .{});
                 if (repo_dir_or_err) |*repo_dir| {
                     repo_dir.close(io);
@@ -274,6 +292,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .global_config_path = global_config_path,
                         },
                     };
+
+                    try self.initBareConfig(io, allocator, opts.bare);
 
                     if (opts.create_default_branch) |default_branch_name| {
                         try self.addBranch(io, .{ .name = default_branch_name });
@@ -312,6 +332,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         },
                     };
 
+                    try self.initBareConfig(io, allocator, opts.bare);
+
                     if (opts.create_default_branch) |default_branch_name| {
                         try self.addBranch(io, .{ .name = default_branch_name });
                         try self.resetAdd(io, .{ .ref = .{ .kind = .head, .name = default_branch_name } });
@@ -333,7 +355,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             const cwd_path_resolved = try std.fs.path.resolve(allocator, &.{ cwd_path, "." });
             errdefer allocator.free(cwd_path_resolved);
 
-            var cwd = try std.Io.Dir.cwd().createDirPathOpen(io, cwd_path_resolved, .{});
+            var cwd = try std.Io.Dir.openDirAbsolute(io, cwd_path_resolved, .{});
             errdefer cwd.close(io);
 
             const repo_dir_name = switch (repo_kind) {
@@ -341,41 +363,50 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 .xit => ".xit",
             };
 
-            // search all parent dirs for one containing the repo dir
+            // search nested storage first, then conventional bare git storage.
             var dir_path_maybe: ?[]const u8 = opts.path;
+            var metadata_at_root = false;
             while (dir_path_maybe) |dir_path| {
-                var work_dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
-                defer work_dir.close(io);
-
-                var repo_dir = work_dir.openDir(io, repo_dir_name, .{}) catch |err| switch (err) {
-                    error.FileNotFound => {
-                        if (opts.require_repo_root) return error.RepoNotFound;
-                        dir_path_maybe = std.fs.path.dirname(dir_path);
-                        continue;
-                    },
-                    else => |e| return e,
-                };
-                defer repo_dir.close(io);
-
-                break;
+                var candidate = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+                defer candidate.close(io);
+                if (candidate.openDir(io, repo_dir_name, .{})) |nested| {
+                    nested.close(io);
+                    break;
+                } else |err| switch (err) {
+                    error.FileNotFound => {},
+                    error.NotDir => return error.UnsupportedRepoLayout,
+                    else => return err,
+                }
+                // an explicit .xit or .git path still belongs to its outer repo.
+                if (std.mem.eql(u8, std.fs.path.basename(dir_path), repo_dir_name)) {
+                    dir_path_maybe = std.fs.path.dirname(dir_path);
+                    continue;
+                }
+                if (repo_kind == .git and try isGitDirectory(io, candidate)) {
+                    metadata_at_root = true;
+                    break;
+                }
+                if (opts.require_repo_root) return error.RepoNotFound;
+                dir_path_maybe = std.fs.path.dirname(dir_path);
             }
 
             const work_path = dir_path_maybe orelse return error.RepoNotFound;
             if (!std.fs.path.isAbsolute(work_path)) return error.PathMustBeAbsolute;
-
-            // resolve work path to ensure it is well-formed
             const work_path_resolved = try std.fs.path.resolve(allocator, &.{ work_path, "." });
             errdefer allocator.free(work_path_resolved);
-
             var work_dir = try std.Io.Dir.openDirAbsolute(io, work_path_resolved, .{});
             errdefer work_dir.close(io);
-
-            var repo_dir = try work_dir.openDir(io, repo_dir_name, .{});
+            var repo_dir = try work_dir.openDir(io, if (metadata_at_root) "." else repo_dir_name, .{});
             errdefer repo_dir.close(io);
+            if (repo_kind == .git) {
+                if (repo_dir.access(io, "commondir", .{})) |_| return error.UnsupportedRepoLayout else |err| {
+                    if (err != error.FileNotFound) return err;
+                }
+            }
 
             switch (repo_kind) {
                 .git => {
-                    return .{
+                    var self = Repo(repo_kind, repo_opts){
                         .core = .{
                             .cwd_path = cwd_path_resolved,
                             .cwd = cwd,
@@ -385,6 +416,15 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .global_config_path = global_config_path,
                         },
                     };
+                    var config = try self.listConfig(io, allocator);
+                    defer config.deinit();
+                    var is_bare = false;
+                    if (config.local_sections.get("core")) |vars| {
+                        if (vars.contains("worktree")) return error.UnsupportedRepoLayout;
+                        if (vars.get("bare")) |value| is_bare = cfg.parseBool(value);
+                    }
+                    if (metadata_at_root and !is_bare) return error.UnsupportedRepoLayout;
+                    return self;
                 },
                 .xit => {
                     // repos from older formats kept chunks in a separate entry.
@@ -439,6 +479,41 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
         }
 
+        fn initBareConfig(self: *@This(), io: std.Io, allocator: std.mem.Allocator, bare: bool) !void {
+            if (repo_kind == .git) {
+                try self.addConfig(io, allocator, .{ .name = "core.bare", .value = if (bare) "true" else "false" });
+                if (repo_opts.hash == .sha256) {
+                    try self.addConfig(io, allocator, .{ .name = "core.repositoryformatversion", .value = "1" });
+                    try self.addConfig(io, allocator, .{ .name = "extensions.objectformat", .value = "sha256" });
+                }
+            } else {
+                const Ctx = struct {
+                    core: *Core,
+                    io: std.Io,
+                    allocator: std.mem.Allocator,
+                    bare: bool,
+                    pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                        var moment = try DB.HashMap(.read_write).init(cursor.*);
+                        const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
+                        defer config.deinit();
+                        try config.add(state, ctx.io, .{ .name = "core.bare", .value = if (ctx.bare) "true" else "false" });
+                    }
+                };
+                const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+                try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .core = &self.core, .io = io, .allocator = allocator, .bare = bare });
+            }
+        }
+
+        pub fn isBare(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !bool {
+            var moment = try self.core.latestMoment();
+            return State(.read_only).isBare(.{ .core = &self.core, .extra = .{ .moment = &moment } }, io, allocator);
+        }
+
+        fn requireWorktree(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+            if (try self.isBare(io, allocator)) return error.BareRepository;
+        }
+
         pub fn deinit(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
             switch (repo_kind) {
                 .git => {
@@ -471,6 +546,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             allocator: std.mem.Allocator,
             metadata: obj.CommitMetadata(repo_opts.hash),
         ) ![hash.hexLen(repo_opts.hash)]u8 {
+            try self.requireWorktree(io, allocator);
             switch (repo_kind) {
                 .git => return try obj.writeCommitAtHead(repo_kind, repo_opts, .{ .core = &self.core, .extra = .{} }, io, allocator, metadata),
                 .xit => {
@@ -630,6 +706,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             allocator: std.mem.Allocator,
             paths: []const []const u8,
         ) !void {
+            try self.requireWorktree(io, allocator);
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
@@ -679,6 +756,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             paths: []const []const u8,
             opts: work.UnaddOptions,
         ) !void {
+            try self.requireWorktree(io, allocator);
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
@@ -743,6 +821,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             paths: []const []const u8,
             opts: work.RemoveOptions,
         ) !void {
+            try self.requireWorktree(io, allocator);
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
 
@@ -787,6 +866,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         }
 
         pub fn status(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) !work.Status(repo_kind, repo_opts) {
+            try self.requireWorktree(io, allocator);
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
             return try work.Status(repo_kind, repo_opts).init(state, io, allocator);
@@ -800,6 +880,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             status_kind: work.StatusKind,
             stat: *work.Status(repo_kind, repo_opts),
         ) !df.LineIteratorPair(repo_kind, repo_opts) {
+            try self.requireWorktree(io, allocator);
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
             return try df.LineIteratorPair(repo_kind, repo_opts).init(state, io, allocator, path, status_kind, stat);
@@ -811,6 +892,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             allocator: std.mem.Allocator,
             diff_opts: df.DiffOptions(repo_kind, repo_opts),
         ) !df.FileIterator(repo_kind, repo_opts) {
+            if (diff_opts != .tree) try self.requireWorktree(io, allocator);
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
             return try df.FileIterator(repo_kind, repo_opts).init(state, io, allocator, diff_opts);
@@ -956,6 +1038,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             allocator: std.mem.Allocator,
             input: work.SwitchInput(repo_opts.hash),
         ) !work.Switch(repo_kind, repo_opts) {
+            try self.requireWorktree(io, allocator);
             switch (repo_kind) {
                 .git => return try work.Switch(repo_kind, repo_opts).init(.{ .core = &self.core, .extra = .{} }, io, allocator, input),
                 .xit => {
@@ -1055,6 +1138,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         }
 
         pub fn restore(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+            try self.requireWorktree(io, allocator);
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
             const rel_path = try fs.relativePath(allocator, self.core.work_path, self.core.cwd_path, path);
@@ -1093,6 +1177,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             input: mrg.MergeInput(repo_opts.hash),
             progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !mrg.Merge(repo_kind, repo_opts) {
+            try self.requireWorktree(io, allocator);
             return self.mergeAtRefOrHead(io, allocator, input, null, progress_ctx_maybe);
         }
 
@@ -1396,6 +1481,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         allocator,
                         input.name,
                         input.value,
+                        null,
                     );
 
                     lock.success = true;
@@ -1410,7 +1496,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                            try net.Remote(repo_kind, repo_opts).addConfig(state, ctx.io, ctx.allocator, ctx.input.name, ctx.input.value);
+                            try net.Remote(repo_kind, repo_opts).addConfig(state, ctx.io, ctx.allocator, ctx.input.name, ctx.input.value, null);
                             try un.writeMessage(repo_opts, state, .{ .remote = .{ .add = ctx.input } });
                         }
                     };
@@ -1538,7 +1624,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             cwd_path: []const u8,
             work_path: []const u8,
             global_config_path: ?[]const u8,
-            opts: net.Opts(repo_opts.ProgressCtx),
+            opts: net.CloneOpts(repo_opts.ProgressCtx),
         ) !Repo(repo_kind, repo_opts) {
             return net.clone(repo_kind, repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts);
         }
@@ -1769,7 +1855,18 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
         pub fn open(io: std.Io, allocator: std.mem.Allocator, init_opts: InitOpts) !AnyRepo(repo_kind, any_repo_opts) {
             const hash_kind: hash.HashKind = if (any_repo_opts.hash) |hash_kind| hash_kind else blk: {
                 switch (repo_kind) {
-                    .git => break :blk .sha1,
+                    .git => {
+                        var probe = try Repo(.git, .{}).open(io, allocator, init_opts);
+                        defer probe.deinit(io, allocator);
+                        var config = try probe.listConfig(io, allocator);
+                        defer config.deinit();
+                        if (config.local_sections.get("extensions")) |vars| {
+                            if (vars.get("objectformat")) |format| {
+                                break :blk std.meta.stringToEnum(hash.HashKind, format) orelse return error.InvalidHashKind;
+                            }
+                        }
+                        break :blk .sha1;
+                    },
                     .xit => {
                         const xitdb = @import("xitdb");
 
@@ -1802,4 +1899,32 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
             }
         }
     };
+}
+
+/// recognize ordinary git object/ref storage without requiring an existing commit.
+pub fn isGitDirectory(io: std.Io, dir: std.Io.Dir) !bool {
+    for ([_][]const u8{ "objects", "refs" }) |name| {
+        const child = dir.openDir(io, name, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => return false,
+            else => return err,
+        };
+        child.close(io);
+    }
+    const head = dir.openFile(io, "HEAD", .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer head.close(io);
+    var buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    if (try head.length(io) > buffer.len) return false;
+    var reader = head.reader(io, &.{});
+    const len = try reader.interface.readSliceShort(&buffer);
+    const value = std.mem.trim(u8, buffer[0..len], " \t\r\n");
+    if (std.mem.startsWith(u8, value, "ref:")) {
+        const name = std.mem.trim(u8, value[4..], " \t");
+        return std.mem.startsWith(u8, name, "refs/") and rf.validateName(name);
+    }
+    if (value.len != 40 and value.len != 64) return false;
+    for (value) |c| if (!std.ascii.isHex(c)) return false;
+    return true;
 }

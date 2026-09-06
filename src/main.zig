@@ -132,7 +132,7 @@ pub fn run(
                     any_repo_opts.toRepoOpts();
                 const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, init_cmd.dir });
                 defer allocator.free(work_path);
-                var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path, .global_config_path = global_config_path });
+                var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path, .bare = init_cmd.bare, .global_config_path = global_config_path });
                 defer repo.deinit(io, allocator);
 
                 try run_opts.out.print(
@@ -156,7 +156,7 @@ pub fn run(
                     cwd_path,
                     work_path,
                     global_config_path,
-                    .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } },
+                    .{ .bare = clone_cmd.bare, .transport = .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } } },
                 );
                 defer repo.deinit(io, allocator);
 
@@ -227,6 +227,9 @@ pub fn runPrint(
                 return error.HandledError;
             },
             error.BrokenPipe => return,
+            error.BareRepository => "this operation requires a worktree and cannot run on a bare repository\n",
+            error.UnsupportedRepoLayout => "this repository layout is not supported\n",
+            error.UnexpectedFilesInTargetDirectory => "the destination directory must be empty\n",
             error.RepoFormatTooOld =>
             \\this repo was made by an older version of xit,
             \\and the format has changed since then.

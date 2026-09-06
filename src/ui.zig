@@ -97,7 +97,7 @@ pub fn rootWidget(
     // focus on the correct tab if sub command is provided
     if (cmd_kind_maybe) |cmd_kind| {
         const child_id_maybe = switch (cmd_kind) {
-            .status, .diff_dir, .diff_added => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.status),
+            .status, .diff_dir, .diff_added => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.status) orelse return error.BareRepository,
             .log => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.log),
             .config => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.config),
             else => null,
@@ -194,13 +194,13 @@ pub fn start(
                         repo.deinit(io, allocator);
                         repo.* = new_repo;
 
-                        const tab_index = root.ui_root.box.children.values()[0].widget.ui_root_tabs.getSelectedIndex();
+                        const tab_kind = root.ui_root.box.children.values()[0].widget.ui_root_tabs.getSelectedKind();
                         const new_root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
                         root.deinit(allocator);
                         root = new_root;
-                        if (tab_index) |index| {
+                        if (tab_kind) |kind| {
                             const tabs = &root.ui_root.box.children.values()[0].widget.ui_root_tabs;
-                            root.getFocus().setFocus(tabs.box.children.keys()[index]);
+                            if (tabs.getChildFocusId(kind)) |id| root.getFocus().setFocus(id);
                         }
                     },
                     else => try root.input(allocator, key, root.getFocus()),

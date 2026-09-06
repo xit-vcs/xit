@@ -42,7 +42,7 @@ pub fn negotiate(
             return error.RemoteNotConnected;
 
         for (heads) |*head| {
-            if (!rf.validateName(head.name)) {
+            if (std.mem.allEqual(u8, &head.oid, '0') or !rf.validateName(head.name)) {
                 continue;
             }
 

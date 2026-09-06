@@ -78,9 +78,18 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
     }
 
-    {
+    inline for (.{ false, true }) |bare| {
+        try repo.addConfig(io, allocator, .{ .name = "core.bare", .value = if (bare) "true" else "false" });
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .log);
         defer root.deinit(allocator);
+
+        const tabs = &root.ui_root.box.children.values()[0].widget.ui_root_tabs;
+        try std.testing.expectEqual(!bare, tabs.getChildFocusId(.status) != null);
+        try std.testing.expectEqual(if (repo_kind == .xit) @as(usize, 4) else 3, tabs.box.children.count() + @intFromBool(bare));
+
+        var config_root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .config);
+        defer config_root.deinit(allocator);
+        try std.testing.expect(config_root.ui_root.box.children.values()[1].widget.stack.getSelected().?.* == .ui_config_list);
 
         const grid = try root.getGrid().?.toString(allocator);
         defer allocator.free(grid);
@@ -108,6 +117,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             \\                                        └──────────────────────────────────────────────────────────┘
         , grid_without_tabs);
     }
+    try repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
 
     // can't add path that is outside repo
     try std.testing.expectError(error.PathIsOutsideRepo, repo.add(io, allocator, &.{"../README.md"}));
@@ -339,11 +349,13 @@ test "merge" {
 }
 
 test "merge at ref" {
-    try testMergeAtRef(.git, .{ .is_test = true });
-    try testMergeAtRef(.xit, .{ .is_test = true });
+    inline for (.{ false, true }) |bare| {
+        try testMergeAtRef(.git, .{ .is_test = true }, bare);
+        try testMergeAtRef(.xit, .{ .is_test = true }, bare);
+    }
 }
 
-fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
+fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), bare: bool) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const temp_dir_name = "temp-test-repo-merge-at-ref";
@@ -391,6 +403,8 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     }
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "current.txt", "current");
 
+    if (bare) try repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" });
+
     {
         var merge = try repo.mergeAtRef(io, allocator, .{
             .kind = .full,
@@ -411,6 +425,7 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "target.txt", .{ .mode = .read_only }));
     try std.testing.expectError(error.FileNotFound, repo.core.work_dir.openFile(io, "source.txt", .{ .mode = .read_only }));
 
+    if (bare) try repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
     _ = try repo.commit(io, allocator, .{ .message = "current" });
 
     {

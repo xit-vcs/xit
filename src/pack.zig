@@ -1451,6 +1451,14 @@ pub fn createDelta(allocator: std.mem.Allocator, base: []const u8, target: []con
     return try delta.toOwnedSlice(allocator);
 }
 
+/// a ref update can require a pack even when the receiver already has every object.
+pub fn emptyPack(comptime hash_kind: hash.HashKind) [12 + hash.byteLen(hash_kind)]u8 {
+    var bytes: [12 + hash.byteLen(hash_kind)]u8 = undefined;
+    @memcpy(bytes[0..12], "PACK\x00\x00\x00\x02\x00\x00\x00\x00");
+    hash.Hasher(hash_kind).hash(bytes[0..12], bytes[12..], .{});
+    return bytes;
+}
+
 pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -1545,6 +1553,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             }
 
             if (self.entries.items.len == 0) {
+                self.deinit();
                 return null;
             }
 

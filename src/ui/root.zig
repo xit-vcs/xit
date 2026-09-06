@@ -14,18 +14,19 @@ const rp = @import("../repo.zig");
 pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
     return struct {
         box: wgt.Box(Widget),
+        focus_ids: std.EnumArray(FocusKind, ?usize),
 
         const FocusKind = enum { log, status, config, undo };
 
-        pub fn init(allocator: std.mem.Allocator) !RootTabs(Widget, repo_kind) {
+        pub fn init(allocator: std.mem.Allocator, is_bare: bool) !RootTabs(Widget, repo_kind) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
+            var focus_ids = std.EnumArray(FocusKind, ?usize).initFill(null);
 
-            inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
-                const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
+            for (std.enums.values(FocusKind)) |focus_kind| {
                 const name = switch (focus_kind) {
                     .log => "log",
-                    .status => "status",
+                    .status => if (is_bare) continue else "status",
                     .config => "config",
                     .undo => if (repo_kind == .xit) "undo" else continue,
                 };
@@ -33,10 +34,12 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                focus_ids.set(focus_kind, text_box.getFocus().id);
             }
 
             var ui_root_tabs = RootTabs(Widget, repo_kind){
                 .box = box,
+                .focus_ids = focus_ids,
             };
             ui_root_tabs.getFocus().child_id = box.children.keys()[0];
             return ui_root_tabs;
@@ -101,8 +104,16 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
             }
         }
 
-        pub fn getChildFocusId(self: *RootTabs(Widget, repo_kind), focus_kind: FocusKind) usize {
-            return self.box.children.keys()[@intFromEnum(focus_kind)];
+        pub fn getSelectedKind(self: RootTabs(Widget, repo_kind)) ?FocusKind {
+            const child_id = self.box.focus.child_id orelse return null;
+            for (std.enums.values(FocusKind)) |kind| {
+                if (self.focus_ids.get(kind) == child_id) return kind;
+            }
+            return null;
+        }
+
+        pub fn getChildFocusId(self: *RootTabs(Widget, repo_kind), focus_kind: FocusKind) ?usize {
+            return self.focus_ids.get(focus_kind);
         }
     };
 }
@@ -114,6 +125,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         const FocusKind = enum { tabs, stack };
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
+            const is_bare = try repo.isBare(io, allocator);
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
@@ -121,7 +133,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
                 switch (focus_kind) {
                     .tabs => {
-                        var ui_root_tabs = try RootTabs(Widget, repo_kind).init(allocator);
+                        var ui_root_tabs = try RootTabs(Widget, repo_kind).init(allocator, is_bare);
                         errdefer ui_root_tabs.deinit(allocator);
                         try box.children.put(allocator, ui_root_tabs.getFocus().id, .{ .widget = .{ .ui_root_tabs = ui_root_tabs }, .rect = null, .min_size = null });
                     },
@@ -135,7 +147,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                             try stack.children.put(allocator, log.getFocus().id, log);
                         }
 
-                        {
+                        if (!is_bare) {
                             var status = Widget{ .ui_status = try ui_status.Status(Widget, repo_kind, repo_opts).init(io, allocator, repo) };
                             errdefer status.deinit(allocator);
                             try stack.children.put(allocator, status.getFocus().id, status);

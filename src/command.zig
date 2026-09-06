@@ -62,6 +62,8 @@ fn commandHelp(command_kind: CommandKind) Help {
             \\    xit init
             \\in a new dir:
             \\    xit init myproject
+            \\create a bare repo:
+            \\    xit init --bare myproject
             ,
         },
         .patch => .{
@@ -348,6 +350,8 @@ fn commandHelp(command_kind: CommandKind) Help {
             .example =
             \\clone with a url:
             \\    xit clone https://github.com/... mydir
+            \\clone as a bare repo:
+            \\    xit clone --bare https://github.com/... mydir
             ,
         },
         .fetch => .{
@@ -556,6 +560,7 @@ pub const CommandArgs = struct {
 pub fn Command(comptime hash_kind: hash.HashKind) type {
     return union(CommandKind) {
         init: struct {
+            bare: bool = false,
             dir: []const u8,
         },
         patch: enum {
@@ -598,6 +603,7 @@ pub fn Command(comptime hash_kind: hash.HashKind) type {
         remote: cfg.ConfigCommand,
         gc,
         clone: struct {
+            bare: bool = false,
             url: []const u8,
             local_path: []const u8,
         },
@@ -625,9 +631,9 @@ pub fn Command(comptime hash_kind: hash.HashKind) type {
             switch (command_kind) {
                 .init => {
                     if (cmd_args.positional_args.len == 0) {
-                        return .{ .init = .{ .dir = "." } };
+                        return .{ .init = .{ .dir = ".", .bare = cmd_args.contains("--bare") } };
                     } else if (cmd_args.positional_args.len == 1) {
-                        return .{ .init = .{ .dir = cmd_args.positional_args[0] } };
+                        return .{ .init = .{ .dir = cmd_args.positional_args[0], .bare = cmd_args.contains("--bare") } };
                     } else {
                         return null;
                     }
@@ -891,6 +897,7 @@ pub fn Command(comptime hash_kind: hash.HashKind) type {
                     return .{ .clone = .{
                         .url = cmd_args.positional_args[0],
                         .local_path = cmd_args.positional_args[1],
+                        .bare = cmd_args.contains("--bare"),
                     } };
                 },
                 .fetch => {

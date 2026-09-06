@@ -88,6 +88,7 @@ Converting to/from git repos is easy using local remotes:
 xit clone path/to/git/repo path/to/xit/repo
 
 # convert from xit to git
+git init -b master path/to/git/repo
 xit remote add origin path/to/git/repo
 xit push origin master
 ```

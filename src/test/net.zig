@@ -24,60 +24,76 @@ test "xit fetch small" {
         try testFetch(.xit, .git, .{ .wire = .raw }, 3005, io, allocator);
         try testFetch(.xit, .xit, .{ .wire = .ssh }, 3006, io, allocator);
     }
-    try testFetch(.xit, .git, .file, 0, io, allocator);
+    try testFetch(.xit, .xit, .file, 0, io, allocator);
 }
 
 test "git push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPush(.git, .git, .{ .wire = .http }, 3007, io, allocator);
+    try testPush(.git, .git, .{ .wire = .http }, 3007, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPush(.git, .git, .{ .wire = .raw }, 3008, io, allocator);
-        try testPush(.git, .git, .{ .wire = .ssh }, 3009, io, allocator);
+        try testPush(.git, .git, .{ .wire = .raw }, 3008, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .ssh }, 3009, .sha1, io, allocator);
     }
-    try testPush(.git, .git, .file, 0, io, allocator);
+    inline for (.{ .git, .xit }) |server_kind| {
+        inline for (.{ .sha1, .sha256 }) |hash_kind| {
+            try testPush(.git, server_kind, .file, 0, hash_kind, io, allocator);
+        }
+    }
 }
 
 test "xit push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPush(.xit, .xit, .{ .wire = .http }, 3010, io, allocator);
+    try testPush(.xit, .xit, .{ .wire = .http }, 3010, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPush(.xit, .git, .{ .wire = .raw }, 3011, io, allocator);
-        try testPush(.xit, .xit, .{ .wire = .ssh }, 3012, io, allocator);
+        try testPush(.xit, .git, .{ .wire = .raw }, 3011, .sha1, io, allocator);
+        try testPush(.xit, .xit, .{ .wire = .ssh }, 3012, .sha1, io, allocator);
     }
-    try testPush(.xit, .git, .file, 0, io, allocator);
+    inline for (.{ .git, .xit }) |server_kind| {
+        inline for (.{ .sha1, .sha256 }) |hash_kind| {
+            try testPush(.xit, server_kind, .file, 0, hash_kind, io, allocator);
+        }
+    }
 }
 
 test "git clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .git, .{ .wire = .http }, 3013, false, io, allocator);
+    try testClone(.git, .git, .{ .wire = .http }, 3013, false, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .git, .{ .wire = .raw }, 3014, false, io, allocator);
-        try testClone(.git, .git, .{ .wire = .ssh }, 3015, false, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3014, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .ssh }, 3015, false, .sha1, io, allocator);
     }
-    try testClone(.git, .git, .file, 0, false, io, allocator);
+    inline for (.{ .git, .xit }) |server_kind| {
+        inline for (.{ .sha1, .sha256 }) |hash_kind| {
+            try testClone(.git, server_kind, .file, 0, false, hash_kind, io, allocator);
+        }
+    }
 }
 
 test "xit clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.xit, .xit, .{ .wire = .http }, 3016, false, io, allocator);
+    try testClone(.xit, .xit, .{ .wire = .http }, 3016, false, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.xit, .git, .{ .wire = .raw }, 3017, false, io, allocator);
-        try testClone(.xit, .xit, .{ .wire = .ssh }, 3018, false, io, allocator);
+        try testClone(.xit, .git, .{ .wire = .raw }, 3017, false, .sha1, io, allocator);
+        try testClone(.xit, .xit, .{ .wire = .ssh }, 3018, false, .sha1, io, allocator);
     }
-    try testClone(.xit, .git, .file, 0, false, io, allocator);
+    inline for (.{ .git, .xit }) |server_kind| {
+        inline for (.{ .sha1, .sha256 }) |hash_kind| {
+            try testClone(.xit, server_kind, .file, 0, false, hash_kind, io, allocator);
+        }
+    }
 }
 
 test "git clone small subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .xit, .{ .wire = .http }, 3031, true, io, allocator);
+    try testClone(.git, .xit, .{ .wire = .http }, 3031, true, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .git, .{ .wire = .raw }, 3032, true, io, allocator);
-        try testClone(.git, .xit, .{ .wire = .ssh }, 3033, true, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3032, true, .sha1, io, allocator);
+        try testClone(.git, .xit, .{ .wire = .ssh }, 3033, true, .sha1, io, allocator);
     }
 }
 
@@ -131,9 +147,6 @@ fn Server(
 ) type {
     if (server_repo_kind == .xit and transport_def == .wire and transport_def.wire == .raw) {
         @compileError("git daemon cannot serve .xit repos");
-    }
-    if (server_repo_kind == .xit and transport_def == .file) {
-        @compileError("file transport cannot target .xit repos");
     }
 
     return struct {
@@ -580,16 +593,12 @@ fn testFetch(
     const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
     // make a commit
     const commit1 = blk: {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        break :blk try server_repo.commit(io, allocator, .{ .message = "let there be light" });
+        break :blk try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
     };
 
     // export server repo
@@ -688,11 +697,7 @@ fn testFetch(
 
     // make another commit
     const commit2 = blk: {
-        const goodbye_txt = try server_repo.core.work_dir.createFile(io, "goodbye.txt", .{ .truncate = true });
-        defer goodbye_txt.close(io);
-        try goodbye_txt.writeStreamingAll(io, "goodbye, world!");
-        try server_repo.add(io, allocator, &.{"goodbye.txt"});
-        break :blk try server_repo.commit(io, allocator, .{ .message = "goodbye" });
+        break :blk try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "goodbye" });
     };
 
     try client_repo.fetch(
@@ -723,6 +728,7 @@ fn testPush(
     comptime server_repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime port: u16,
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -750,18 +756,12 @@ fn testPush(
     const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
-    // add config
-    switch (transport_def) {
-        .file => try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" }),
-        .wire => {
-            try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-        },
-    }
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
+    try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateInstead" });
+    try server_repo.addConfig(io, allocator, .{ .name = "receive.denydeletecurrent", .value = "true" });
 
     // export server repo
     {
@@ -772,7 +772,7 @@ fn testPush(
     const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // make a commit
@@ -862,13 +862,20 @@ fn testPush(
         }
     }
 
+    // creating a branch at an existing remote object still requires an empty pack.
+    try client_repo.push(io, allocator, "origin", "master:refs/heads/alias", false, .{ .wire = .{ .ssh = .{
+        .command = ssh_cmd_maybe,
+        .receive_pack_command = receive_pack_command,
+    } } });
+    try std.testing.expectEqualStrings(&commit1, &(try server_repo.readRef(io, .{ .kind = .head, .name = "alias" })).?);
+    try client_repo.push(io, allocator, "origin", ":refs/heads/alias", false, .{ .wire = .{ .ssh = .{
+        .command = ssh_cmd_maybe,
+        .receive_pack_command = receive_pack_command,
+    } } });
+
     // make a commit on the server
     {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world from the server!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "new commit from the server" });
+        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world from the server!" }} }, .{ .message = "new commit from the server" });
     }
 
     // make another commit
@@ -895,11 +902,7 @@ fn testPush(
 
     // make a commit on the server with no parents, thus creating an incompatible git history
     {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world from the server again!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "new git history on the server", .parent_oids = &.{} });
+        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world from the server again!" }} }, .{ .message = "new git history on the server", .parent_oids = &.{} });
     }
 
     // can't push because commit doesn't exist locally
@@ -939,38 +942,35 @@ fn testPush(
         } } },
     ));
 
-    // test denyNonFastForwards (only for wire transports, file transport bypasses receive-pack)
-    switch (transport_def) {
-        .file => {},
-        .wire => {
-            // set denyNonFastForwards on server
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denynonfastforwards", .value = "true" });
+    // every transport enforces receive policies.
+    {
+        // set denyNonFastForwards on server
+        try server_repo.addConfig(io, allocator, .{ .name = "receive.denynonfastforwards", .value = "true" });
 
-            // save the server's current master ref
-            const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
+        // save the server's current master ref
+        const oid_before_denied_push = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
 
-            // force push should be rejected by server due to denyNonFastForwards
-            try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
-                io,
-                allocator,
-                "origin",
-                "master",
-                true,
-                .{ .wire = .{ .ssh = .{
-                    .command = ssh_cmd_maybe,
-                    .receive_pack_command = receive_pack_command,
-                } } },
-            ));
+        // force push should be rejected by server due to denyNonFastForwards
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
+            io,
+            allocator,
+            "origin",
+            "master",
+            true,
+            .{ .wire = .{ .ssh = .{
+                .command = ssh_cmd_maybe,
+                .receive_pack_command = receive_pack_command,
+            } } },
+        ));
 
-            // verify the server ref was not updated (push was denied)
-            {
-                const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
-                try std.testing.expectEqualStrings(&oid_before_denied_push, &oid_master);
-            }
+        // verify the server ref was not updated (push was denied)
+        {
+            const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
+            try std.testing.expectEqualStrings(&oid_before_denied_push, &oid_master);
+        }
 
-            // remove denyNonFastForwards from server
-            try server_repo.removeConfig(io, allocator, .{ .name = "receive.denynonfastforwards" });
-        },
+        // remove denyNonFastForwards from server
+        try server_repo.removeConfig(io, allocator, .{ .name = "receive.denynonfastforwards" });
     }
 
     // force push
@@ -1008,10 +1008,11 @@ fn testPush(
     // make sure push was successful
     try std.testing.expect(null == try server_repo.readRef(io, .{ .kind = .tag, .name = "1.0.0" }));
 
-    // updateInstead must reject a push that would overwrite local changes
+    // a bare server ignores updateInstead and leaves stray files untouched
     if (server_repo_kind == .xit) switch (transport_def) {
         .file => {},
         .wire => |wire_kind| if (.http == wire_kind) {
+            try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateInstead" });
             {
                 const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
                 defer hello_txt.close(io);
@@ -1023,9 +1024,9 @@ fn testPush(
                 try hello_txt.writeStreamingAll(io, "new client change");
             }
             try client_repo.add(io, allocator, &.{"hello.txt"});
-            _ = try client_repo.commit(io, allocator, .{ .message = "change hello" });
+            const commit3 = try client_repo.commit(io, allocator, .{ .message = "change hello" });
 
-            try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(
+            try client_repo.push(
                 io,
                 allocator,
                 "origin",
@@ -1035,16 +1036,86 @@ fn testPush(
                     .command = ssh_cmd_maybe,
                     .receive_pack_command = receive_pack_command,
                 } } },
-            ));
+            );
 
             const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
-            try std.testing.expectEqualStrings(&commit2, &oid_master);
+            try std.testing.expectEqualStrings(&commit3, &oid_master);
 
             const hello = try server_repo.core.work_dir.readFileAlloc(io, "hello.txt", allocator, .limited(1024));
             defer allocator.free(hello);
             try std.testing.expectEqualStrings("local server change", hello);
         },
     };
+
+    if (transport_def == .file) {
+        // deletion policy still applies to bare HEAD, and failed atomic pushes
+        // must not create any of their other refs.
+        try server_repo.addConfig(io, allocator, .{ .name = "receive.denydeletes", .value = "true" });
+        const before_rejected = if (server_repo_kind == .xit) try server_repo.core.db_file.length(io) else 0;
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "origin", ":master", false, .{ .refspecs = &.{"refs/heads/master:refs/heads/fresh"} }));
+        if (server_repo_kind == .xit) {
+            try std.testing.expectEqual(before_rejected, try server_repo.core.db_file.length(io));
+            try std.testing.expectEqual(null, try server_repo.readRef(io, .{ .kind = .head, .name = "fresh" }));
+        }
+        try server_repo.removeConfig(io, allocator, .{ .name = "receive.denydeletes" });
+        try client_repo.push(io, allocator, "origin", ":master", false, .{});
+        try client_repo.push(io, allocator, "origin", "master", false, .{});
+
+        // also exercise conversion to an empty non-bare local destination.
+        const checkout_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "checkout" });
+        defer allocator.free(checkout_path);
+        const Checkout = rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true });
+        var checkout = try Checkout.init(io, allocator, .{ .path = checkout_path });
+        defer checkout.deinit(io, allocator);
+        try client_repo.addRemote(io, allocator, .{ .name = "checkedout", .value = checkout_path });
+        const third = try commitServer(&client_repo, io, allocator, .{ .files = &.{.{ .path = "file", .content = "pushed" }} }, .{ .message = "pushed" });
+        // the default updates the checked-out branch, index, and files together.
+        try client_repo.push(io, allocator, "checkedout", "master:master", false, .{});
+        checkout.deinit(io, allocator);
+        checkout = try Checkout.open(io, allocator, .{ .path = checkout_path });
+        try std.testing.expectEqualStrings(&third, &(try checkout.readRef(io, .{ .kind = .head, .name = "master" })).?);
+        {
+            const content = try checkout.core.work_dir.readFileAlloc(io, "file", allocator, .limited(64));
+            defer allocator.free(content);
+            try std.testing.expectEqualStrings("pushed", content);
+            var status = try checkout.status(io, allocator);
+            defer status.deinit(allocator);
+            try std.testing.expectEqual(0, status.index_added.count() + status.index_modified.count() + status.index_deleted.count());
+            try std.testing.expectEqual(0, status.work_dir_modified.count() + status.work_dir_deleted.count() + status.untracked.count());
+        }
+        const fourth = try commitServer(&client_repo, io, allocator, .{ .files = &.{.{ .path = "file", .content = "next" }} }, .{ .message = "next" });
+        // explicit refusal still overrides the default.
+        try checkout.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "refuse" });
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "checkedout", "master:master", false, .{}));
+        try checkout.removeConfig(io, allocator, .{ .name = "receive.denycurrentbranch" });
+        // protect unstaged, staged, and untracked content at the incoming path.
+        const file = try checkout.core.work_dir.createFile(io, "file", .{});
+        try file.writeStreamingAll(io, "local");
+        file.close(io);
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "checkedout", "master:master", false, .{}));
+        try checkout.add(io, allocator, &.{"file"});
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "checkedout", "master:master", false, .{}));
+        try checkout.untrack(io, allocator, &.{"file"}, .{});
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "checkedout", "master:master", false, .{}));
+        checkout.deinit(io, allocator);
+        checkout = try Checkout.open(io, allocator, .{ .path = checkout_path });
+        try std.testing.expectEqualStrings(&third, &(try checkout.readRef(io, .{ .kind = .head, .name = "master" })).?);
+        {
+            const content = try checkout.core.work_dir.readFileAlloc(io, "file", allocator, .limited(64));
+            defer allocator.free(content);
+            try std.testing.expectEqualStrings("local", content);
+            var status = try checkout.status(io, allocator);
+            defer status.deinit(allocator);
+            try std.testing.expect(status.index_deleted.contains("file"));
+            try std.testing.expect(status.untracked.contains("file"));
+        }
+        try checkout.restore(io, allocator, "file");
+        try checkout.add(io, allocator, &.{"file"});
+        try client_repo.push(io, allocator, "checkedout", "master:master", false, .{});
+        checkout.deinit(io, allocator);
+        checkout = try Checkout.open(io, allocator, .{ .path = checkout_path });
+        try std.testing.expectEqualStrings(&fourth, &(try checkout.readRef(io, .{ .kind = .head, .name = "master" })).?);
+    }
 }
 
 fn testClone(
@@ -1053,6 +1124,7 @@ fn testClone(
     comptime transport_def: net.TransportDefinition,
     comptime port: u16,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -1085,7 +1157,7 @@ fn testClone(
 
     // init server repo with default branch name as main
     // is_test must be false when shell_out_to_git so commits get real timestamps (needed for --shallow-since)
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = !shell_out_to_git }).init(io, allocator, .{ .path = server_path, .create_default_branch = "main" });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = !shell_out_to_git }).init(io, allocator, .{ .path = server_path, .bare = true, .create_default_branch = "main" });
     defer server_repo.deinit(io, allocator);
 
     if (shell_out_to_git) {
@@ -1094,25 +1166,26 @@ fn testClone(
         try server_repo.addConfig(io, allocator, .{ .name = "uploadpack.allowfilter", .value = "true" });
     }
 
-    // make a commit
-    {
-        const hello_txt = try server_repo.core.work_dir.createFile(io, "hello.txt", .{ .truncate = true });
-        defer hello_txt.close(io);
-        try hello_txt.writeStreamingAll(io, "hello, world!");
-        try server_repo.add(io, allocator, &.{"hello.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "let there be light" });
+    if (!shell_out_to_git and transport_def == .file) {
+        const empty_path = try std.fs.path.join(allocator, &.{ temp_path, "empty" });
+        defer allocator.free(empty_path);
+        var empty = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).clone(io, allocator, server_path, temp_path, empty_path, null, .{ .bare = true });
+        defer empty.deinit(io, allocator);
+        var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+        try std.testing.expectEqualStrings("main", (try empty.head(io, &head_buffer)).ref.name);
+        try std.testing.expectEqual(null, try empty.readRef(io, .{ .kind = .head, .name = "main" }));
+        try std.testing.expectError(error.FileNotFound, empty.core.repo_dir.access(io, "index", .{}));
     }
+
+    const first = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
+    if (!shell_out_to_git) try server_repo.addBranch(io, .{ .name = "other" });
 
     // tag first commit
     _ = try server_repo.addTag(io, allocator, .{ .name = "v1", .message = "first" });
 
     // make a commit
     {
-        const goodbye_txt = try server_repo.core.work_dir.createFile(io, "goodbye.txt", .{ .truncate = true });
-        defer goodbye_txt.close(io);
-        try goodbye_txt.writeStreamingAll(io, "goodbye, world!");
-        try server_repo.add(io, allocator, &.{"goodbye.txt"});
-        _ = try server_repo.commit(io, allocator, .{ .message = "add goodbye file" });
+        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "add goodbye file" });
     }
 
     // export server repo
@@ -1185,11 +1258,7 @@ fn testClone(
 
         // make a third commit on the server
         {
-            const extra_txt = try server_repo.core.work_dir.createFile(io, "extra.txt", .{ .truncate = true });
-            defer extra_txt.close(io);
-            try extra_txt.writeStreamingAll(io, "extra content");
-            try server_repo.add(io, allocator, &.{"extra.txt"});
-            _ = try server_repo.commit(io, allocator, .{ .message = "add extra file" });
+            _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "extra.txt", .content = "extra content" }} }, .{ .message = "add extra file" });
         }
 
         // pull --unshallow to deepen the clone and get the new commit
@@ -1331,29 +1400,70 @@ fn testClone(
         } else null;
         defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-        // clone repo
-        var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).clone(
-            io,
-            allocator,
-            remote_url,
-            temp_path,
-            client_path,
-            null,
-            .{ .wire = .{ .ssh = .{
-                .command = ssh_cmd_maybe,
-                .upload_pack_command = upload_pack_command,
-            } } },
-        );
-        defer client_repo.deinit(io, allocator);
+        const Client = rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
+        const clone_opts: net.CloneOpts(void) = .{ .transport = .{ .wire = .{ .ssh = .{
+            .command = ssh_cmd_maybe,
+            .upload_pack_command = upload_pack_command,
+        } } } };
+        inline for (.{ false, true }) |bare| {
+            var opts = clone_opts;
+            opts.bare = bare;
+            var client_repo = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, opts);
+            defer cwd.deleteTree(io, client_path) catch {};
+            defer client_repo.deinit(io, allocator);
 
-        // make sure HEAD points to the right default branch
-        var current_branch_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
-        const head = try client_repo.head(io, &current_branch_buffer);
-        try std.testing.expectEqualStrings("main", head.ref.name);
+            var current_branch_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+            try std.testing.expectEqualStrings("main", (try client_repo.head(io, &current_branch_buffer)).ref.name);
+            try std.testing.expectEqual(bare, try client_repo.isBare(io, allocator));
+            if (bare) {
+                try std.testing.expectEqualStrings(&(try server_repo.readRef(io, .{ .kind = .head, .name = "main" })).?, &(try client_repo.readRef(io, .{ .kind = .head, .name = "main" })).?);
+                try std.testing.expectEqualStrings(&first, &(try client_repo.readRef(io, .{ .kind = .head, .name = "other" })).?);
+                try std.testing.expectError(error.FileNotFound, client_repo.core.repo_dir.access(io, "index", .{}));
+                try std.testing.expectError(error.FileNotFound, client_repo.core.work_dir.access(io, "hello.txt", .{}));
+            } else {
+                try client_repo.core.work_dir.access(io, "hello.txt", .{});
+            }
+        }
 
-        // make sure clone was successful
-        const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
-        defer hello_txt.close(io);
+        if (transport_def == .file) {
+            // leave HEAD pointing to a commit that no branch or tag reaches.
+            const detached = (try server_repo.readRef(io, .{ .kind = .head, .name = "main" })).?;
+            try server_repo.resetAdd(io, .{ .oid = &first });
+            const R = @TypeOf(server_repo);
+            const Ctx = struct {
+                core: *R.Core,
+                io: std.Io,
+                oid: *const [xit.hash.hexLen(hash_kind)]u8,
+
+                fn write(ctx: @This(), state: R.State(.read_write)) !void {
+                    try rf.replaceHead(server_repo_kind, .{ .hash = hash_kind, .is_test = true }, state, ctx.io, .{ .oid = ctx.oid });
+                }
+
+                pub fn run(ctx: @This(), cursor: *R.DB.Cursor(.read_write)) !void {
+                    var moment = try R.DB.HashMap(.read_write).init(cursor.*);
+                    try ctx.write(.{ .core = ctx.core, .extra = .{ .moment = &moment } });
+                }
+            };
+            const ctx = Ctx{ .core = &server_repo.core, .io = io, .oid = &detached };
+            switch (server_repo_kind) {
+                .git => try ctx.write(.{ .core = &server_repo.core, .extra = .{} }),
+                .xit => {
+                    try server_repo.core.db_file.lock(io, .exclusive);
+                    defer server_repo.core.db_file.unlock(io);
+                    const history = try R.DB.ArrayList(.read_write).init(server_repo.core.db.rootCursor());
+                    try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
+                },
+            }
+            var client_repo = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, .{ .bare = true });
+            defer client_repo.deinit(io, allocator);
+            var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+            try std.testing.expectEqualStrings(&detached, (try client_repo.head(io, &head_buffer)).oid);
+            var log = try client_repo.log(io, allocator, .{});
+            defer log.deinit();
+            var commit = (try log.next(allocator)).?;
+            defer commit.deinit();
+            try std.testing.expectEqualStrings(&detached, &commit.oid);
+        }
     }
 }
 
@@ -1390,27 +1500,11 @@ fn testFetchLarge(
     const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
-    var server_dir = try cwd.openDir(io, server_path, .{});
-    defer server_dir.close(io);
-
-    // copy files from current repo into server dir
-    for (&[_][]const u8{ "src", "docs" }) |dir_name| {
-        var src_repo_dir = try cwd.openDir(io, dir_name, .{ .iterate = true });
-        defer src_repo_dir.close(io);
-
-        var dest_repo_dir = try server_dir.createDirPathOpen(io, dir_name, .{});
-        defer dest_repo_dir.close(io);
-
-        try copyDir(io, src_repo_dir, dest_repo_dir);
-
-        try server_repo.add(io, allocator, &.{dir_name});
-    }
-
-    // make a commit
-    const commit1 = try server_repo.commit(io, allocator, .{ .message = "let there be light" });
+    // build the server tree directly from this project's source files.
+    const commit1 = try commitServer(&server_repo, io, allocator, .{ .dirs = &.{ "src", "docs" } }, .{ .message = "let there be light" });
 
     // export server repo
     {
@@ -1492,11 +1586,7 @@ fn testFetchLarge(
 
         // make another commit on the server
         const commit2 = blk: {
-            const extra_txt = try server_repo.core.work_dir.createFile(io, "extra.txt", .{ .truncate = true });
-            defer extra_txt.close(io);
-            try extra_txt.writeStreamingAll(io, "extra content");
-            try server_repo.add(io, allocator, &.{"extra.txt"});
-            break :blk try server_repo.commit(io, allocator, .{ .message = "add extra file" });
+            break :blk try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "extra.txt", .content = "extra content" }} }, .{ .message = "add extra file" });
         };
 
         // fetch with ref-in-want (git uses want-ref in protocol v2 when fetching named refs)
@@ -1592,17 +1682,9 @@ fn testPushLarge(
     const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
-    // add config
-    switch (transport_def) {
-        .file => try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "true" }),
-        .wire => {
-            try server_repo.addConfig(io, allocator, .{ .name = "core.bare", .value = "false" });
-            try server_repo.addConfig(io, allocator, .{ .name = "receive.denycurrentbranch", .value = "updateinstead" });
-        },
-    }
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
 
     // export server repo
@@ -1744,11 +1826,6 @@ fn testPushLarge(
                 .receive_pack_command = receive_pack_command,
             } } },
         );
-
-        if (transport_def == .file) {
-            // update the working dir
-            try server_repo.restore(io, allocator, ".");
-        }
     }
 
     // make sure push was successful
@@ -1756,8 +1833,12 @@ fn testPushLarge(
         const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit2, &oid_master);
 
-        const hello_txt = try temp_dir.openFile(io, "server/hello.txt", .{});
-        defer hello_txt.close(io);
+        var moment = try server_repo.core.latestMoment();
+        var tree = try xit.tree.Tree(server_repo_kind, server_repo.self_repo_opts).init(.{ .core = &server_repo.core, .extra = .{ .moment = &moment } }, io, allocator, &oid_master);
+        defer tree.deinit();
+        try std.testing.expect(tree.entries.contains("hello.txt"));
+        try std.testing.expectError(error.FileNotFound, server_repo.core.work_dir.access(io, "hello.txt", .{}));
+        try std.testing.expectError(error.FileNotFound, server_repo.core.repo_dir.access(io, "index", .{}));
     }
 }
 
@@ -1777,4 +1858,83 @@ fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
             else => {},
         }
     }
+}
+
+const ServerFiles = union(enum) {
+    files: []const struct { path: []const u8, content: []const u8 },
+    dirs: []const []const u8,
+};
+
+/// prepare blobs and a tree without ever writing the server's index or worktree.
+fn commitServer(repo: anytype, io: std.Io, allocator: std.mem.Allocator, files: ServerFiles, metadata: xit.object.CommitMetadata(repo.self_repo_opts.hash)) ![xit.hash.hexLen(repo.self_repo_opts.hash)]u8 {
+    const R = @TypeOf(repo.*);
+    const kind = repo.self_repo_kind;
+    const opts = repo.self_repo_opts;
+    const Index = xit.index.Index(kind, opts);
+    var tree: ?xit.object.Tree = null;
+    defer if (tree) |*t| t.deinit();
+    const Ctx = struct {
+        core: *R.Core,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        files: ServerFiles,
+        tree: *?xit.object.Tree,
+
+        fn addFile(ctx: @This(), state: R.State(.read_write), index: *Index, path: []const u8, content: []const u8) !void {
+            var reader = std.Io.Reader.fixed(content);
+            var oid: [xit.hash.byteLen(opts.hash)]u8 = undefined;
+            try xit.object.writeObject(kind, opts, state, ctx.io, ctx.allocator, &reader, .{ .kind = .blob, .size = content.len }, &oid);
+            const path_parts = try xit.fs.splitPath(ctx.allocator, path);
+            defer ctx.allocator.free(path_parts);
+            try index.addTreeEntryFile(&.{ .oid = oid, .mode = @bitCast(@as(u32, 0o100644)) }, path_parts, content.len, 0);
+        }
+
+        fn addDir(ctx: @This(), state: R.State(.read_write), index: *Index, path: []const u8) anyerror!void {
+            var dir = try std.Io.Dir.cwd().openDir(ctx.io, path, .{ .iterate = true });
+            defer dir.close(ctx.io);
+            var entries = dir.iterate();
+            while (try entries.next(ctx.io)) |entry| {
+                const child = try std.fs.path.join(ctx.allocator, &.{ path, entry.name });
+                defer ctx.allocator.free(child);
+                switch (entry.kind) {
+                    .directory => try ctx.addDir(state, index, child),
+                    .file => {
+                        const content = try dir.readFileAlloc(ctx.io, entry.name, ctx.allocator, .unlimited);
+                        defer ctx.allocator.free(content);
+                        try ctx.addFile(state, index, child, content);
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        fn build(ctx: @This(), state: R.State(.read_write)) !void {
+            const head = try rf.readHeadRecurMaybe(kind, opts, state.readOnly(), ctx.io);
+            var index = if (head) |oid| try Index.initFromCommit(state.readOnly(), ctx.io, ctx.allocator, &oid) else try Index.init(state.readOnly(), ctx.io, ctx.allocator);
+            defer index.deinit();
+            switch (ctx.files) {
+                .files => |updates| for (updates) |file| try ctx.addFile(state, &index, file.path, file.content),
+                .dirs => |dirs| for (dirs) |dir| try ctx.addDir(state, &index, dir),
+            }
+            ctx.tree.* = try xit.object.Tree.initFromIndex(kind, opts, state, ctx.io, ctx.allocator, &index);
+        }
+
+        pub fn run(ctx: @This(), cursor: *R.DB.Cursor(.read_write)) !void {
+            var moment = try R.DB.HashMap(.read_write).init(cursor.*);
+            try ctx.build(.{ .core = ctx.core, .extra = .{ .moment = &moment } });
+        }
+    };
+    const ctx = Ctx{ .core = &repo.core, .io = io, .allocator = allocator, .files = files, .tree = &tree };
+    switch (kind) {
+        .git => try ctx.build(.{ .core = &repo.core, .extra = .{} }),
+        .xit => {
+            try repo.core.db_file.lock(io, .exclusive);
+            defer repo.core.db_file.unlock(io);
+            const history = try R.DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
+        },
+    }
+    var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+    const head = try repo.head(io, &head_buffer);
+    return repo.commitAtRef(io, allocator, metadata, &tree.?, head.ref);
 }

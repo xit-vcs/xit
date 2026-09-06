@@ -60,17 +60,18 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             allocator: std.mem.Allocator,
             name: []const u8,
             url: []const u8,
+            fetch_refspec: ?[]const u8,
         ) !Remote(repo_kind, repo_opts) {
             switch (repo_kind) {
                 .git => {
                     var lock = try fs.LockFile.init(io, state.core.repo_dir, "config");
                     defer lock.deinit(io);
 
-                    try addConfig(.{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } }, io, allocator, name, url);
+                    try addConfig(.{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } }, io, allocator, name, url, fetch_refspec);
 
                     lock.success = true;
                 },
-                .xit => try addConfig(state, io, allocator, name, url),
+                .xit => try addConfig(state, io, allocator, name, url, fetch_refspec),
             }
 
             return try open(state.readOnly(), io, allocator, name);
@@ -186,6 +187,7 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             allocator: std.mem.Allocator,
             name: []const u8,
             url: []const u8,
+            fetch_refspec: ?[]const u8,
         ) !void {
             var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
             defer config.deinit();
@@ -201,8 +203,8 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 const config_name = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{name});
                 defer allocator.free(config_name);
 
-                const config_value = try std.fmt.allocPrint(allocator, "+refs/heads/*:refs/remotes/{s}/*", .{name});
-                defer allocator.free(config_value);
+                const config_value = fetch_refspec orelse try std.fmt.allocPrint(allocator, "+refs/heads/*:refs/remotes/{s}/*", .{name});
+                defer if (fetch_refspec == null) allocator.free(config_value);
 
                 try config.add(state, io, .{ .name = config_name, .value = config_value });
             }
@@ -619,6 +621,13 @@ pub fn push(
     defer remote.disconnect(io, allocator);
 }
 
+pub fn CloneOpts(comptime ProgressCtx: type) type {
+    return struct {
+        bare: bool = false,
+        transport: Opts(ProgressCtx) = .{},
+    };
+}
+
 pub fn clone(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -628,9 +637,10 @@ pub fn clone(
     cwd_path: []const u8,
     work_path: []const u8,
     global_config_path: ?[]const u8,
-    transport_opts: Opts(repo_opts.ProgressCtx),
+    clone_opts: CloneOpts(repo_opts.ProgressCtx),
 ) !rp.Repo(repo_kind, repo_opts) {
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{
+        .bare = clone_opts.bare,
         .cwd_path = cwd_path,
         .path = work_path,
         .create_default_branch = null,
@@ -644,7 +654,7 @@ pub fn clone(
     const transport_def = net_transport.TransportDefinition.init(io, cwd, url) orelse return error.UnsupportedUrl;
 
     switch (repo_kind) {
-        .git => try net_clone.cloneRemote(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, url, transport_def, transport_opts),
+        .git => try net_clone.cloneRemote(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, url, transport_def, clone_opts.transport),
         .xit => {
             const Ctx = struct {
                 core: *rp.Repo(repo_kind, repo_opts).Core,
@@ -674,7 +684,7 @@ pub fn clone(
                     .io = io,
                     .allocator = allocator,
                     .url = url,
-                    .transport_opts = transport_opts,
+                    .transport_opts = clone_opts.transport,
                 },
             );
         },

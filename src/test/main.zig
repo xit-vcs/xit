@@ -1524,7 +1524,8 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             defer config.deinit();
 
             const core_section = config.sections.get("core").?;
-            try std.testing.expectEqual(1, core_section.count());
+            try std.testing.expectEqual(2, core_section.count());
+            try std.testing.expectEqualStrings("false", core_section.get("bare").?);
 
             const branch_master_section = config.sections.get("branch.master").?;
             try std.testing.expectEqual(1, branch_master_section.count());

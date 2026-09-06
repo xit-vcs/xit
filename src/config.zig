@@ -56,8 +56,11 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             var local_sections: Sections = .empty;
 
             switch (repo_kind) {
-                .git => {
-                    var config_file = try state.core.repo_dir.createFile(io, "config", .{ .read = true, .truncate = false });
+                .git => git_config: {
+                    var config_file = state.core.repo_dir.openFile(io, "config", .{}) catch |err| switch (err) {
+                        error.FileNotFound => break :git_config,
+                        else => return err,
+                    };
                     defer config_file.close(io);
 
                     try parseFile(repo_kind, repo_opts, false, config_file, io, allocator, arena.allocator(), &local_sections);

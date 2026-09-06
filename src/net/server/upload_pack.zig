@@ -252,19 +252,8 @@ fn writePack(
         }
     } else {
         // the client already has everything it asked for,
-        // but the protocol still requires a (empty) pack
-        var header = [_]u8{0} ** 12;
-        @memcpy(header[0..4], "PACK");
-        std.mem.writeInt(u32, header[4..8], 2, .big);
-        std.mem.writeInt(u32, header[8..12], 0, .big);
-
-        var hasher = hash.Hasher(repo_opts.hash).init(.{});
-        hasher.update(&header);
-        var checksum = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-        hasher.final(&checksum);
-
-        try pkt.writePktLineSB(writer, 1, &header);
-        try pkt.writePktLineSB(writer, 1, &checksum);
+        // but the protocol still requires an empty pack
+        try pkt.writePktLineSB(writer, 1, &pack.emptyPack(repo_opts.hash));
     }
 
     try pkt.writePktFlush(writer);
