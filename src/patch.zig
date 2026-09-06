@@ -6,7 +6,7 @@ const obj = @import("./object.zig");
 const tr = @import("./tree.zig");
 const cfg = @import("./config.zig");
 
-// a globally-unique id representing a line.
+// an id representing a line within a file.
 // it's just the hash of the patch it came from,
 // and the number representing which line from
 // the patch it is. it's not that complicated.
@@ -299,21 +299,18 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 fn removePatch(comptime repo_opts: rp.RepoOpts(.xit), snapshot: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_write), path: []const u8) !void {
     const path_hash = hash.hashInt(repo_opts.hash, path);
 
-    if (try snapshot.cursor.readPath(void, &.{
-        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "path->line-id-list") } },
-        .{ .hash_map_get = .{ .key = path_hash } },
-    })) |_| {
-        const path_to_live_parent_to_children_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->live-parent->children"));
-        const path_to_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_live_parent_to_children_cursor);
-        _ = try path_to_live_parent_to_children.remove(path_hash);
-
-        const path_to_child_to_parent_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->child->parent"));
-        const path_to_child_to_parent = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_child_to_parent_cursor);
-        _ = try path_to_child_to_parent.remove(path_hash);
-
-        const path_to_line_id_list_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->line-id-list"));
-        const path_to_line_id_list = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_line_id_list_cursor);
-        _ = try path_to_line_id_list.remove(path_hash);
+    for ([_][]const u8{
+        "path->patch-id-set",
+        "path->live-parent->children",
+        "path->child->parent",
+        "path->line-id-list",
+    }) |name| {
+        const map_hash = hash.hashInt(repo_opts.hash, name);
+        if (try snapshot.getCursor(map_hash)) |_| {
+            const map_cursor = try snapshot.putCursor(map_hash);
+            const map = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(map_cursor);
+            _ = try map.remove(path_hash);
+        }
     }
 }
 
@@ -325,16 +322,13 @@ pub fn applyPatch(
     path_hash: hash.HashInt(repo_opts.hash),
     patch_hash: hash.HashInt(repo_opts.hash),
 ) !void {
-    // exit early if patch has already been applied
+    // exit early if this patch has already been applied to this file
     if (try snapshot.cursor.readPath(void, &.{
-        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "patch-id-set") } },
-        .{ .hash_map_get = .{ .value = patch_hash } },
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "path->patch-id-set") } },
+        .{ .hash_map_get = .{ .value = path_hash } },
+        .{ .hash_map_get = .{ .key = patch_hash } },
     })) |_| {
         return;
-    } else {
-        const patch_id_set_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "patch-id-set"));
-        const patch_id_set = try rp.Repo(.xit, repo_opts).DB.HashSet(.read_write).init(patch_id_set_cursor);
-        try patch_id_set.put(patch_hash, .{ .slot = .{ .tag = .none } });
     }
 
     var change_list_cursor = (try moment.cursor.readPath(void, &.{
@@ -476,52 +470,55 @@ pub fn applyPatch(
         }
     }
 
-    // init line id list
-    const path_to_line_id_list_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->line-id-list"));
-    const path_to_line_id_list = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_line_id_list_cursor);
-    try path_to_line_id_list.putKey(path_hash, .{ .slot = path_slot });
-    var line_id_list_cursor = try path_to_line_id_list.putCursor(path_hash);
-    var line_id_list_write_buffer: [repo_opts.buffer_size]u8 = undefined;
-    var line_id_list_writer = try line_id_list_cursor.writer(&line_id_list_write_buffer);
+    line_list: {
+        // init line id list
+        const path_to_line_id_list_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->line-id-list"));
+        const path_to_line_id_list = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_line_id_list_cursor);
+        try path_to_line_id_list.putKey(path_hash, .{ .slot = path_slot });
+        var line_id_list_cursor = try path_to_line_id_list.putCursor(path_hash);
+        var line_id_list_write_buffer: [repo_opts.buffer_size]u8 = undefined;
+        var line_id_list_writer = try line_id_list_cursor.writer(&line_id_list_write_buffer);
 
-    var current_line_id_int = LineId(repo_opts.hash).first_int;
+        var current_line_id_int = LineId(repo_opts.hash).first_int;
 
-    while (true) {
-        const current_line_id_bytes = hash.intToBytes(LineId(repo_opts.hash).Int, current_line_id_int);
-        const current_line_id_hash = hash.hashInt(repo_opts.hash, &current_line_id_bytes);
+        while (true) {
+            const current_line_id_bytes = hash.intToBytes(LineId(repo_opts.hash).Int, current_line_id_int);
+            const current_line_id_hash = hash.hashInt(repo_opts.hash, &current_line_id_bytes);
 
-        if (try live_parent_to_children.getCursor(current_line_id_hash)) |children_cursor| {
+            const children_cursor = (try live_parent_to_children.getCursor(current_line_id_hash)) orelse break;
             var children_iter = try children_cursor.iterator();
+            const child_cursor = (try children_iter.next()) orelse break;
 
-            if (try children_iter.next()) |child_cursor| {
-                // if there are any other children, remove the line list
-                // because there is a conflict, and thus the line map
-                // cannot be "flattened" into a list
-                if (try children_iter.next() != null) {
-                    _ = try path_to_line_id_list.remove(path_hash);
-                    return;
-                }
-                // append child to the line list
-                else {
-                    var kv_pair_cursor = try child_cursor.readKeyValuePair();
-                    var key_read_buffer: [repo_opts.buffer_size]u8 = undefined;
-                    var key_reader = try kv_pair_cursor.key_cursor.reader(&key_read_buffer);
-                    const child_bytes = try key_reader.interface.takeArray(LineId(repo_opts.hash).byte_size);
-
-                    const line_id_position = kv_pair_cursor.key_cursor.slot().value;
-                    try line_id_list_writer.interface.writeInt(u64, line_id_position, .big);
-
-                    current_line_id_int = std.mem.readInt(LineId(repo_opts.hash).Int, child_bytes, .big);
-                }
-            } else {
-                break;
+            // if there are any other children, remove the line list
+            // because there is a conflict, and thus the line map
+            // cannot be "flattened" into a list
+            if (try children_iter.next() != null) {
+                _ = try path_to_line_id_list.remove(path_hash);
+                break :line_list;
             }
-        } else {
-            break;
+
+            // append child to the line list
+            var kv_pair_cursor = try child_cursor.readKeyValuePair();
+            var key_read_buffer: [repo_opts.buffer_size]u8 = undefined;
+            var key_reader = try kv_pair_cursor.key_cursor.reader(&key_read_buffer);
+            const child_bytes = try key_reader.interface.takeArray(LineId(repo_opts.hash).byte_size);
+
+            const line_id_position = kv_pair_cursor.key_cursor.slot().value;
+            try line_id_list_writer.interface.writeInt(u64, line_id_position, .big);
+
+            current_line_id_int = std.mem.readInt(LineId(repo_opts.hash).Int, child_bytes, .big);
         }
+
+        try line_id_list_writer.finish();
     }
 
-    try line_id_list_writer.finish();
+    // a conflict still counts as applied, even though it has no line list
+    const path_to_patch_id_set_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->patch-id-set"));
+    const path_to_patch_id_set = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_patch_id_set_cursor);
+    try path_to_patch_id_set.putKey(path_hash, .{ .slot = path_slot });
+    const patch_id_set_cursor = try path_to_patch_id_set.putCursor(path_hash);
+    const patch_id_set = try rp.Repo(.xit, repo_opts).DB.HashSet(.read_write).init(patch_id_set_cursor);
+    try patch_id_set.put(patch_hash, .{ .uint = 1 });
 }
 
 fn writePatch(

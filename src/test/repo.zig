@@ -8,6 +8,7 @@ const rf = @import("../ref.zig");
 const obj = @import("../object.zig");
 const mrg = @import("../merge.zig");
 const ui = @import("../ui.zig");
+const patch = @import("../patch.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -448,6 +449,154 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
     const actual = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(4096));
     defer allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
+}
+
+test "applied patches" {
+    try testAppliedPatches(.repeat);
+    try testAppliedPatches(.later_edit);
+    try testAppliedPatches(.conflict);
+    try testAppliedPatches(.rollback);
+    try testAppliedPatches(.discard);
+    try testAppliedPatches(.merge);
+}
+
+fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, discard, merge }) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    const DB = rp.Repo(.xit, opts).DB;
+    errdefer std.debug.print("applied patches: {s}\n", .{@tagName(case)});
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    // both files should share patch ids, but track their application separately
+    const paths = [_][]const u8{ "a.txt", "b.txt" };
+    for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nb\nc\nd\ne");
+    const root_oid = try repo.commit(io, allocator, .{ .message = "root", .timestamp = 1 });
+    for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nB\nc\nd\ne");
+    const target_oid = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 2 });
+    try repo.addBranch(io, .{ .name = "target" });
+    const source_content = switch (case) {
+        .later_edit => "a\nBB\nc\nd\ne",
+        .conflict => "a\nother\nc\nd\ne",
+        else => "a\nb\nc\nd\nE",
+    };
+    for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, source_content);
+    const source_oid = try repo.commit(io, allocator, .{
+        .message = "source",
+        .parent_oids = &.{if (case == .later_edit) target_oid else root_oid},
+        .timestamp = 3,
+    });
+    try repo.patchAll(io, allocator, null);
+
+    if (case == .merge) {
+        var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
+        defer result.deinit();
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = .patch, .source = &.{.{ .oid = &source_oid }} } } }, null);
+        defer merge.deinit();
+        try std.testing.expect(merge.result == .success);
+        for (paths) |path| {
+            const content = try repo.core.work_dir.readFileAlloc(io, path, allocator, .limited(4096));
+            defer allocator.free(content);
+            try std.testing.expectEqualStrings("a\nB\nc\nd\nE", content);
+        }
+        return;
+    }
+    if (case == .discard) {
+        try addFile(.xit, opts, &repo, io, allocator, paths[0], "\xffbinary");
+        const binary_oid = try repo.commit(io, allocator, .{ .message = "binary", .timestamp = 4 });
+        try repo.patchAll(io, allocator, null);
+        const moment = try repo.core.latestMoment();
+        for (paths, 0..) |path, i| {
+            const membership = try moment.cursor.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &binary_oid) } },
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id-set") } },
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, path) } },
+            });
+            try std.testing.expectEqual(i != 0, membership != null);
+        }
+        return;
+    }
+
+    const Ctx = struct {
+        case: @TypeOf(case),
+        snapshot_oid: [hash.hexLen(opts.hash)]u8,
+        patch_oid: [hash.hexLen(opts.hash)]u8,
+
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            var moment = try DB.HashMap(.read_write).init(cursor.*);
+            const snapshots = try DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(opts.hash, "commit-id->snapshot"))).?);
+            const original = (try snapshots.getCursor(try hash.hexToInt(opts.hash, &ctx.snapshot_oid))).?;
+            var snapshot_cursor = try moment.putCursor(hash.hashInt(opts.hash, "test-patch-snapshot"));
+            try snapshot_cursor.write(.{ .slot = original.slot() });
+            const snapshot = try DB.HashMap(.read_write).init(snapshot_cursor);
+            const patch_snapshot = (try snapshots.getCursor(try hash.hexToInt(opts.hash, &ctx.patch_oid))).?;
+            var patch_ids: [2][hash.byteLen(opts.hash)]u8 = undefined;
+            for (paths, &patch_ids) |path, *patch_id| {
+                const patch_cursor = (try patch_snapshot.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id") } },
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, path) } },
+                })).?;
+                _ = try patch_cursor.readBytes(patch_id);
+            }
+            try std.testing.expectEqualSlices(u8, &patch_ids[0], &patch_ids[1]);
+            const patch_id = hash.bytesToInt(opts.hash, &patch_ids[0]);
+            const path_hash = hash.hashInt(opts.hash, paths[0]);
+
+            if (ctx.case == .rollback) {
+                // fail after the patch's graph changes, not before application starts
+                const changes = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "patch-id->change-list")));
+                const bytes = try (try changes.getCursor(patch_id)).?.readBytesAlloc(allocator, opts.max_read_size);
+                defer allocator.free(bytes);
+                const invalid = try std.mem.concat(allocator, u8, &.{ bytes, "\xff" });
+                defer allocator.free(invalid);
+                try changes.put(patch_id, .{ .bytes = invalid });
+            }
+            var read_moment = moment.readOnly();
+            if (ctx.case != .later_edit) {
+                try patch.applyPatch(opts, &read_moment, &snapshot, allocator, path_hash, patch_id);
+            }
+            const membership = try snapshot.cursor.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id-set") } },
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .hash_map_get = .{ .key = patch_id } },
+            });
+            try std.testing.expect(membership != null);
+            const line_list = try snapshot.cursor.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->line-id-list") } },
+                .{ .hash_map_get = .{ .value = path_hash } },
+            });
+            try std.testing.expectEqual(ctx.case != .conflict, line_list != null);
+
+            // freezing forces any writes to copy existing data.
+            // applying the patch again should make no changes at all.
+            try cursor.db.freeze();
+            const size_before = try cursor.db.core.length();
+            try patch.applyPatch(opts, &read_moment, &snapshot, allocator, path_hash, patch_id);
+            try std.testing.expectEqual(size_before, try cursor.db.core.length());
+        }
+    };
+    const ctx = Ctx{
+        .case = case,
+        .snapshot_oid = if (case == .later_edit) source_oid else target_oid,
+        .patch_oid = if (case == .later_edit) target_oid else source_oid,
+    };
+    const before = try repo.core.latestMoment();
+    try repo.core.db_file.lock(io, .exclusive);
+    defer repo.core.db_file.unlock(io);
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    if (case == .rollback) {
+        try std.testing.expectError(error.InvalidEnumTag, history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx));
+        const after = try repo.core.latestMoment();
+        try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
+    } else {
+        try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
+    }
 }
 
 test "merge at ref" {
