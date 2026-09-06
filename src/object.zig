@@ -412,11 +412,7 @@ pub fn writeCommitWithoutRef(
     const author = metadata.author orelse return error.AuthorNotFound;
     const timestamp: i64 = @intCast(metadata.timestamp);
     for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
-        const has_date = if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| end + 1 < identity.len else false;
-        try metadata_lines.append(arena.allocator(), if (has_date)
-            try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ kind, identity })
-        else
-            try std.fmt.allocPrint(arena.allocator(), "{s} {s} {} +0000", .{ kind, identity, timestamp }));
+        try metadata_lines.append(arena.allocator(), try formatCommitIdentity(arena.allocator(), kind, identity, timestamp));
     }
     try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
 
@@ -525,19 +521,16 @@ pub fn writeCommit(
             @intCast(metadata.timestamp)
         else if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
-        const author = metadata.author orelse auth_blk: {
-            if (repo_opts.is_test) break :auth_blk "radar <radar@roark>";
-            const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
-            const name = user_section.get("name") orelse return error.UserConfigNotFound;
-            const email = user_section.get("email") orelse return error.UserConfigNotFound;
-            break :auth_blk try std.fmt.allocPrint(arena.allocator(), "{s} <{s}>", .{ name, email });
-        };
-        for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
-            const has_date = if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| end + 1 < identity.len else false;
-            try metadata_lines.append(arena.allocator(), if (has_date)
-                try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ kind, identity })
-            else
-                try std.fmt.allocPrint(arena.allocator(), "{s} {s} {} +0000", .{ kind, identity, ts }));
+        // a copied author must not become the default committer
+        for ([_][]const u8{ "author", "committer" }, [_]?[]const u8{ metadata.author, metadata.committer }) |kind, identity_maybe| {
+            const identity = identity_maybe orelse identity_blk: {
+                if (repo_opts.is_test) break :identity_blk "radar <radar@roark>";
+                const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
+                const name = user_section.get("name") orelse return error.UserConfigNotFound;
+                const email = user_section.get("email") orelse return error.UserConfigNotFound;
+                break :identity_blk try std.fmt.allocPrint(arena.allocator(), "{s} <{s}>", .{ name, email });
+            };
+            try metadata_lines.append(arena.allocator(), try formatCommitIdentity(arena.allocator(), kind, identity, ts));
         }
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
@@ -580,6 +573,22 @@ pub fn writeCommit(
     try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
 
     return commit_hash_hex;
+}
+
+fn formatCommitIdentity(allocator: std.mem.Allocator, kind: []const u8, value: []const u8, timestamp: i64) ![]u8 {
+    const identity = std.mem.trimEnd(u8, value, " \t");
+    if (identity.len == 0 or std.mem.indexOfAny(u8, identity, "\r\n") != null) return error.InvalidCommitIdentity;
+    if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| {
+        var date = std.mem.tokenizeAny(u8, identity[end + 1 ..], " \t");
+        if (date.next()) |seconds| {
+            _ = std.fmt.parseInt(u64, seconds, 10) catch return error.InvalidCommitIdentity;
+            const zone = date.next() orelse return error.InvalidCommitIdentity;
+            if (date.next() != null or zone.len != 5 or (zone[0] != '+' and zone[0] != '-')) return error.InvalidCommitIdentity;
+            for (zone[1..]) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidCommitIdentity;
+            return std.fmt.allocPrint(allocator, "{s} {s} {s} {s}", .{ kind, identity[0 .. end + 1], seconds, zone });
+        }
+    }
+    return std.fmt.allocPrint(allocator, "{s} {s} {} +0000", .{ kind, identity, timestamp });
 }
 
 pub fn writeTag(

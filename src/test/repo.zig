@@ -3443,7 +3443,10 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
     const message = "d\n\nmessage body\n";
-    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com> 123 +0530", .committer = "bob <bob@example.com> 456 -0700", .timestamp = 456 });
+    for ([_][]const u8{ "bob <bob@example.com> nope +0000", "bob <bob@example.com> 123", "bob <bob@example.com> 123 +00x0", "bob <bob@example.com> 123 +0000 extra" }) |identity| {
+        try std.testing.expectError(error.InvalidCommitIdentity, repo.commit(io, allocator, .{ .message = message, .committer = identity }));
+    }
+    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com> 123 +0530 \t", .committer = "bob <bob@example.com> 456 -0700 \t", .timestamp = 456 });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3501,7 +3504,7 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         try commit.readMessage(allocator, &actual, .limited(4096));
         try std.testing.expectEqualStrings(message, actual.items);
         try std.testing.expectEqualStrings("alice <alice@example.com> 123 +0530", commit.content.commit.metadata.author.?);
-        try std.testing.expectEqualStrings("bob <bob@example.com> 456 -0700", commit.content.commit.metadata.committer.?);
+        try std.testing.expectEqualStrings("radar <radar@roark> 0 +0000", commit.content.commit.metadata.committer.?);
     }
 
     // make sure stuff.md does not exist
@@ -3568,7 +3571,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
     const message = "d\n\nmessage body\n";
-    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com>", .committer = "bob <bob@example.com>", .timestamp = 456 });
+    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com> \t", .committer = "bob <bob@example.com> \t", .timestamp = 456 });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3649,7 +3652,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
         try commit.readMessage(allocator, &actual, .limited(4096));
         try std.testing.expectEqualStrings(message, actual.items);
         try std.testing.expectEqualStrings("alice <alice@example.com> 456 +0000", commit.content.commit.metadata.author.?);
-        try std.testing.expectEqualStrings("bob <bob@example.com> 456 +0000", commit.content.commit.metadata.committer.?);
+        try std.testing.expectEqualStrings("radar <radar@roark> 0 +0000", commit.content.commit.metadata.committer.?);
     }
 }
 

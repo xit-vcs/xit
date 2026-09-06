@@ -1655,24 +1655,26 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // create commit message
-                    var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse switch (merge_input.kind) {
-                        .full => .{
-                            .message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name}),
+                    var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
+                    switch (merge_input.kind) {
+                        .full => if (merge_input.commit_metadata == null) {
+                            commit_metadata.message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name});
                         },
-                        .pick => blk: {
+                        .pick => {
+                            // preserve the author and message, with a new committer and date
                             var object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
                             const metadata = object.content.commit.metadata;
-                            var message: std.ArrayList(u8) = .empty;
-                            try object.readMessage(arena.allocator(), &message, .limited(repo_opts.max_read_size));
-                            break :blk .{
-                                .author = if (metadata.author) |author| try arena.allocator().dupe(u8, author) else null,
-                                .committer = if (metadata.committer) |committer| try arena.allocator().dupe(u8, committer) else null,
-                                .timestamp = metadata.timestamp,
-                                .message = message.items,
-                            };
+                            if (commit_metadata.author == null) {
+                                commit_metadata.author = if (metadata.author) |author| try arena.allocator().dupe(u8, author) else null;
+                            }
+                            if (commit_metadata.message.len == 0) {
+                                var message: std.ArrayList(u8) = .empty;
+                                try object.readMessage(arena.allocator(), &message, .limited(repo_opts.max_read_size));
+                                commit_metadata.message = message.items;
+                            }
                         },
-                    };
+                    }
 
                     if (target_ref_maybe == null) {
                         try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
@@ -1774,10 +1776,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         if (commit_metadata.author == null) {
                             commit_metadata.author = if (metadata.author) |author| try arena.allocator().dupe(u8, author) else null;
                         }
-                        if (commit_metadata.committer == null) {
-                            commit_metadata.committer = if (metadata.committer) |committer| try arena.allocator().dupe(u8, committer) else null;
-                        }
-                        if (commit_metadata.timestamp == 0) commit_metadata.timestamp = metadata.timestamp;
                     }
                     commit_metadata.message = state.core.repo_dir.readFileAlloc(io, merge_msg_name, arena.allocator(), .limited(repo_opts.max_read_size)) catch |err| switch (err) {
                         error.FileNotFound => return error.MergeMessageNotFound,
