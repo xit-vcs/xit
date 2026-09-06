@@ -732,6 +732,18 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             .parent_oids = if (i == 0) &.{} else &.{oids[0]},
             .timestamp = i + 1,
         }, &tree, .{ .kind = .head, .name = names[i] });
+        if (repo_kind == .xit and i == 0) {
+            // a mode-only commit inherits the entire file's patch state.
+            try tree.addBlobEntry(@bitCast(@as(u32, 0o100755)), "f.txt", &status.index.entries.get("f.txt").?[0].?.oid);
+            const mode_oid = try repo.commitAtRef(io, allocator, .{ .message = "mode only", .parent_oids = &.{oids[0]} }, &tree, .{ .kind = .head, .name = "mode_only" });
+            try repo.patchAll(io, allocator, null);
+            const moment = try repo.core.latestMoment();
+            const snapshots = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
+            const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
+            const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
+            const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{.{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } }};
+            try std.testing.expectEqualDeep(try before.readPathSlot(void, path), try after.readPathSlot(void, path));
+        }
     }
     for ([_]usize{ 1, 2 }) |target| {
         const source = 3 - target;
@@ -773,12 +785,14 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
 
     const initial = "a\nb\nc\nd\ne\nf\ng";
     try addFile(.xit, opts, &repo, io, allocator, "f.txt", initial);
+    if (case == .multiple) try addFile(.xit, opts, &repo, io, allocator, "g.txt", initial);
     const root_oid = try repo.commit(io, allocator, .{ .message = "root", .timestamp = 1 });
     const base_oid = if (case == .second_parent) blk: {
         try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nc\nd\ne\nf\nbase");
         break :blk try repo.commit(io, allocator, .{ .message = "base", .timestamp = 2 });
     } else root_oid;
     try addFile(.xit, opts, &repo, io, allocator, "f.txt", if (case == .second_parent) "A\nb\nc\nd\ne\nf\nbase" else "A\nb\nc\nd\ne\nf\ng");
+    if (case == .multiple) try addFile(.xit, opts, &repo, io, allocator, "g.txt", "target\nb\nc\nd\ne\nf\ng");
     _ = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 3 });
     try repo.addBranch(io, .{ .name = "target" });
 
@@ -786,6 +800,7 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
         .multiple, .dependent => blk: {
             // unrelated commits inherit the previous patch id, including the base's
             try addFile(.xit, opts, &repo, io, allocator, "f.txt", initial);
+            if (case == .multiple) try addFile(.xit, opts, &repo, io, allocator, "g.txt", initial);
             try addFile(.xit, opts, &repo, io, allocator, "other.txt", "before");
             _ = try repo.commit(io, allocator, .{ .message = "unrelated before", .parent_oids = &.{root_oid}, .timestamp = 4 });
             const sources: []const []const u8 = if (case == .multiple) &.{
@@ -799,6 +814,8 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
                 try addFile(.xit, opts, &repo, io, allocator, "f.txt", source);
                 _ = try repo.commit(io, allocator, .{ .message = "source", .timestamp = 5 + i * 2 });
                 try addFile(.xit, opts, &repo, io, allocator, "other.txt", source);
+                // the files share a history but introduce different patches
+                if (case == .multiple and i == 0) try addFile(.xit, opts, &repo, io, allocator, "g.txt", "a\nb\nc\nd\nsource\nf\ng");
                 _ = try repo.commit(io, allocator, .{ .message = "unrelated after", .timestamp = 6 + i * 2 });
             }
             break :blk if (case == .multiple) "A\nb\nC\nd\ne\nf\nG" else "A\nb\nnew\nmore\nc\nd\ne\nf\ng";
@@ -851,17 +868,39 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
     const actual = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(4096));
     defer allocator.free(actual);
     try std.testing.expectEqualStrings(expected, actual);
+    if (case == .multiple) {
+        const other = try repo.core.work_dir.readFileAlloc(io, "g.txt", allocator, .limited(4096));
+        defer allocator.free(other);
+        try std.testing.expectEqualStrings("target\nb\nc\nd\nsource\nf\ng", other);
+    }
 }
 
 test "applied patches" {
     try testAppliedPatches(.repeat);
+    try testAppliedPatches(.history);
     try testAppliedPatches(.later_edit);
     try testAppliedPatches(.conflict);
     try testAppliedPatches(.rollback);
     try testAppliedPatches(.merge);
+    try testMergeEdits(.{ .name = "shared replacement with context", .rebuild = true, .shared_gaps = true, .target = &.{ "a\nB\nc\nd\ne", "longer\nB\nc\nd\ne" }, .source = &.{"a\nB\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "longer\nB\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "shared insertion with context", .target = &.{ "longer\nb\nc\nd\ne", "longer\nb\nX\nc\nd\ne" }, .source = &.{"a\nb\nX\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "longer\nb\nX\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "different locations", .target = &.{"a\nX\nb\nc\nd\ne"}, .source = &.{"a\nb\nc\nX\nd\ne"}, .shared_edits = 0, .expected = &.{.{ .text = "a\nX\nb\nc\nX\nd\ne" }} });
+    try testMergeEdits(.{ .name = "reinsertion", .max_position_depth = 3, .target = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne", "a\nb\nc\nd\ne", "a\nb\nX\nc\nd\ne", "a\nb\nc\nd\ne", "a\nb\nX\nc\nd\ne" }, .source = &.{"a\nb\nc\nd\nE"}, .shared_edits = 0, .expected = &.{.{ .text = "a\nb\nX\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "delete earlier insertion", .target = &.{ "a\nb\nX\nc\nd\ne", "a\ne", "a\nE" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\nE" }} });
+    try testMergeEdits(.{ .name = "partially delete earlier insertion", .target = &.{ "a\nb\nX\nY\nc\nd\ne", "a\nY\nc\nd\ne", "a\nY\nc\nd\nE" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\nY\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "delete earlier replacement", .target = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne", "a\ne", "a\nE" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\nE" }} });
+    try testMergeEdits(.{ .name = "delete around removed insertion", .target = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nc\nd\ne", "a\ne", "a\nE" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\nE" }} });
+    try testMergeEdits(.{ .name = "neighboring replacement preserves gap", .target = &.{ "a\nB\nc\nd\ne", "a\nB\nX\nc\nd\ne" }, .source = &.{"a\nb\nX\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "a\nB\nX\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "shared deletion with context", .target = &.{ "a\nc\nd\ne", "A\nc\nd\ne" }, .source = &.{"a\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "A\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "reordered deletions", .base = "a\ne", .rebuild = true, .max_position_depth = 3, .target = &.{ "a\nb\nc\nd\ne", "a\nb\nd\ne", "a\nd\ne", "a\ne", "a\nX\ne", "A\nX\ne" }, .source = &.{ "a\nb\nc\nd\ne", "a\nb\nd\ne", "a\nb\ne", "a\ne", "a\nX\ne", "a\nX\nE" }, .shared_edits = 5, .expected = &.{.{ .text = "A\nX\nE" }} });
+    try testMergeEdits(.{ .name = "beginning and end", .max_position_depth = 3, .target = &.{ "X\na\nb\nc\nd\ne\nY", "a\nb\nc\nd\ne", "X\na\nb\nc\nd\ne\nY" }, .source = &.{"a\nB\nc\nd\ne"}, .expected = &.{.{ .text = "X\na\nB\nc\nd\ne\nY" }} });
+    try testMergeEdits(.{ .name = "editing a replacement", .target = &.{ "a\nu\nv\nc\nd\ne", "a\nu\nx\nv\nc\nd\ne", "a\np\nq\nx\nv\nc\nd\ne" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\np\nq\nx\nv\nc\nd\ne" }} });
+    try testMergeEdits(.{ .name = "insertions in nested replacement", .target = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\ny\nw\nv\nd\ne" }, .source = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nz\ny\nv\nd\ne" }, .expected = &.{.{ .text = "a\nx\nz\ny\nw\nv\nd\ne" }} });
+    try testMergeEdits(.{ .name = "large edit record", .shared_gaps = true, .target = &.{"a\n" ++ ("B" ** 6000) ++ "\nc\nd\ne"}, .source = &.{"a\nb\nc\nd\nE"}, .expected = &.{.{ .text = "a\n" ++ ("B" ** 6000) ++ "\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .shared_gap_chunks = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{ ("A\nb\n" ** 220) ++ "c\nd", ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nd" }, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nD" }} });
 }
 
-fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge }) !void {
+fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollback, merge }) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
@@ -881,6 +920,19 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
 
     // both files should share patch ids, but track their application separately
     const paths = [_][]const u8{ "a.txt", "b.txt" };
+    if (case == .history) {
+        // the historical text alone exceeds the patch application's budget
+        var old_text = [_]u8{'x'} ** 8192;
+        for (0..64) |i| {
+            _ = try std.fmt.bufPrint(old_text[0..8], "{d:0>8}", .{i});
+            for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, &old_text);
+            _ = try repo.commit(io, allocator, .{ .message = "old text", .timestamp = 0 });
+        }
+        // the root below inserts a line after this replacement history
+        for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nb\nc\nd");
+        _ = try repo.commit(io, allocator, .{ .message = "text", .timestamp = 0 });
+    }
+
     for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nb\nc\nd\ne");
     const root_oid = try repo.commit(io, allocator, .{ .message = "root", .timestamp = 1 });
     for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nB\nc\nd\ne");
@@ -897,9 +949,84 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
         .parent_oids = &.{if (case == .later_edit) target_oid else root_oid},
         .timestamp = 3,
     });
+    const third_oid = if (case == .conflict or case == .history) blk: {
+        try repo.addBranch(io, .{ .name = "source" });
+        for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nthird\nc\nd\ne");
+        break :blk try repo.commit(io, allocator, .{ .message = "third", .parent_oids = &.{root_oid}, .timestamp = 4 });
+    } else null;
     try repo.patchAll(io, allocator, null);
+    if (case == .history) _ = try repo.garbageCollect(io, allocator, &.{});
 
     if (case == .merge) {
+        // missing cache data should allow a merge, but damaged patches must fail.
+        const Metadata = enum { depths, depth, invalid_depth, missing_patch, missing_edit };
+        const MergeCtx = struct {
+            core: *rp.Repo(.xit, opts).Core,
+            source_oid: [hash.hexLen(opts.hash)]u8,
+            metadata: Metadata,
+
+            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                var moment = try DB.HashMap(.read_write).init(cursor.*);
+                const state: rp.Repo(.xit, opts).State(.read_write) = .{ .core = ctx.core, .extra = .{ .moment = &moment } };
+                const depth_key = hash.hashInt(opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
+                switch (ctx.metadata) {
+                    .depths => {
+                        _ = try moment.remove(depth_key);
+                    },
+                    .depth, .invalid_depth => {
+                        const depths = try DB.HashMap(.read_write).init(try moment.putCursor(depth_key));
+                        const id = try hash.hexToInt(opts.hash, &ctx.source_oid);
+                        if (ctx.metadata == .depth) {
+                            _ = try depths.remove(id);
+                        } else try depths.put(id, .{ .bytes = "bad" });
+                    },
+                    .missing_patch, .missing_edit => {
+                        const entry = (try moment.cursor.readPath(void, &.{
+                            .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                            .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &ctx.source_oid) } },
+                            .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, paths[0]) } },
+                            .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                        })).?;
+                        var bytes: [hash.byteLen(opts.hash)]u8 = undefined;
+                        _ = try entry.readBytes(&bytes);
+                        const patches = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "patch-id->edit-list")));
+                        const id = hash.bytesToInt(opts.hash, &bytes);
+                        if (ctx.metadata == .missing_patch) {
+                            _ = try patches.remove(id);
+                        } else {
+                            _ = try (try patches.getCursor(id)).?.readBytes(&bytes);
+                            const edits = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
+                            _ = try edits.remove(hash.bytesToInt(opts.hash, &bytes));
+                        }
+                    },
+                }
+                const result = mrg.Merge(.xit, opts).init(state, io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = .patch, .source = &.{.{ .oid = &ctx.source_oid }} } } }, .{ .kind = .head, .name = "target" }, null);
+                switch (ctx.metadata) {
+                    .invalid_depth => try std.testing.expectError(error.UnexpectedTag, result),
+                    .missing_patch => try std.testing.expectError(error.PatchNotFound, result),
+                    .missing_edit => try std.testing.expectError(error.EditNotFound, result),
+                    else => {
+                        var merge = try result;
+                        defer merge.deinit();
+                        try std.testing.expect(merge.result == .success);
+                        for (paths) |path| {
+                            var reader = try obj.ObjectReader(.xit, opts).init(state.readOnly(), io, allocator, &std.fmt.bytesToHex(merge.changes.get(path).?.new.?.oid, .lower));
+                            defer reader.deinit();
+                            var text: [9]u8 = undefined;
+                            try reader.interface.readSliceAll(&text);
+                            try std.testing.expectEqualStrings("a\nB\nc\nd\nE", &text);
+                        }
+                    },
+                }
+                // restore the metadata and target ref before the next merge.
+                return error.CancelTransaction;
+            }
+        };
+        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+        for ([_]Metadata{ .depths, .depth, .invalid_depth, .missing_patch, .missing_edit }) |metadata| {
+            errdefer std.debug.print("merge metadata: {s}\n", .{@tagName(metadata)});
+            try std.testing.expectError(error.CancelTransaction, history.appendContext(.{ .slot = try history.getSlot(-1) }, MergeCtx{ .core = &repo.core, .source_oid = source_oid, .metadata = metadata }));
+        }
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
         defer result.deinit();
         var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = .patch, .source = &.{.{ .oid = &source_oid }} } } }, null);
@@ -917,6 +1044,9 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
         case: @TypeOf(case),
         snapshot_oid: [hash.hexLen(opts.hash)]u8,
         patch_oid: [hash.hexLen(opts.hash)]u8,
+        third_oid: ?[hash.hexLen(opts.hash)]u8,
+        corruption: enum { count, gap, placement, text } = .count,
+        create: bool = false,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -929,8 +1059,8 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
             var patch_ids: [2][hash.byteLen(opts.hash)]u8 = undefined;
             for (paths, &patch_ids) |path, *patch_id| {
                 const patch_cursor = (try patch_snapshot.readPath(void, &.{
-                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id") } },
                     .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, path) } },
+                    .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
                 })).?;
                 _ = try patch_cursor.readBytes(patch_id);
             }
@@ -938,40 +1068,95 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
             const patch_id = hash.bytesToInt(opts.hash, &patch_ids[0]);
             const path_hash = hash.hashInt(opts.hash, paths[0]);
 
+            const edit_list = (try moment.cursor.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "patch-id->edit-list") } },
+                .{ .hash_map_get = .{ .value = patch_id } },
+            })).?;
+            const edit_bytes = try edit_list.readBytesAlloc(allocator, opts.max_read_size);
+            defer allocator.free(edit_bytes);
+            const edit_id = std.mem.readInt(hash.HashInt(opts.hash), edit_bytes[0..comptime hash.byteLen(opts.hash)], .big);
             if (ctx.case == .rollback) {
-                // fail after the patch's graph changes, not before application starts
-                const changes = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "patch-id->change-list")));
-                const bytes = try (try changes.getCursor(patch_id)).?.readBytesAlloc(allocator, opts.max_read_size);
-                defer allocator.free(bytes);
-                const invalid = try std.mem.concat(allocator, u8, &.{ bytes, "\xff" });
-                defer allocator.free(invalid);
-                try changes.put(patch_id, .{ .bytes = invalid });
+                // a malformed edit must leave the original snapshot intact
+                const records = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
+                switch (ctx.corruption) {
+                    .count => try records.put(edit_id, .{ .bytes = "\xff\xff\xff\xff" }),
+                    .gap => try records.put(edit_id, .{ .bytes = "\x00\x00\x00\x00" ++ "\x00\x00\x00\x01x" ++ "\xff\xff\xff\xff" }),
+                    .placement, .text => {
+                        // the returned allocation is owned by this test.
+                        const bytes = @constCast(try (try records.getCursor(edit_id)).?.readBytesAlloc(allocator, opts.max_read_size));
+                        defer allocator.free(bytes);
+                        if (ctx.corruption == .placement) {
+                            const offset = 4 + hash.byteLen(opts.hash) + 4 + 4;
+                            std.mem.writeInt(u32, bytes[offset..][0..4], 1, .big);
+                        } else bytes[bytes.len - 1] ^= 1;
+                        try records.put(edit_id, .{ .bytes = bytes });
+                    },
+                }
             }
+            var memory: [256 * 1024]u8 = undefined;
+            var fixed = std.heap.FixedBufferAllocator.init(&memory);
+            const patch_allocator = if (ctx.case == .history) fixed.allocator() else allocator;
             var read_moment = moment.readOnly();
             if (ctx.case != .later_edit) {
-                try patch.applyPatch(opts, &read_moment, &snapshot, allocator, path_hash, patch_id);
+                const size_before = try cursor.db.core.length();
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{patch_id}, if (ctx.create) .create else .merge);
+                defer application.deinit(patch_allocator);
+                try std.testing.expectEqual(size_before, try cursor.db.core.length());
+                try application.save(&snapshot, patch_allocator, paths[0], .clear);
             }
             const membership = try snapshot.cursor.readPath(void, &.{
-                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id-set") } },
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .hash_map_get = .{ .key = patch_id } },
+                .{ .array_list_get = @intFromEnum(patch.FileField.edits) },
+                .{ .hash_map_get = .{ .key = edit_id } },
             });
             try std.testing.expect(membership != null);
+            if (ctx.third_oid) |oid| {
+                const third_patch = (try moment.cursor.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                    .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
+                    .{ .hash_map_get = .{ .value = path_hash } },
+                    .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                })).?;
+                var id: [hash.byteLen(opts.hash)]u8 = undefined;
+                _ = try third_patch.readBytes(&id);
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{hash.bytesToInt(opts.hash, &id)}, .merge);
+                defer application.deinit(patch_allocator);
+                try std.testing.expectEqual(1, application.file.regions.items.len);
+                try std.testing.expectEqual(@as(usize, if (ctx.case == .history) 6 else 7), application.file.lines.items.len);
+                try application.save(&snapshot, patch_allocator, paths[0], .clear);
+            }
             const line_list = try snapshot.cursor.readPath(void, &.{
-                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->line-id-list") } },
                 .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(patch.FileField.lines) },
             });
-            try std.testing.expectEqual(ctx.case != .conflict, line_list != null);
+            try std.testing.expect(line_list != null);
+            const gaps = try snapshot.cursor.readPathSlot(void, &.{
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
+            });
+            try std.testing.expectEqual(ctx.case == .later_edit, gaps != null);
+            var file = try patch.File(opts).load(&read_moment, snapshot.cursor.readOnly(), patch_allocator, path_hash);
+            defer file.deinit();
+            try std.testing.expectEqual(ctx.case == .conflict or ctx.case == .history, file.has_conflict);
 
             // freezing forces any writes to copy existing data.
             // applying the patch again should make no changes at all.
             try cursor.db.freeze();
             const size_before = try cursor.db.core.length();
-            try patch.applyPatch(opts, &read_moment, &snapshot, allocator, path_hash, patch_id);
+            var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{patch_id}, .merge);
+            defer application.deinit(patch_allocator);
+            try std.testing.expectEqual(0, application.edits.count());
+            try application.save(&snapshot, patch_allocator, paths[0], .clear);
             try std.testing.expectEqual(size_before, try cursor.db.core.length());
+            const gaps_after = try snapshot.cursor.readPathSlot(void, &.{
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
+            });
+            try std.testing.expectEqualDeep(gaps, gaps_after);
         }
     };
     const ctx = Ctx{
+        .third_oid = third_oid,
         .case = case,
         .snapshot_oid = if (case == .later_edit) source_oid else target_oid,
         .patch_oid = if (case == .later_edit) target_oid else source_oid,
@@ -981,12 +1166,230 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge
     defer repo.core.db_file.unlock(io);
     const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
     if (case == .rollback) {
-        try std.testing.expectError(error.InvalidEnumTag, history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx));
-        const after = try repo.core.latestMoment();
-        try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
+        for ([_]@TypeOf(ctx.corruption){ .count, .gap, .placement, .text }) |corruption| {
+            for ([_]bool{ false, true }) |create| {
+                var corrupt_ctx = ctx;
+                corrupt_ctx.corruption = corruption;
+                corrupt_ctx.create = create;
+                try std.testing.expectError(if (corruption == .gap) error.InvalidGapList else error.InvalidEdit, history.appendContext(.{ .slot = try history.getSlot(-1) }, corrupt_ctx));
+                const after = try repo.core.latestMoment();
+                try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
+            }
+        }
     } else {
         try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
     }
+}
+
+const EditMergeCase = struct {
+    name: []const u8,
+    base: []const u8 = "a\nb\nc\nd\ne",
+    target: []const []const u8,
+    source: []const []const u8,
+    expected: []const union(enum) {
+        text: []const u8,
+        conflict: [3]?[]const u8,
+    },
+    shared_edits: ?usize = null,
+    shared_gaps: bool = false,
+    shared_gap_chunks: bool = false,
+    max_position_depth: ?usize = null,
+    pick: bool = false,
+    rebuild: bool = false,
+};
+
+fn testMergeEdits(case: EditMergeCase) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    errdefer std.debug.print("merge edits: {s}\n", .{case.name});
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+
+    // check both directions, including the order of conflict alternatives
+    for ([_]bool{ false, true }) |reverse| {
+        if (case.pick and reverse) continue;
+        const work_path = try std.fs.path.join(allocator, &.{ temp_path, if (reverse) "reverse" else "forward" });
+        defer allocator.free(work_path);
+        var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+        defer repo.deinit(io, allocator);
+        try addFile(.xit, opts, &repo, io, allocator, "f", case.base);
+        const base_oid = try repo.commit(io, allocator, .{ .message = "base", .timestamp = 1 });
+        const names = [_][]const u8{ "target", "source" };
+        var oids: [2][hash.hexLen(opts.hash)]u8 = undefined;
+        for ([_][]const []const u8{ case.target, case.source }, 0..) |history, side| {
+            var parent = base_oid;
+            for (history, 0..) |content, i| {
+                try addFile(.xit, opts, &repo, io, allocator, "f", content);
+                parent = try repo.commit(io, allocator, .{ .message = "edit", .parent_oids = &.{parent}, .timestamp = 2 + side * 100 + i });
+                // each generated snapshot must reproduce the committed text
+                try repo.patchAll(io, allocator, null);
+                var moment = try repo.core.latestMoment();
+                const snapshot = (try moment.cursor.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                    .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &parent) } },
+                })).?;
+                var file = try patch.File(opts).load(&moment, snapshot, allocator, hash.hashInt(opts.hash, "f"));
+                defer file.deinit();
+                const text = try file.readText(allocator);
+                defer allocator.free(text);
+                try std.testing.expectEqualStrings(content, text);
+                try std.testing.expect(!file.has_conflict);
+                if (case.shared_gap_chunks) {
+                    var reader = patch.File(opts).TextReader.init(&file, allocator);
+                    defer reader.deinit();
+                    // a failed allocation must leave the line readable on retry.
+                    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+                    try std.testing.expectError(error.OutOfMemory, reader.readLine(file.lines.items[0].id, failing.allocator()));
+                    for ([_]usize{ 0, 63, 64, 65, 127, 128, 129, 0 }) |line_index| {
+                        const id = file.lines.items[line_index].id;
+                        var expected_lines = std.mem.splitScalar(u8, content, '\n');
+                        for (0..line_index) |_| _ = expected_lines.next();
+                        const actual_line = try reader.readLine(id, allocator);
+                        defer allocator.free(actual_line);
+                        try std.testing.expectEqualStrings(expected_lines.next().?, actual_line);
+                    }
+                }
+                if (case.max_position_depth) |depth| {
+                    for (file.lines.items) |line| try std.testing.expect(line.position.len <= depth * (hash.byteLen(opts.hash) + 8));
+                }
+            }
+            oids[side] = parent;
+            try repo.addBranch(io, .{ .name = names[side] });
+        }
+        try repo.patchAll(io, allocator, null);
+        if (case.rebuild) {
+            const DB = rp.Repo(.xit, opts).DB;
+            const before = try repo.core.latestMoment();
+            const Rebuild = struct {
+                pub fn run(_: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    const moment = try DB.HashMap(.read_write).init(cursor.*);
+                    _ = try moment.remove(hash.hashInt(opts.hash, "commit-id->snapshot"));
+                }
+            };
+            const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+            try history.appendContext(.{ .slot = try history.getSlot(-1) }, Rebuild{});
+            try repo.patchAll(io, allocator, null);
+            const after = try repo.core.latestMoment();
+            for (oids) |oid| {
+                for ([_]patch.FileField{ .patch, .gaps }) |field| {
+                    var bytes: [2][]const u8 = .{ &.{}, &.{} };
+                    defer for (bytes) |value| allocator.free(value);
+                    for ([_]DB.HashMap(.read_only){ before, after }, &bytes) |moment, *value| {
+                        const cursor = (try moment.cursor.readPath(void, &.{
+                            .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                            .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
+                            .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "f") } },
+                            .{ .array_list_get = @intFromEnum(field) },
+                        })).?;
+                        if (field == .gaps) {
+                            var buffer = std.Io.Writer.Allocating.init(allocator);
+                            defer buffer.deinit();
+                            const list = try DB.LinkedArrayList(.read_only).init(cursor);
+                            var iter = try list.iterator();
+                            while (try iter.next()) |entry| {
+                                const bytes_value = try entry.readBytesAlloc(allocator, null);
+                                defer allocator.free(bytes_value);
+                                try buffer.writer.writeAll(bytes_value);
+                            }
+                            value.* = try buffer.toOwnedSlice();
+                        } else value.* = try cursor.readBytesAlloc(allocator, opts.max_read_size);
+                    }
+                    try std.testing.expectEqualSlices(u8, bytes[0], bytes[1]);
+                }
+            }
+        }
+        // compare the stored gaps and applied edits between branches
+        if (case.shared_edits != null or case.shared_gaps or case.shared_gap_chunks) {
+            const DB = rp.Repo(.xit, opts).DB;
+            const moment = try repo.core.latestMoment();
+            var files: [2]DB.ArrayList(.read_only) = undefined;
+            for (oids, &files) |oid, *fields| {
+                fields.* = try DB.ArrayList(.read_only).init((try moment.cursor.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                    .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
+                    .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "f") } },
+                })).?);
+            }
+            if (case.shared_gaps) try std.testing.expectEqualDeep(
+                (try files[0].getSlot(@intFromEnum(patch.FileField.gaps))).?,
+                (try files[1].getSlot(@intFromEnum(patch.FileField.gaps))).?,
+            );
+            if (case.shared_gap_chunks) {
+                var slots = std.AutoHashMap(u64, void).init(allocator);
+                defer slots.deinit();
+                var lists: [2]DB.LinkedArrayList(.read_only) = undefined;
+                for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.gaps))).?);
+                var left = try lists[0].iterator();
+                while (try left.next()) |entry| try slots.put(entry.slot().value, {});
+                var shared: usize = 0;
+                var right = try lists[1].iterator();
+                while (try right.next()) |entry| {
+                    if (slots.contains(entry.slot().value)) shared += 1;
+                }
+                try std.testing.expect(shared > 0);
+                try std.testing.expect(shared < try lists[0].count());
+            }
+            if (case.shared_edits) |expected| {
+                var edits: [2]DB.HashSet(.read_only) = undefined;
+                for (files, &edits) |fields, *set| {
+                    set.* = try DB.HashSet(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.edits))).?);
+                }
+                var shared: usize = 0;
+                var edit_iter = try edits[0].iterator();
+                while (try edit_iter.next()) |entry| {
+                    if (try edits[1].getSlot((try entry.readKeyValuePair()).hash) != null) shared += 1;
+                }
+                try std.testing.expectEqual(expected + 1, shared);
+            }
+        }
+        const target = names[@intFromBool(reverse)];
+        const source = names[@intFromBool(!reverse)];
+        var switched = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = target } } });
+        defer switched.deinit();
+        var merge = try repo.merge(io, allocator, .{ .kind = if (case.pick) .pick else .full, .action = .{ .new = .{ .algo = .patch, .source = &.{.{ .ref = .{ .kind = .head, .name = source } }} } } }, null);
+        defer merge.deinit();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var expected: std.ArrayList([]const u8) = .empty;
+        var conflict = false;
+        for (case.expected) |chunk| switch (chunk) {
+            .text => |content| try expected.append(a, content),
+            .conflict => |sides| {
+                conflict = true;
+                try expected.append(a, try std.fmt.allocPrint(a, "<<<<<<< target ({s})", .{target}));
+                if (sides[if (reverse) 2 else 1]) |content| try expected.append(a, content);
+                try expected.append(a, try std.fmt.allocPrint(a, "||||||| base ({s})", .{merge.base_oid}));
+                if (sides[0]) |content| try expected.append(a, content);
+                try expected.append(a, "=======");
+                if (sides[if (reverse) 1 else 2]) |content| try expected.append(a, content);
+                try expected.append(a, try std.fmt.allocPrint(a, ">>>>>>> source ({s})", .{source}));
+            },
+        };
+        try std.testing.expectEqual(conflict, merge.result == .conflict);
+        const content = try repo.core.work_dir.readFileAlloc(io, "f", allocator, .limited(64 * 1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings(try std.mem.join(a, "\n", expected.items), content);
+    }
+}
+
+test "merge conflict edits" {
+    try testMergeEdits(.{ .name = "overlapping deletions", .target = &.{"a\nd\ne"}, .source = &.{"a\nb\ne"}, .expected = &.{.{ .text = "a\ne" }} });
+    try testMergeEdits(.{ .name = "delete and replace", .target = &.{"a\nc\nd\ne"}, .source = &.{"a\nB\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c\nd\ne" } } });
+    try testMergeEdits(.{ .name = "insert inside deletion", .target = &.{"a\ne"}, .source = &.{"a\nb\nX\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", null, "b\nX\nc\nd" } }, .{ .text = "e" } } });
+    try testMergeEdits(.{ .name = "replace insertion inside deletion", .target = &.{"a\ne"}, .source = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", null, "b\nY\nc\nd" } }, .{ .text = "e" } } });
+    try testMergeEdits(.{ .name = "insert at deletion boundaries", .target = &.{"a\ne"}, .source = &.{"a\nX\nb\nc\nd\nY\ne"}, .expected = &.{.{ .text = "a\nX\nY\ne" }} });
+    try testMergeEdits(.{ .name = "same gap after deletion", .max_position_depth = 3, .target = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nX\ne" }, .source = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nY\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ null, "X", "Y" } }, .{ .text = "e" } } });
+    try testMergeEdits(.{ .name = "same gap in nested replacement", .target = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nw\ny\nv\nd\ne" }, .source = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nz\ny\nv\nd\ne" }, .expected = &.{ .{ .text = "a\nx" }, .{ .conflict = .{ null, "w", "z" } }, .{ .text = "y\nv\nd\ne" } } });
+    try testMergeEdits(.{ .name = "later replacement", .target = &.{ "a\nB\nc\nd\ne", "a\nBB\nc\nd\ne" }, .source = &.{"a\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", "BB", null } }, .{ .text = "c\nd\ne" } } });
+    try testMergeEdits(.{ .name = "multiple regions", .target = &.{"a\nc\ne"}, .source = &.{"a\nB\nc\nD\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c" }, .{ .conflict = .{ "d", null, "D" } }, .{ .text = "e" } } });
+    try testMergeEdits(.{ .name = "whole file deletion", .base = "b", .target = &.{""}, .source = &.{"B"}, .expected = &.{.{ .conflict = .{ "b", "", "B" } }} });
+    try testMergeEdits(.{ .name = "trailing newline", .base = "a\nb\nc\n", .target = &.{"a\nc\n"}, .source = &.{"a\nB\nc\n"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c\n" } } });
+    try testMergeEdits(.{ .name = "missing cherry-pick dependency", .pick = true, .target = &.{"a\nb\nc\nd\nE"}, .source = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne" }, .expected = &.{ .{ .text = "a\nb" }, .{ .conflict = .{ "X", null, "Y" } }, .{ .text = "c\nd\nE" } } });
+    try testMergeEdits(.{ .name = "several competing edits", .target = &.{ "a\nB\nc\nd\ne", "a\nBB\nc\nd\ne" }, .source = &.{ "a\nC\nc\nd\ne", "a\nCC\nc\nd\ne", "a\nCCC\nc\nd\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", "BB", "CCC" } }, .{ .text = "c\nd\ne" } } });
 }
 
 test "merge at ref" {
@@ -2932,19 +3335,16 @@ fn testMergeConflictBinary(
                         })).?
                     else
                         null;
-                    for ([_][]const u8{ "path->patch-id", "path->patch-id-set", "path->live-parent->children", "path->child->parent", "path->line-id-list" }) |name| {
-                        const entry = try snapshot.readPath(void, &.{
-                            .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, name) } },
+                    const entry = try snapshot.readPath(void, &.{
+                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
+                    });
+                    const missing = case == .initial_binary and side == 0 and i < 3;
+                    try std.testing.expectEqual(!missing, entry != null);
+                    if (parent_snapshot_maybe) |parent_snapshot| {
+                        const parent_entry = try parent_snapshot.readPath(void, &.{
                             .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
                         });
-                        try std.testing.expectEqual(!(case == .initial_binary and side == 0 and i == 0), entry != null);
-                        if (parent_snapshot_maybe) |parent_snapshot| {
-                            const parent_entry = try parent_snapshot.readPath(void, &.{
-                                .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, name) } },
-                                .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
-                            });
-                            try std.testing.expectEqualDeep(parent_entry.?.slot(), entry.?.slot());
-                        }
+                        try std.testing.expectEqualDeep(if (parent_entry) |e| e.slot() else null, if (entry) |e| e.slot() else null);
                     }
                 }
                 parent_oid_maybe = oid;

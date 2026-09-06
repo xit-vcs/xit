@@ -221,34 +221,21 @@ test "gc with patches" {
     //   `-- C [foo]
     //    \
     //     `-- D [trash] (deleted before gc)
-    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt",
-        \\a
-        \\b
-        \\c
-        \\d
-    );
+    const middle = "m\n" ** 128;
+    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ middle ++ "c\nd");
     _ = try repo.commit(io, allocator, .{ .message = "a" });
     try repo.addBranch(io, .{ .name = "foo" });
     try repo.addBranch(io, .{ .name = "trash" });
 
-    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt",
-        \\a
-        \\b
-        \\e
-        \\d
-    );
+    // changing the line count replaces some gap chunks and shares the rest
+    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ middle ++ "e\nX\nd");
     _ = try repo.commit(io, allocator, .{ .message = "b" });
 
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "foo" } } });
         defer result.deinit();
     }
-    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt",
-        \\a
-        \\f
-        \\c
-        \\d
-    );
+    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nf\n" ++ middle ++ middle ++ "c\nd");
     _ = try repo.commit(io, allocator, .{ .message = "c" });
 
     {
@@ -256,21 +243,34 @@ test "gc with patches" {
         defer result.deinit();
     }
     try addFile(.xit, repo_opts, &repo, io, allocator, "trash.txt", "garbage");
-    _ = try repo.commit(io, allocator, .{ .message = "d" });
+    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ middle ++ "c\ntrash");
+    const trash_oid = try repo.commit(io, allocator, .{ .message = "d" });
 
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
         defer result.deinit();
     }
+    try repo.patchAll(io, allocator, null);
     try repo.removeBranch(io, .{ .name = "trash" });
 
-    // create patches for all commits, then gc. the dead commit's patch
-    // snapshot is removed, and the live ones must stay usable.
-    try repo.patchAll(io, allocator, null);
-    const result = try repo.garbageCollect(io, allocator, &.{});
-    try std.testing.expect(result.size_after < result.size_before);
+    // keep the discarded branch through an extra root, then collect it.
+    // its insertion and replacement records should both be removed.
+    for ([_][]const [hash.hexLen(repo_opts.hash)]u8{ &.{trash_oid}, &.{} }, [_]usize{ 5, 3 }) |roots, expected| {
+        const result = try repo.garbageCollect(io, allocator, roots);
+        try std.testing.expect(result.size_after < result.size_before);
+        const moment = try repo.core.latestMoment();
+        for ([_][]const u8{ "patch-id->edit-list", "edit-id->edit" }) |name| {
+            var iter = try (try moment.getCursor(hash.hashInt(repo_opts.hash, name))).?.iterator();
+            var count: usize = 0;
+            while (try iter.next()) |_| count += 1;
+            try std.testing.expectEqual(expected, count);
+        }
+    }
 
-    // patch-based merging still works after gc
+    // create an insertion from the surviving gaps, then merge after gc
+    try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ "Y\n" ++ middle ++ "e\nX\nd");
+    _ = try repo.commit(io, allocator, .{ .message = "insert" });
+    try repo.patchAll(io, allocator, null);
     {
         var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = .{ .kind = .head, .name = "foo" } }} } } }, null);
         defer merge.deinit();
@@ -278,11 +278,6 @@ test "gc with patches" {
 
         const f_txt_content = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(1024));
         defer allocator.free(f_txt_content);
-        try std.testing.expectEqualStrings(
-            \\a
-            \\f
-            \\e
-            \\d
-        , f_txt_content);
+        try std.testing.expectEqualStrings("a\nf\n" ++ middle ++ "Y\n" ++ middle ++ "e\nX\nd", f_txt_content);
     }
 }

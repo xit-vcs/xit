@@ -1,4 +1,5 @@
 const std = @import("std");
+const patch = @import("./patch.zig");
 const hash = @import("./hash.zig");
 const obj = @import("./object.zig");
 const idx = @import("./index.zig");
@@ -10,6 +11,7 @@ const df = @import("./diff.zig");
 const tr = @import("./tree.zig");
 const cfg = @import("./config.zig");
 
+// commit relationships and traversal shared by ancestry queries and merges.
 fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         const Self = @This();
@@ -145,12 +147,6 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             }
             return error.NoCommonAncestor;
         }
-
-        fn mergeBase(self: *Self, kind: MergeKind) !Oid {
-            if (kind == .full) return self.commonAncestor();
-            const parents = (self.nodes.get(self.tips[1]) orelse unreachable).parents;
-            return if (parents.len > 0) parents[0] else error.CommitMustHaveOneParent;
-        }
     };
 }
 
@@ -185,6 +181,124 @@ pub fn commonAncestor(
     var ancestry = try Ancestry(repo_kind, repo_opts).init(state, io, allocator, oid1, oid2);
     defer ancestry.deinit();
     return ancestry.commonAncestor();
+}
+
+// state shared by all files in a merge: ancestry and cached patch snapshots.
+fn MergeContext(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+    return struct {
+        const Self = @This();
+        const Oid = [hash.hexLen(repo_opts.hash)]u8;
+
+        ancestry: Ancestry(repo_kind, repo_opts),
+        arena: std.heap.ArenaAllocator,
+        patch_snapshots: switch (repo_kind) {
+            .git => enum { uninitialized },
+            .xit => union(enum) {
+                uninitialized,
+                unavailable,
+                ready: PatchSnapshots,
+            },
+        } = .uninitialized,
+
+        // the base, target, and source snapshots used by patch merging.
+        const PatchSnapshots = struct {
+            const Cursor = rp.Repo(repo_kind, repo_opts).DB.Cursor(.read_only);
+
+            base: Cursor,
+            target: Cursor,
+            source: []const Cursor, // oldest first
+            has_boundary: bool,
+
+            fn load(
+                ancestry: *Ancestry(repo_kind, repo_opts),
+                allocator: std.mem.Allocator,
+                base_oid: *const Oid,
+            ) !?PatchSnapshots {
+                const DB = rp.Repo(repo_kind, repo_opts).DB;
+
+                // missing derived metadata selects diff3; malformed data and I/O errors propagate.
+                const cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) orelse return null;
+                const commit_id_to_snapshot = try DB.HashMap(.read_only).init(cursor);
+                const target = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &ancestry.tips[0]))) orelse return null;
+                const base = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, base_oid))) orelse return null;
+
+                // the base may not be in source's first-parent history.
+                // use the stored depths to find their common first-parent ancestor.
+                const patch_base_oid_maybe: ?Oid = ancestor: {
+                    const depths_cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return null;
+                    const depths = try DB.HashMap(.read_only).init(depths_cursor);
+                    var oids = [2]Oid{ base_oid.*, ancestry.tips[1] };
+                    var counts: [2]u64 = undefined;
+                    for (oids, &counts) |oid, *count| {
+                        const depth = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null;
+                        count.* = try depth.readUint();
+                    }
+                    while (!std.mem.eql(u8, &oids[0], &oids[1])) {
+                        const side: usize = if (counts[0] >= counts[1]) 0 else 1;
+                        const parents = (try ancestry.load(oids[side])).parents;
+                        if (parents.len == 0) break :ancestor null;
+                        oids[side] = parents[0];
+                        counts[side] = std.math.sub(u64, counts[side], 1) catch return error.InvalidCommitDepth;
+                    }
+                    break :ancestor oids[0];
+                };
+
+                // changes from other parents are already included in a merge commit
+                var snapshots: std.ArrayList(Cursor) = .empty;
+                var oid_maybe: ?Oid = ancestry.tips[1];
+                while (oid_maybe) |oid| {
+                    try snapshots.append(allocator, (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null);
+                    if (patch_base_oid_maybe) |*patch_base_oid| {
+                        if (std.mem.eql(u8, patch_base_oid, &oid)) break;
+                    }
+                    const parents = (try ancestry.load(oid)).parents;
+                    oid_maybe = if (parents.len > 0) parents[0] else null;
+                }
+                // store application order once for all files in this merge
+                std.mem.reverse(Cursor, snapshots.items);
+                return .{ .base = base, .target = target, .source = snapshots.items, .has_boundary = patch_base_oid_maybe != null };
+            }
+        };
+
+        fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            oid1: *const Oid,
+            oid2: *const Oid,
+        ) !Self {
+            return .{
+                .ancestry = try Ancestry(repo_kind, repo_opts).init(state, io, allocator, oid1, oid2),
+                .arena = std.heap.ArenaAllocator.init(allocator),
+            };
+        }
+
+        fn deinit(self: *Self) void {
+            self.arena.deinit();
+            self.ancestry.deinit();
+        }
+
+        fn mergeBase(self: *Self, kind: MergeKind) !Oid {
+            const ancestry = &self.ancestry;
+            if (kind == .full) return ancestry.commonAncestor();
+            const parents = (ancestry.nodes.get(ancestry.tips[1]) orelse unreachable).parents;
+            return if (parents.len > 0) parents[0] else error.CommitMustHaveOneParent;
+        }
+
+        // shared by all files in one merge, with fixed tips and base. load after
+        // patch generation; subsequent blob writes don't change these snapshots.
+        fn firstParentSnapshots(self: *Self, base_oid: *const Oid) !?PatchSnapshots {
+            switch (self.patch_snapshots) {
+                .uninitialized => {},
+                .unavailable => return null,
+                .ready => |snapshots| return snapshots,
+            }
+
+            const result = try PatchSnapshots.load(&self.ancestry, self.arena.allocator(), base_oid);
+            self.patch_snapshots = if (result) |snapshots| .{ .ready = snapshots } else .unavailable;
+            return result;
+        }
+    };
 }
 
 pub fn RenamedEntry(comptime hash_kind: hash.HashKind) type {
@@ -310,49 +424,6 @@ fn appendResolvedOrConflict(
     }
 
     return true;
-}
-
-/// copy as much of the current line as we can into `buf`, advancing to the
-/// next line in the line buffer when the current one is finished. a newline
-/// is added between lines, including after the final buffered line when
-/// `more_follows` says the underlying stream isn't done yet.
-fn drainCurrentLine(
-    allocator: std.mem.Allocator,
-    line_buffer: *std.ArrayList([]const u8),
-    current_line_ptr: *?[]const u8,
-    more_follows: bool,
-    buf: []u8,
-) usize {
-    const current_line = current_line_ptr.* orelse return 0;
-    const size = @min(buf.len, current_line.len);
-    var line_finished = current_line.len == 0;
-    if (size > 0) {
-        // copy as much from the current line as we can
-        @memcpy(buf[0..size], current_line[0..size]);
-        const new_current_line = current_line[size..];
-        line_finished = new_current_line.len == 0;
-        current_line_ptr.* = new_current_line;
-    }
-    // if we have copied the entire line
-    if (line_finished) {
-        // if there is room for the newline character
-        if (buf.len > size) {
-            // remove the line from the line buffer
-            const line = line_buffer.orderedRemove(0);
-            allocator.free(line);
-            if (line_buffer.items.len > 0) {
-                current_line_ptr.* = line_buffer.items[0];
-            } else {
-                current_line_ptr.* = null;
-            }
-            // if we aren't at the very last line, add a newline character
-            if (current_line_ptr.* != null or more_follows) {
-                buf[size] = '\n';
-                return size + 1;
-            }
-        }
-    }
-    return size;
 }
 
 fn writeBlobWithDiff3(
@@ -574,28 +645,24 @@ fn writeBlobWithDiff3(
 }
 
 fn writeBlobWithPatches(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     base_file_oid_maybe: ?*const [hash.byteLen(repo_opts.hash)]u8,
     target_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
     source_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
     base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     target_name: []const u8,
     source_name: []const u8,
     has_conflict: *bool,
     path: []const u8,
+    context: *MergeContext(.xit, repo_opts),
 ) !?[hash.byteLen(repo_opts.hash)]u8 {
-    if (repo_kind != .xit) return error.PatchBasedMergeRequiresXitBackend;
-
-    // a binary file may still have a graph from its last text version
+    // a binary file may still have a snapshot from its last text version
     for ([_]?*const [hash.byteLen(repo_opts.hash)]u8{ base_file_oid_maybe, target_file_oid, source_file_oid }) |file_oid_maybe| {
         const file_oid = file_oid_maybe orelse continue;
-        var iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, path, file_oid, null);
+        var iter = try df.LineIterator(.xit, repo_opts).initFromOid(state.readOnly(), io, allocator, path, file_oid, null);
         defer iter.deinit();
         if (iter.source == .binary) {
             has_conflict.* = true;
@@ -603,502 +670,87 @@ fn writeBlobWithPatches(
         }
     }
 
-    // get commit-id->snapshot
-    const commit_id_to_snapshot_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) orelse return error.KeyNotFound;
-    const commit_id_to_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(commit_id_to_snapshot_cursor);
-
-    // get base snapshot
-    const base_snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, base_oid))) orelse return error.KeyNotFound;
-    const base_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(base_snapshot_cursor);
-
-    // get target snapshot
-    const target_snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, target_oid))) orelse return error.KeyNotFound;
-    const target_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(target_snapshot_cursor);
-
-    // get source snapshot
-    const source_snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, source_oid))) orelse return error.KeyNotFound;
-    const source_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(source_snapshot_cursor);
+    const snapshots = (try context.firstParentSnapshots(base_oid)) orelse return null;
 
     var patch_ids: std.ArrayList(hash.HashInt(repo_opts.hash)) = .empty;
     defer patch_ids.deinit(allocator);
 
     const path_hash = hash.hashInt(repo_opts.hash, path);
 
-    // patches are created by comparing each commit to its first parent.
-    // for merge commits, this already includes the changes from the
-    // other parent, so we shouldn't apply that parent's patches again.
-    {
-        // the base may not be in source's first-parent history. use the
-        // stored depths to find their common first-parent ancestor.
-        const patch_base_oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = blk: {
-            const depths = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return error.CommitDepthNotFound;
-            var oids = [2][hash.hexLen(repo_opts.hash)]u8{ base_oid.*, source_oid.* };
-            var counts: [2]u64 = undefined;
-            for (oids, &counts) |oid, *count| {
-                const cursor = (try depths.readPath(void, &.{
-                    .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, &oid) } },
-                })) orelse return error.CommitDepthNotFound;
-                count.* = try cursor.readUint();
-            }
-            while (!std.mem.eql(u8, &oids[0], &oids[1])) {
-                const side: usize = if (counts[0] >= counts[1]) 0 else 1;
-                var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oids[side]);
-                defer object.deinit();
-                oids[side] = (object.content.commit.metadata.firstParent() orelse break :blk null).*;
-                counts[side] = std.math.sub(u64, counts[side], 1) catch return error.InvalidCommitDepth;
-            }
-            break :blk oids[0];
+    // scan oldest first so patches are already in application order
+    var parent_patch_id_maybe: ?hash.HashInt(repo_opts.hash) = null;
+    for (snapshots.source, 0..) |snapshot, i| {
+        // get this file's patch id from each snapshot
+        const patch_id_maybe = blk: {
+            const patch_id_cursor = (try snapshot.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+            })) orelse break :blk null;
+            var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+            _ = try patch_id_cursor.readBytes(&patch_id_bytes);
+            break :blk hash.bytesToInt(repo_opts.hash, &patch_id_bytes);
         };
 
-        var oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = source_oid.*;
-        var child_patch_id_maybe: ?hash.HashInt(repo_opts.hash) = null;
-        while (oid_maybe) |oid| {
-            var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oid);
-            defer object.deinit();
-
-            // get this file's patch id from the current commit's snapshot,
-            // since the source snapshot only has its most recent patch id
-            const patch_id_maybe = blk: {
-                const snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &object.oid))) orelse return error.KeyNotFound;
-                const patch_id_cursor = (try snapshot_cursor.readPath(void, &.{
-                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "path->patch-id") } },
-                    .{ .hash_map_get = .{ .value = path_hash } },
-                })) orelse break :blk null;
-                var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                _ = try patch_id_cursor.readBytes(&patch_id_bytes);
-                break :blk hash.bytesToInt(repo_opts.hash, &patch_id_bytes);
-            };
-
-            // wait until we reach the parent to check whether its child
-            // introduced a patch or just inherited the same id.
-            if (child_patch_id_maybe) |child_patch_id| {
-                if (child_patch_id != patch_id_maybe) {
-                    try patch_ids.append(allocator, child_patch_id);
-                }
-            }
-            child_patch_id_maybe = patch_id_maybe;
-
-            if (patch_base_oid_maybe) |*patch_base_oid| {
-                if (std.mem.eql(u8, patch_base_oid, &oid)) break;
-            }
-            oid_maybe = if (object.content.commit.metadata.firstParent()) |parent_oid| parent_oid.* else null;
-        } else {
-            // if we reached the root, its patch has no parent to compare with
-            if (child_patch_id_maybe) |child_patch_id| {
-                try patch_ids.append(allocator, child_patch_id);
+        // skip the boundary ancestor, but include an unrelated root's patch
+        if (patch_id_maybe) |patch_id| {
+            if (patch_id != parent_patch_id_maybe and (i > 0 or !snapshots.has_boundary)) {
+                try patch_ids.append(allocator, patch_id);
             }
         }
+        parent_patch_id_maybe = patch_id_maybe;
     }
 
     if (patch_ids.items.len == 0) return null;
 
-    // put target snapshot in temp location
-    const merge_in_progress_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "merge-in-progress"));
-    const merge_in_progress = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(merge_in_progress_cursor);
-    var merge_snapshot_cursor = try merge_in_progress.putCursor(hash.hashInt(repo_opts.hash, "snapshot"));
-    try merge_snapshot_cursor.writeIfEmpty(.{ .slot = target_snapshot_cursor.slot() });
-    const merge_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(merge_snapshot_cursor);
+    // apply patches together to check their dependencies
+    var application = patch.applyPatches(repo_opts, state.readOnly().extra.moment, snapshots.target, allocator, path, patch_ids.items, .merge) catch |err| switch (err) {
+        error.MissingPatchDependency => return null,
+        else => return err,
+    };
+    defer application.deinit(allocator);
+    const merged_file = &application.file;
+    var text_reader = patch.File(repo_opts).TextReader.init(merged_file, allocator);
+    defer text_reader.deinit();
 
-    const patch = @import("./patch.zig");
-
-    // apply patches from oldest to newest
-    for (0..patch_ids.items.len) |i| {
-        const patch_id = patch_ids.items[patch_ids.items.len - i - 1];
-        try patch.applyPatch(repo_opts, state.readOnly().extra.moment, &merge_snapshot, allocator, path_hash, patch_id);
-    }
-
-    const merge_path_to_live_parent_to_children_cursor = (try merge_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->live-parent->children"))) orelse return error.KeyNotFound;
-    const merge_path_to_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(merge_path_to_live_parent_to_children_cursor);
-    const merge_live_parent_to_children_cursor = (try merge_path_to_live_parent_to_children.getCursor(path_hash)) orelse return error.KeyNotFound;
-    const merge_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(merge_live_parent_to_children_cursor);
-
-    var base_live_parent_to_children_maybe: ?rp.Repo(.xit, repo_opts).DB.HashMap(.read_only) = null;
-    if (try base_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->live-parent->children"))) |base_path_to_live_parent_to_children_cursor| {
-        const base_path_to_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(base_path_to_live_parent_to_children_cursor);
-        if (try base_path_to_live_parent_to_children.getCursor(path_hash)) |base_live_parent_to_children_cursor| {
-            base_live_parent_to_children_maybe = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(base_live_parent_to_children_cursor);
-        }
-    }
-
-    const target_path_to_live_parent_to_children_cursor = (try target_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->live-parent->children"))) orelse return error.KeyNotFound;
-    const target_path_to_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(target_path_to_live_parent_to_children_cursor);
-    const target_live_parent_to_children_cursor = (try target_path_to_live_parent_to_children.getCursor(path_hash)) orelse return error.KeyNotFound;
-    const target_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(target_live_parent_to_children_cursor);
-
-    const source_path_to_live_parent_to_children_cursor = (try source_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->live-parent->children"))) orelse return error.KeyNotFound;
-    const source_path_to_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(source_path_to_live_parent_to_children_cursor);
-    const source_live_parent_to_children_cursor = (try source_path_to_live_parent_to_children.getCursor(path_hash)) orelse return error.KeyNotFound;
-    const source_live_parent_to_children = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(source_live_parent_to_children_cursor);
-
-    const patch_id_to_offset_list_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "patch-id->offset-list"))) orelse return error.KeyNotFound;
-    const patch_id_to_offset_list = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(patch_id_to_offset_list_cursor);
-
-    var line_buffer: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (line_buffer.items) |buffer| {
-            allocator.free(buffer);
-        }
-        line_buffer.deinit(allocator);
-    }
-
-    const readLine = struct {
-        fn readLine(
-            inner_state: rp.Repo(.xit, repo_opts).State(.read_only),
-            inner_io: std.Io,
-            inner_allocator: std.mem.Allocator,
-            offset_list_cursor: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-            line_id: patch.LineId(repo_opts.hash),
-        ) ![]const u8 {
-            var read_buffer: [repo_opts.buffer_size]u8 = undefined;
-            var offset_list_reader = try offset_list_cursor.reader(&read_buffer);
-
-            const hash_size = comptime hash.byteLen(repo_opts.hash);
-            const offset_size = @bitSizeOf(u64) / 8;
-
-            const oid = try offset_list_reader.interface.takeArray(hash_size);
-            const oid_hex = std.fmt.bytesToHex(oid, .lower);
-            try offset_list_reader.seekTo(hash_size + line_id.line * offset_size);
-            const change_offset = try offset_list_reader.interface.takeInt(u64, .big);
-
-            var obj_rdr = try obj.ObjectReader(.xit, repo_opts).init(inner_state, inner_io, inner_allocator, &oid_hex);
-            defer obj_rdr.deinit();
-            try obj_rdr.seekTo(change_offset);
-
-            if (obj_rdr.interface.peekByte()) |_| {
-                var line_writer = std.Io.Writer.Allocating.init(inner_allocator);
-                errdefer line_writer.deinit();
-                _ = try obj_rdr.interface.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size));
-
-                // skip delimiter
-                if (obj_rdr.interface.bufferedLen() > 0) {
-                    obj_rdr.interface.toss(1);
-                }
-
-                return line_writer.toOwnedSlice();
-            } else |err| switch (err) {
-                // empty line at the end of the file
-                error.EndOfStream => return try inner_allocator.dupe(u8, ""),
-                else => |e| return e,
-            }
-        }
-    }.readLine;
-
-    const initLineRange = struct {
-        fn init(
-            inner_state: rp.Repo(.xit, repo_opts).State(.read_only),
-            inner_io: std.Io,
-            inner_allocator: std.mem.Allocator,
-            patch_id_to_offset_list_ptr: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-            line_ids: []patch.LineId(repo_opts.hash),
-        ) !LineRange {
-            var lines: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (lines.items) |line| {
-                    inner_allocator.free(line);
-                }
-                lines.deinit(inner_allocator);
-            }
-            for (line_ids) |line_id| {
-                var offset_list_cursor = (try patch_id_to_offset_list_ptr.getCursor(line_id.patch_id)) orelse return error.KeyNotFound;
-                const line = try readLine(inner_state, inner_io, inner_allocator, &offset_list_cursor, line_id);
-                errdefer inner_allocator.free(line);
-                try lines.append(inner_allocator, line);
-            }
-            return .{
-                .lines = lines,
-            };
-        }
-    }.init;
-
-    const Stream = struct {
-        state: rp.Repo(.xit, repo_opts).State(.read_only),
-        io: std.Io,
-        allocator: std.mem.Allocator,
-        markers: *const ConflictMarkers,
-        merge_live_parent_to_children: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-        base_live_parent_to_children: ?*const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-        target_live_parent_to_children: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-        source_live_parent_to_children: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-        patch_id_to_offset_list: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-        line_buffer: *std.ArrayList([]const u8),
-        current_line: ?[]const u8,
-        current_line_id_hash: ?hash.HashInt(repo_opts.hash),
-        has_conflict: bool,
-        interface: std.Io.Reader,
-
-        const Parent = @This();
-
-        pub const Reader = struct {
-            parent: *Parent,
-
-            pub fn read(self: @This(), buf: []u8) !usize {
-                var size: usize = 0;
-                while (size < buf.len) {
-                    const read_size = try self.readStep(buf[size..]);
-                    if (read_size == 0) {
-                        break;
-                    }
-                    size += read_size;
-                }
-                return size;
-            }
-
-            pub fn readByte(self: @This()) !u8 {
-                var buffer = [_]u8{0} ** 1;
-                const size = try self.read(&buffer);
-                if (size == 0) {
-                    return error.EndOfStream;
-                } else {
-                    return buffer[0];
-                }
-            }
-
-            fn readStep(self: @This(), buf: []u8) !usize {
-                if (self.parent.current_line != null) {
-                    return drainCurrentLine(self.parent.allocator, self.parent.line_buffer, &self.parent.current_line, self.parent.current_line_id_hash != null, buf);
-                }
-
-                if (self.parent.current_line_id_hash) |current_line_id_hash| {
-                    const children_cursor = (try self.parent.merge_live_parent_to_children.getCursor(current_line_id_hash)) orelse return error.KeyNotFound;
-                    var children_iter = try children_cursor.iterator();
-
-                    const first_child_cursor = (try children_iter.next()) orelse return error.ExpectedChild;
-                    const first_kv_pair = try first_child_cursor.readKeyValuePair();
-                    var first_child_bytes = [_]u8{0} ** patch.LineId(repo_opts.hash).byte_size;
-                    const first_child_slice = try first_kv_pair.key_cursor.readBytes(&first_child_bytes);
-                    const first_line_id: patch.LineId(repo_opts.hash) = @bitCast(std.mem.readInt(patch.LineId(repo_opts.hash).Int, &first_child_bytes, .big));
-                    const first_line_id_hash = hash.hashInt(repo_opts.hash, first_child_slice);
-
-                    if (try children_iter.next()) |second_child_cursor| {
-                        if (try children_iter.next() != null) return error.MoreThanTwoChildrenFound;
-
-                        const second_kv_pair = try second_child_cursor.readKeyValuePair();
-                        var second_child_bytes = [_]u8{0} ** patch.LineId(repo_opts.hash).byte_size;
-                        const second_child_slice = try second_kv_pair.key_cursor.readBytes(&second_child_bytes);
-                        const second_line_id: patch.LineId(repo_opts.hash) = @bitCast(std.mem.readInt(patch.LineId(repo_opts.hash).Int, &second_child_bytes, .big));
-                        const second_line_id_hash = hash.hashInt(repo_opts.hash, second_child_slice);
-
-                        const target_line_id, const target_line_id_hash, const source_line_id, const source_line_id_hash =
-                            if (try self.parent.target_live_parent_to_children.getCursor(first_line_id_hash) != null)
-                                .{ first_line_id, first_line_id_hash, second_line_id, second_line_id_hash }
-                            else
-                                .{ second_line_id, second_line_id_hash, first_line_id, first_line_id_hash };
-
-                        var target_line_ids: std.ArrayList(patch.LineId(repo_opts.hash)) = .empty;
-                        defer target_line_ids.deinit(self.parent.allocator);
-
-                        var join_line_id_hash_maybe: ?hash.HashInt(repo_opts.hash) = null;
-
-                        // find the target line ids that aren't in source
-                        var next_line_id = target_line_id;
-                        var next_line_id_hash = target_line_id_hash;
-                        while (try self.parent.target_live_parent_to_children.getCursor(next_line_id_hash)) |next_children_cursor| {
-                            if (null == try self.parent.source_live_parent_to_children.getCursor(next_line_id_hash)) {
-                                try target_line_ids.append(self.parent.allocator, next_line_id);
-                            } else {
-                                join_line_id_hash_maybe = next_line_id_hash;
-                                break;
-                            }
-                            var next_children_iter = try next_children_cursor.iterator();
-                            if (try next_children_iter.next()) |next_child_cursor| {
-                                if (try next_children_iter.next() != null) return error.ExpectedOneChild;
-                                const next_kv_pair = try next_child_cursor.readKeyValuePair();
-                                var next_child_bytes = [_]u8{0} ** patch.LineId(repo_opts.hash).byte_size;
-                                const next_child_slice = try next_kv_pair.key_cursor.readBytes(&next_child_bytes);
-                                next_line_id = @bitCast(std.mem.readInt(patch.LineId(repo_opts.hash).Int, &next_child_bytes, .big));
-                                next_line_id_hash = hash.hashInt(repo_opts.hash, next_child_slice);
-                            } else {
-                                break;
-                            }
-                        }
-
-                        var source_line_ids: std.ArrayList(patch.LineId(repo_opts.hash)) = .empty;
-                        defer source_line_ids.deinit(self.parent.allocator);
-
-                        // find the source line ids that aren't in target
-                        next_line_id = source_line_id;
-                        next_line_id_hash = source_line_id_hash;
-                        while (try self.parent.source_live_parent_to_children.getCursor(next_line_id_hash)) |next_children_cursor| {
-                            if (null == try self.parent.target_live_parent_to_children.getCursor(next_line_id_hash)) {
-                                try source_line_ids.append(self.parent.allocator, next_line_id);
-                            } else {
-                                if (next_line_id_hash != join_line_id_hash_maybe) return error.ExpectedJoinLine;
-                                break;
-                            }
-                            var next_children_iter = try next_children_cursor.iterator();
-                            if (try next_children_iter.next()) |next_child_cursor| {
-                                if (try next_children_iter.next() != null) return error.ExpectedOneChild;
-                                const next_kv_pair = try next_child_cursor.readKeyValuePair();
-                                var next_child_bytes = [_]u8{0} ** patch.LineId(repo_opts.hash).byte_size;
-                                const next_child_slice = try next_kv_pair.key_cursor.readBytes(&next_child_bytes);
-                                next_line_id = @bitCast(std.mem.readInt(patch.LineId(repo_opts.hash).Int, &next_child_bytes, .big));
-                                next_line_id_hash = hash.hashInt(repo_opts.hash, next_child_slice);
-                            } else {
-                                break;
-                            }
-                        }
-
-                        var base_line_ids: std.ArrayList(patch.LineId(repo_opts.hash)) = .empty;
-                        defer base_line_ids.deinit(self.parent.allocator);
-
-                        // find the base line ids up to (but not including) the join line id if it exists,
-                        // or until the end of the file
-                        next_line_id_hash = current_line_id_hash;
-                        if (self.parent.base_live_parent_to_children) |base_live_parent_to_children| {
-                            while (try base_live_parent_to_children.getCursor(next_line_id_hash)) |next_children_cursor| {
-                                var next_children_iter = try next_children_cursor.iterator();
-                                if (try next_children_iter.next()) |next_child_cursor| {
-                                    if (try next_children_iter.next() != null) return error.ExpectedOneChild;
-                                    const next_kv_pair = try next_child_cursor.readKeyValuePair();
-                                    var next_child_bytes = [_]u8{0} ** patch.LineId(repo_opts.hash).byte_size;
-                                    const next_child_slice = try next_kv_pair.key_cursor.readBytes(&next_child_bytes);
-                                    next_line_id = @bitCast(std.mem.readInt(patch.LineId(repo_opts.hash).Int, &next_child_bytes, .big));
-                                    next_line_id_hash = hash.hashInt(repo_opts.hash, next_child_slice);
-                                    if (join_line_id_hash_maybe) |join_line_id_hash| {
-                                        if (next_line_id_hash != join_line_id_hash) {
-                                            try base_line_ids.append(self.parent.allocator, next_line_id);
-                                        } else {
-                                            break;
-                                        }
-                                    } else {
-                                        try base_line_ids.append(self.parent.allocator, next_line_id);
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-
-                        // set the current line id to be the parent of the join line id if it exists,
-                        // otherwise we're at the end of the file
-                        if (join_line_id_hash_maybe) |join_line_id_hash| {
-                            if (source_line_ids.items.len == 0) return error.ExpectedAtLeastOneSourceLineId;
-                            const join_parent_line_id = source_line_ids.items[source_line_ids.items.len - 1];
-                            const join_parent_bytes = hash.intToBytes(patch.LineId(repo_opts.hash).Int, @bitCast(join_parent_line_id));
-                            const join_parent_line_id_hash = hash.hashInt(repo_opts.hash, &join_parent_bytes);
-                            self.parent.current_line_id_hash = join_parent_line_id_hash;
-
-                            // TODO: is it actually guaranteed that the join line is in base?
-                            if (self.parent.base_live_parent_to_children) |base_live_parent_to_children| {
-                                if (null == try base_live_parent_to_children.getCursor(join_line_id_hash)) return error.ExpectedBaseToContainJoinLine;
-                            }
-                        } else {
-                            self.parent.current_line_id_hash = null;
-                        }
-
-                        var base_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, base_line_ids.items);
-                        defer base_lines.deinit(self.parent.allocator);
-                        var target_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, target_line_ids.items);
-                        defer target_lines.deinit(self.parent.allocator);
-                        var source_lines = try initLineRange(self.parent.state, self.parent.io, self.parent.allocator, self.parent.patch_id_to_offset_list, source_line_ids.items);
-                        defer source_lines.deinit(self.parent.allocator);
-
-                        if (try appendResolvedOrConflict(self.parent.allocator, self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
-                            self.parent.has_conflict = true;
-                        }
-                        if (self.parent.line_buffer.items.len > 0) {
-                            self.parent.current_line = self.parent.line_buffer.items[0];
-                        }
-                    } else {
-                        var offset_list_cursor = (try self.parent.patch_id_to_offset_list.getCursor(first_line_id.patch_id)) orelse return error.KeyNotFound;
-                        const line = try readLine(self.parent.state, self.parent.io, self.parent.allocator, &offset_list_cursor, first_line_id);
-                        errdefer self.parent.allocator.free(line);
-                        try self.parent.line_buffer.append(self.parent.allocator, line);
-                        self.parent.current_line = self.parent.line_buffer.items[0];
-
-                        const next_children_cursor = (try self.parent.merge_live_parent_to_children.getCursor(first_line_id_hash)) orelse return error.KeyNotFound;
-                        var next_children_iter = try next_children_cursor.iterator();
-                        if (try next_children_iter.next()) |_| {
-                            self.parent.current_line_id_hash = first_line_id_hash;
-                        } else {
-                            self.parent.current_line_id_hash = null;
-                        }
-                    }
-                    return self.readStep(buf);
-                } else {
-                    return 0;
-                }
-            }
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const render_allocator = arena.allocator();
+    var lines: std.ArrayList([]const u8) = .empty;
+    has_conflict.* = false;
+    var index: usize = 0;
+    if (merged_file.has_conflict) {
+        const markers = try ConflictMarkers.init(render_allocator, base_oid, target_name, source_name);
+        var base_file = try patch.File(repo_opts).load(state.readOnly().extra.moment, snapshots.base, allocator, path_hash);
+        defer base_file.deinit();
+        var target_file = try patch.File(repo_opts).load(state.readOnly().extra.moment, snapshots.target, allocator, path_hash);
+        defer target_file.deinit();
+        var source_file = try patch.File(repo_opts).load(state.readOnly().extra.moment, snapshots.source[snapshots.source.len - 1], allocator, path_hash);
+        defer source_file.deinit();
+        var readers = [_]patch.File(repo_opts).TextReader{
+            .init(&base_file, allocator),
+            .init(&target_file, allocator),
+            .init(&source_file, allocator),
         };
-
-        pub fn seekTo(self: *@This(), offset: usize) !void {
-            for (self.line_buffer.items) |buffer| {
-                self.allocator.free(buffer);
+        defer for (&readers) |*reader| reader.deinit();
+        for (merged_file.regions.items) |region| {
+            while (index < merged_file.lines.items.len and std.mem.order(u8, merged_file.lines.items[index].position, region.start) == .lt) : (index += 1) {
+                try lines.append(render_allocator, try text_reader.readLine(merged_file.lines.items[index].id, render_allocator));
             }
-            self.line_buffer.clearAndFree(self.allocator);
-            self.current_line = null;
-            self.current_line_id_hash = hash.hashInt(repo_opts.hash, &patch.LineId(repo_opts.hash).first_bytes);
-            self.has_conflict = false;
-            self.interface.seek = 0;
-            self.interface.end = 0;
-
-            for (0..offset) |_| {
-                _ = try self.reader().readByte();
-            }
-        }
-
-        pub fn reader(self: *@This()) Reader {
-            return Reader{
-                .parent = self,
-            };
-        }
-
-        pub fn count(self: *@This()) !usize {
-            var n: usize = 0;
-            var read_buffer = [_]u8{0} ** repo_opts.read_size;
-            try self.seekTo(0);
-            while (true) {
-                const size = try self.reader().read(&read_buffer);
-                if (size == 0) {
-                    break;
+            var ranges = [_]LineRange{.{ .lines = .empty }} ** 3;
+            for (&readers, &ranges) |*reader, *range| {
+                for (reader.file.lines.items) |line| {
+                    if (region.contains(line.position)) try range.lines.append(render_allocator, try reader.readLine(line.id, render_allocator));
                 }
-                n += size;
             }
-            return n;
+            if (try appendResolvedOrConflict(render_allocator, &lines, &markers, &ranges[0], &ranges[1], &ranges[2])) has_conflict.* = true;
+            while (index < merged_file.lines.items.len and region.contains(merged_file.lines.items[index].position)) : (index += 1) {}
         }
-
-        fn stream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-            const r: *@This() = @alignCast(@fieldParentPtr("interface", io_r));
-            const dest = limit.slice(try io_w.writableSliceGreedy(1));
-            const size = r.reader().read(dest) catch return error.ReadFailed;
-            if (size == 0) return error.EndOfStream;
-            io_w.advance(size);
-            return size;
-        }
-    };
-
-    var markers = try ConflictMarkers.init(allocator, base_oid, target_name, source_name);
-    defer markers.deinit(allocator);
-
-    var stream_buffer = [_]u8{0} ** repo_opts.buffer_size;
-    var stream = Stream{
-        .state = state.readOnly(),
-        .io = io,
-        .allocator = allocator,
-        .markers = &markers,
-        .merge_live_parent_to_children = &merge_live_parent_to_children,
-        .base_live_parent_to_children = if (base_live_parent_to_children_maybe) |*map| map else null,
-        .target_live_parent_to_children = &target_live_parent_to_children,
-        .source_live_parent_to_children = &source_live_parent_to_children,
-        .patch_id_to_offset_list = &patch_id_to_offset_list,
-        .line_buffer = &line_buffer,
-        .current_line = null,
-        .current_line_id_hash = hash.hashInt(repo_opts.hash, &patch.LineId(repo_opts.hash).first_bytes),
-        .has_conflict = false,
-        .interface = .{
-            .vtable = &.{ .stream = Stream.stream },
-            .buffer = &stream_buffer,
-            .seek = 0,
-            .end = 0,
-        },
-    };
-
-    const header = obj.ObjectHeader{ .kind = .blob, .size = try stream.count() };
-    has_conflict.* = stream.has_conflict;
-    try stream.seekTo(0);
-
-    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-    try obj.writeObject(.xit, repo_opts, state, io, allocator, &stream.interface, header, &oid);
+    }
+    for (merged_file.lines.items[index..]) |line| try lines.append(render_allocator, try text_reader.readLine(line.id, render_allocator));
+    const content = try std.mem.join(render_allocator, "\n", lines.items);
+    var reader = std.Io.Reader.fixed(content);
+    var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+    try obj.writeObject(.xit, repo_opts, state, io, allocator, &reader, .{ .kind = .blob, .size = content.len }, &oid);
     return oid;
 }
 
@@ -1116,14 +768,13 @@ fn samePathConflict(
     io: std.Io,
     allocator: std.mem.Allocator,
     base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     target_name: []const u8,
     source_name: []const u8,
     target_change_maybe: ?tr.Change(repo_opts.hash),
     source_change: tr.Change(repo_opts.hash),
     path: []const u8,
     merge_algo: MergeAlgorithm,
+    context: *MergeContext(repo_kind, repo_opts),
 ) !SamePathConflictResult(repo_opts.hash) {
     if (target_change_maybe) |target_change| {
         const base_entry_maybe = source_change.old;
@@ -1167,10 +818,10 @@ fn samePathConflict(
                 var has_content_conflict = false;
 
                 const base_file_oid_maybe = if (base_entry_maybe) |base_entry| &base_entry.oid else null;
-                const patch_oid_maybe = if (oid_maybe == null and merge_algo == .patch)
-                    try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_content_conflict, path)
-                else
-                    null;
+                const patch_oid_maybe = if (oid_maybe == null and merge_algo == .patch) blk: {
+                    if (repo_kind != .xit) return error.PatchBasedMergeRequiresXitBackend;
+                    break :blk try writeBlobWithPatches(repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_content_conflict, path, context);
+                } else null;
                 const oid = oid_maybe orelse patch_oid_maybe orelse try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_content_conflict);
                 const mode = mode_maybe orelse target_entry.mode;
 
@@ -1420,10 +1071,6 @@ pub fn removeMergeState(
         error.FileNotFound => {},
         else => |e| return e,
     };
-
-    if (.xit == repo_kind) {
-        _ = try state.extra.moment.remove(hash.hashInt(repo_opts.hash, "merge-in-progress"));
-    }
 }
 
 pub const MergeKind = enum {
@@ -1566,20 +1213,13 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .oid => |oid| oid,
                     });
 
-                    // get the source, target, and base oids
-                    const source_oid, const target_commit_oid_maybe, const base_oid = blk: {
-                        const source_ref_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
-                        var ancestry = try Ancestry(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &(target_oid_maybe orelse source_ref_oid), &source_ref_oid);
-                        defer ancestry.deinit();
-                        // use commit oids for diffs, refs, and parents when a tip is a tag
-                        const target: ?[hash.hexLen(repo_opts.hash)]u8 = if (target_oid_maybe != null) ancestry.tips[0] else null;
-                        break :blk .{
-                            ancestry.tips[1],
-                            target,
-                            if (target != null) try ancestry.mergeBase(merge_input.kind) else [_]u8{0} ** hash.hexLen(repo_opts.hash),
-                        };
-                    };
-                    const target_oid = target_commit_oid_maybe orelse {
+                    const source_ref_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
+                    var context = try MergeContext(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &(target_oid_maybe orelse source_ref_oid), &source_ref_oid);
+                    defer context.deinit();
+
+                    // use commit oids for diffs, refs, and parents when a tip is a tag
+                    const source_oid = context.ancestry.tips[1];
+                    const target_oid = if (target_oid_maybe != null) context.ancestry.tips[0] else {
                         // make a TreeDiff that adds all files from source
                         try clean_diff.compare(state.readOnly(), io, null, &source_oid, null);
 
@@ -1601,6 +1241,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .result = .fast_forward,
                         };
                     };
+
+                    const base_oid = try context.mergeBase(merge_input.kind);
 
                     // if the base ancestor is the source oid, do nothing
                     if (std.mem.eql(u8, &source_oid, &base_oid)) {
@@ -1631,7 +1273,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // look for same path conflicts while populating the clean diff
                     for (source_diff.changes.keys(), source_diff.changes.values()) |path, source_change| {
-                        const same_path_result = try samePathConflict(repo_kind, repo_opts, state, io, allocator, &base_oid, &target_oid, &source_oid, target_name, source_name, target_diff.changes.get(path), source_change, path, merge_algo);
+                        const same_path_result = try samePathConflict(repo_kind, repo_opts, state, io, allocator, &base_oid, target_name, source_name, target_diff.changes.get(path), source_change, path, merge_algo, &context);
                         if (same_path_result.change) |change| {
                             try clean_diff.changes.put(clean_diff.allocator, path, change);
                         }
@@ -1678,9 +1320,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     if (target_ref_maybe == null) {
                         try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
-                    } else if (repo_kind == .xit and merge_algo == .patch) {
-                        // patch merging can leave temporary state behind
-                        try removeMergeState(repo_kind, repo_opts, state, io);
                     }
 
                     // exit early if there were conflicts
@@ -1702,11 +1341,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .source_name = source_name,
                             .result = .{ .conflict = .{ .conflicts = conflicts } },
                         };
-                    }
-
-                    if (target_ref_maybe == null and repo_kind == .xit) {
-                        // clear temporary patch state when no conflicts remain
-                        try removeMergeState(repo_kind, repo_opts, state, io);
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
@@ -1789,9 +1423,9 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // get the source, target, and base oids
                     const source_oid, const target_oid, const base_oid = blk: {
                         const target_ref_oid = target_oid_maybe orelse return error.TargetOidNotFound;
-                        var ancestry = try Ancestry(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &target_ref_oid, &source_head_oid);
-                        defer ancestry.deinit();
-                        break :blk .{ ancestry.tips[1], ancestry.tips[0], try ancestry.mergeBase(merge_input.kind) };
+                        var context = try MergeContext(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &target_ref_oid, &source_head_oid);
+                        defer context.deinit();
+                        break :blk .{ context.ancestry.tips[1], context.ancestry.tips[0], try context.mergeBase(merge_input.kind) };
                     };
 
                     // commit the change
@@ -1836,8 +1470,6 @@ fn writePossiblePatches(
     source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    const patch = @import("./patch.zig");
-
     var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
     defer patch_writer.deinit(io, allocator);
 

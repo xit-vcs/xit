@@ -39,10 +39,85 @@ fn pruneOidMap(
     }
 }
 
+fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, repo_opts).State(.read_write), allocator: std.mem.Allocator) !void {
+    const patch = @import("./patch.zig");
+    const xitdb = @import("xitdb");
+    const SlotInt = @typeInfo(xitdb.Slot).@"struct".backing_integer.?;
+    const slot_size = @bitSizeOf(SlotInt) / 8;
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    var visited = std.AutoHashMap(u64, void).init(allocator);
+    defer visited.deinit();
+    var patches = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
+    defer patches.deinit();
+    var edits = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
+    defer edits.deinit();
+    var pending: std.ArrayList(struct { cursor: DB.Cursor(.read_only), kind: enum { files, edits } }) = .empty;
+    defer pending.deinit(allocator);
+
+    // walk file maps and applied-edit sets with one worklist. snapshots share
+    // trie nodes, so skip nodes we've already visited instead of scanning
+    // each file's entire edit history at every commit.
+    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
+        var snapshot_iter = try snapshots.iterator();
+        while (try snapshot_iter.next()) |snapshot| {
+            try pending.append(allocator, .{ .cursor = (try snapshot.readKeyValuePair()).value_cursor, .kind = .files });
+            while (pending.pop()) |entry| {
+                const cursor = entry.cursor;
+                const slot = cursor.slot();
+                if (slot.tag == .none) continue;
+                if ((try visited.getOrPut(slot.value)).found_existing) continue;
+                switch (slot.tag) {
+                    .kv_pair => {
+                        const kv_pair = try cursor.readKeyValuePair();
+                        if (entry.kind == .edits) {
+                            try edits.put(kv_pair.hash, {});
+                            continue;
+                        }
+                        const fields = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
+                        if (try fields.getCursor(@intFromEnum(patch.FileField.patch))) |patch_cursor| {
+                            if (patch_cursor.slot().tag != .none) {
+                                var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                                _ = try patch_cursor.readBytes(&id);
+                                try patches.put(hash.bytesToInt(repo_opts.hash, &id), {});
+                            }
+                        }
+                        if (try fields.getCursor(@intFromEnum(patch.FileField.edits))) |edit_cursor| {
+                            try pending.append(allocator, .{ .cursor = edit_cursor, .kind = .edits });
+                        }
+                    },
+                    .hash_map, .hash_set, .index => {
+                        var reader = cursor.db.core.reader();
+                        try reader.seekTo(slot.value);
+                        var bytes: [xitdb.SLOT_COUNT * slot_size]u8 = undefined;
+                        try reader.interface.readSliceAll(&bytes);
+                        var slots = std.Io.Reader.fixed(&bytes);
+                        for (0..xitdb.SLOT_COUNT) |i| {
+                            const child: xitdb.Slot = @bitCast(try slots.takeInt(SlotInt, .big));
+                            try child.tag.validate();
+                            if (child.empty()) continue;
+                            try pending.append(allocator, .{
+                                .cursor = .{
+                                    .db = cursor.db,
+                                    .slot_ptr = .{ .position = slot.value + i * slot_size, .slot = child },
+                                },
+                                .kind = entry.kind,
+                            });
+                        }
+                    },
+                    else => return error.UnexpectedTag,
+                }
+            }
+        }
+    }
+
+    try pruneOidMap(repo_opts, state, &patches, "patch-id->edit-list");
+    try pruneOidMap(repo_opts, state, &edits, "edit-id->edit");
+}
+
 // the new repo db, ready to be renamed over "db"
 const db_new_name = "db.gc";
 
-// removes dead objects, snapshots, and chunks from the moment being written.
+// removes dead objects, snapshots, patch data, and chunks from the moment being written.
 // their records still take up space until compactDatabase runs afterwards.
 pub fn prune(
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -73,6 +148,7 @@ pub fn prune(
     // loaded for live commits or seeded from a live commit's parent.
     try pruneOidMap(repo_opts, state, &live_oids, "commit-id->snapshot");
     try pruneOidMap(repo_opts, state, &live_oids, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
+    try prunePatchData(repo_opts, state, allocator);
 
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"))) |old_chunk_map_cursor| {
         const old_chunk_map = try DB.HashMap(.read_only).init(old_chunk_map_cursor);
