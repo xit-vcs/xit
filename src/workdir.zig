@@ -953,6 +953,30 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
                 defer index.deinit();
 
+                if (input.force) {
+                    // aborting a merge must also undo its clean, staged changes
+                    var target_tree = try tr.Tree(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &target_oid);
+                    defer target_tree.deinit();
+                    for (target_tree.entries.keys(), target_tree.entries.values()) |path, entry| {
+                        // a conflict entry at a target directory only needs to leave the index
+                        var parent_maybe = std.fs.path.dirname(path);
+                        while (parent_maybe) |parent| : (parent_maybe = std.fs.path.dirname(parent)) {
+                            if (index.entries.get(parent)) |entries| {
+                                if (entries[0] == null) try index.removePath(parent, null);
+                            }
+                        }
+                        const staged = if (index.entries.get(path)) |entries| entries[0] else null;
+                        if (compareTreeToIndex(repo_kind, repo_opts, entry, staged) == .none) continue;
+                        const owned_path = try tree_diff.arena.allocator().dupe(u8, path);
+                        try tree_diff.changes.put(tree_diff.allocator, owned_path, .{ .old = null, .new = entry });
+                    }
+                    for (index.entries.keys()) |path| {
+                        if (!target_tree.entries.contains(path)) {
+                            try tree_diff.changes.put(tree_diff.allocator, path, .{ .old = null, .new = null });
+                        }
+                    }
+                }
+
                 // update the work dir
                 try migrate(repo_kind, repo_opts, state, io, allocator, tree_diff, &index, input.update_work_dir, input.dry_run, if (input.force) null else &switch_result);
 

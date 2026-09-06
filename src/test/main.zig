@@ -1454,13 +1454,14 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         // abort the merge
         try main.run(repo_kind, any_repo_opts, io, allocator, &.{ "merge", "--abort" }, work_path, run_opts);
 
-        // there are no conflicts in the index
+        // abort restores the index, including the clean merge changes
         {
             var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
             defer repo.deinit(io, allocator);
             var status = try repo.status(io, allocator);
             defer status.deinit(allocator);
             try std.testing.expectEqual(0, status.unresolved_conflicts.count());
+            try std.testing.expectEqual(0, status.index_added.count() + status.index_modified.count() + status.index_deleted.count());
         }
 
         // merge again

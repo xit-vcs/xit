@@ -10,26 +10,147 @@ const df = @import("./diff.zig");
 const tr = @import("./tree.zig");
 const cfg = @import("./config.zig");
 
-fn CommitParent(comptime hash_kind: hash.HashKind) type {
+fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        oid: [hash.hexLen(hash_kind)]u8,
-        kind: enum { one, two, stale },
-        timestamp: u64,
-    };
-}
+        const Self = @This();
+        const Oid = [hash.hexLen(repo_opts.hash)]u8;
+        const one = 1;
+        const two = 2;
+        const both = one | two;
+        const stale = 4;
 
-fn CommitParentsQueue(comptime hash_kind: hash.HashKind) type {
-    const compareFn = struct {
-        fn compareCommitParents(_: void, a: CommitParent(hash_kind), b: CommitParent(hash_kind)) std.math.Order {
-            return std.math.order(b.timestamp, a.timestamp); // Pop latest first
+        const Node = struct {
+            parents: []const Oid = &.{},
+            timestamp: u64 = 0,
+            tag_target: ?Oid = null,
+            flags: u3 = 0,
+            queued: bool = false,
+        };
+
+        const QueueEntry = struct {
+            oid: Oid,
+            timestamp: u64,
+
+            fn compare(_: void, a: QueueEntry, b: QueueEntry) std.math.Order {
+                // timestamps only choose the work order
+                const order = std.math.order(b.timestamp, a.timestamp);
+                return if (order == .eq) std.mem.order(u8, &a.oid, &b.oid) else order;
+            }
+        };
+
+        state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        arena: std.heap.ArenaAllocator,
+        nodes: std.AutoHashMapUnmanaged(Oid, Node) = .empty,
+        queue: std.PriorityQueue(QueueEntry, void, QueueEntry.compare) = .empty,
+        tips: [2]Oid = undefined,
+        // queued commits that haven't been marked stale
+        pending: usize = 0,
+        base_count: usize = 0,
+
+        fn init(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            oid1: *const Oid,
+            oid2: *const Oid,
+        ) !Self {
+            var self = Self{ .state = state, .io = io, .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator) };
+            errdefer self.deinit();
+            self.tips = .{ try self.peel(oid1.*), try self.peel(oid2.*) };
+            try self.paint(self.tips[0], one);
+            try self.paint(self.tips[1], two);
+            return self;
         }
-    }.compareCommitParents;
 
-    return std.PriorityQueue(
-        CommitParent(hash_kind),
-        void,
-        compareFn,
-    );
+        fn deinit(self: *Self) void {
+            self.queue.deinit(self.allocator);
+            self.nodes.deinit(self.allocator);
+            self.arena.deinit();
+        }
+
+        fn load(self: *Self, oid: Oid) !*Node {
+            const entry = try self.nodes.getOrPut(self.allocator, oid);
+            if (entry.found_existing) return entry.value_ptr;
+            errdefer _ = self.nodes.remove(oid);
+
+            var object = try obj.Object(repo_kind, repo_opts).init(self.state, self.io, self.allocator, &oid);
+            defer object.deinit();
+            entry.value_ptr.* = switch (object.content) {
+                .commit => |commit| .{
+                    .parents = try self.arena.allocator().dupe(Oid, commit.metadata.parent_oids orelse &.{}),
+                    .timestamp = commit.metadata.timestamp,
+                },
+                .tag => |tag| .{ .tag_target = tag.target },
+                else => return error.CommitNotFound,
+            };
+            return entry.value_ptr;
+        }
+
+        fn peel(self: *Self, oid: Oid) !Oid {
+            var current = oid;
+            while ((try self.load(current)).tag_target) |target| current = target;
+            return current;
+        }
+
+        fn paint(self: *Self, oid: Oid, flags: u3) !void {
+            const node = try self.load(oid);
+            if (node.tag_target != null) return error.CommitNotFound;
+            const combined = node.flags | flags;
+            if (combined == node.flags) return;
+
+            if (node.flags == both) self.base_count -= 1;
+            if (combined == both) self.base_count += 1;
+            if (node.queued and node.flags & stale == 0 and combined & stale != 0) self.pending -= 1;
+            node.flags = combined;
+            if (!node.queued) {
+                try self.queue.push(self.allocator, .{ .oid = oid, .timestamp = node.timestamp });
+                node.queued = true;
+                if (combined & stale == 0) self.pending += 1;
+            }
+        }
+
+        fn step(self: *Self) !bool {
+            const entry = self.queue.pop() orelse return false;
+            const node = self.nodes.getPtr(entry.oid).?;
+            node.queued = false;
+            if (node.flags & stale == 0) self.pending -= 1;
+
+            // ancestors of a common ancestor cannot be best merge bases
+            const flags = node.flags | @as(u3, if (node.flags & both == both) stale else 0);
+            // loading parents can move the map, so don't retain a pointer into it
+            const parents = node.parents;
+            for (parents) |parent| try self.paint(parent, flags);
+            return true;
+        }
+
+        fn tipIsCommon(self: *const Self, side: usize) bool {
+            return self.nodes.get(self.tips[side]).?.flags & both == both;
+        }
+
+        fn commonAncestor(self: *Self) !Oid {
+            while (true) {
+                if (self.tipIsCommon(0)) return self.tips[0];
+                if (self.tipIsCommon(1)) return self.tips[1];
+                // stale work still needs to eliminate redundant candidates when there are several
+                if (self.pending == 0 and self.base_count <= 1) break;
+                if (!try self.step()) break;
+            }
+            if (self.base_count > 1) return error.MultipleMergeBases;
+            var iter = self.nodes.iterator();
+            while (iter.next()) |entry| {
+                if (entry.value_ptr.flags == both) return entry.key_ptr.*;
+            }
+            return error.NoCommonAncestor;
+        }
+
+        fn mergeBase(self: *Self, kind: MergeKind) !Oid {
+            if (kind == .full) return self.commonAncestor();
+            const parents = self.nodes.get(self.tips[1]).?.parents;
+            return if (parents.len > 0) parents[0] else error.CommitMustHaveOneParent;
+        }
+    };
 }
 
 pub fn getDescendent(
@@ -41,66 +162,16 @@ pub fn getDescendent(
     oid1: *const [hash.hexLen(repo_opts.hash)]u8,
     oid2: *const [hash.hexLen(repo_opts.hash)]u8,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    if (std.mem.eql(u8, oid1, oid2)) {
-        return oid1.*;
+    var ancestry = try Ancestry(repo_kind, repo_opts).init(state, io, allocator, oid1, oid2);
+    defer ancestry.deinit();
+    while (true) {
+        if (ancestry.tipIsCommon(0)) return ancestry.tips[1];
+        if (ancestry.tipIsCommon(1)) return ancestry.tips[0];
+        if (ancestry.pending == 0 or !try ancestry.step()) return error.DescendentNotFound;
     }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var queue: CommitParentsQueue(repo_opts.hash) = .empty;
-
-    {
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid1);
-        if (object.content.commit.metadata.parent_oids) |parent_oids| {
-            for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
-                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .one, .timestamp = parent_object.content.commit.metadata.timestamp });
-            }
-        }
-    }
-
-    {
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid2);
-        if (object.content.commit.metadata.parent_oids) |parent_oids| {
-            for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
-                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = .two, .timestamp = parent_object.content.commit.metadata.timestamp });
-            }
-        }
-    }
-
-    while (queue.pop()) |node| {
-        switch (node.kind) {
-            .one => {
-                if (std.mem.eql(u8, oid2, &node.oid)) {
-                    return oid1.*;
-                } else if (std.mem.eql(u8, oid1, &node.oid)) {
-                    continue; // this oid was already added to the queue
-                }
-            },
-            .two => {
-                if (std.mem.eql(u8, oid1, &node.oid)) {
-                    return oid2.*;
-                } else if (std.mem.eql(u8, oid2, &node.oid)) {
-                    continue; // this oid was already added to the queue
-                }
-            },
-            .stale => unreachable,
-        }
-
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &node.oid);
-        if (object.content.commit.metadata.parent_oids) |parent_oids| {
-            for (parent_oids) |parent_oid| {
-                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
-                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
-            }
-        }
-    }
-
-    return error.DescendentNotFound;
 }
 
+/// returns the unique best common ancestor, rejecting multiple incomparable bases
 pub fn commonAncestor(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -110,107 +181,9 @@ pub fn commonAncestor(
     oid1: *const [hash.hexLen(repo_opts.hash)]u8,
     oid2: *const [hash.hexLen(repo_opts.hash)]u8,
 ) ![hash.hexLen(repo_opts.hash)]u8 {
-    if (std.mem.eql(u8, oid1, oid2)) {
-        return oid1.*;
-    }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var queue: CommitParentsQueue(repo_opts.hash) = .empty;
-
-    {
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid1);
-        try queue.push(arena.allocator(), .{ .oid = oid1.*, .kind = .one, .timestamp = object.content.commit.metadata.timestamp });
-    }
-
-    {
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), oid2);
-        try queue.push(arena.allocator(), .{ .oid = oid2.*, .kind = .two, .timestamp = object.content.commit.metadata.timestamp });
-    }
-
-    var parents_of_1 = std.StringHashMap(void).init(arena.allocator());
-    var parents_of_2 = std.StringHashMap(void).init(arena.allocator());
-    var parents_of_both: std.StringArrayHashMapUnmanaged(void) = .empty;
-    var stale_oids = std.StringHashMap(void).init(arena.allocator());
-
-    while (queue.pop()) |node| {
-        switch (node.kind) {
-            .one => {
-                if (std.mem.eql(u8, &node.oid, oid2)) {
-                    return oid2.*;
-                } else if (parents_of_2.contains(&node.oid)) {
-                    try parents_of_both.put(arena.allocator(), try arena.allocator().dupe(u8, &node.oid), {});
-                } else if (parents_of_1.contains(&node.oid)) {
-                    continue; // this oid was already added to the queue
-                } else {
-                    try parents_of_1.put(try arena.allocator().dupe(u8, &node.oid), {});
-                }
-            },
-            .two => {
-                if (std.mem.eql(u8, &node.oid, oid1)) {
-                    return oid1.*;
-                } else if (parents_of_1.contains(&node.oid)) {
-                    try parents_of_both.put(arena.allocator(), try arena.allocator().dupe(u8, &node.oid), {});
-                } else if (parents_of_2.contains(&node.oid)) {
-                    continue; // this oid was already added to the queue
-                } else {
-                    try parents_of_2.put(try arena.allocator().dupe(u8, &node.oid), {});
-                }
-            },
-            .stale => {
-                try stale_oids.put(try arena.allocator().dupe(u8, &node.oid), {});
-            },
-        }
-
-        const is_base_ancestor = parents_of_both.contains(&node.oid);
-
-        const object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &node.oid);
-        if (object.content.commit.metadata.parent_oids) |parent_oids| {
-            parents: for (parent_oids) |parent_oid| {
-                const is_stale = is_base_ancestor or stale_oids.contains(&parent_oid);
-                if (is_stale) {
-                    var iter = queue.iterator();
-                    while (iter.next()) |node_in_queue| {
-                        // Catch up with another side, update node's kind in the queue
-                        // to avoid confusion which could lead to endless loop
-                        if (std.mem.eql(u8, &node_in_queue.oid, &parent_oid)) {
-                            try queue.update(node_in_queue, .{ .oid = node_in_queue.oid, .kind = .stale, .timestamp = node_in_queue.timestamp });
-                            continue :parents;
-                        }
-                    }
-                }
-                const parent_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, arena.allocator(), &parent_oid);
-                try queue.push(arena.allocator(), .{ .oid = parent_oid, .kind = if (is_stale) .stale else node.kind, .timestamp = parent_object.content.commit.metadata.timestamp });
-            }
-        }
-
-        // stop if queue only has stale nodes
-        var queue_is_stale = true;
-        var iter = queue.iterator();
-        while (iter.next()) |next_node| {
-            if (next_node.kind != .stale) {
-                queue_is_stale = false;
-                break;
-            }
-        }
-        if (queue_is_stale) {
-            break;
-        }
-    }
-
-    const base_ancestor_count = parents_of_both.count();
-    if (base_ancestor_count > 1) {
-        var oid = parents_of_both.keys()[0][0..comptime hash.hexLen(repo_opts.hash)].*;
-        for (parents_of_both.keys()[1..]) |next_oid| {
-            oid = try getDescendent(repo_kind, repo_opts, state, io, allocator, oid[0..comptime hash.hexLen(repo_opts.hash)], next_oid[0..comptime hash.hexLen(repo_opts.hash)]);
-        }
-        return oid;
-    } else if (base_ancestor_count == 1) {
-        return parents_of_both.keys()[0][0..comptime hash.hexLen(repo_opts.hash)].*;
-    } else {
-        return error.NoCommonAncestor;
-    }
+    var ancestry = try Ancestry(repo_kind, repo_opts).init(state, io, allocator, oid1, oid2);
+    defer ancestry.deinit();
+    return ancestry.commonAncestor();
 }
 
 pub fn RenamedEntry(comptime hash_kind: hash.HashKind) type {
@@ -1202,14 +1175,14 @@ fn samePathConflict(
                     break :blk null;
                 };
 
-                var has_conflict = oid_maybe == null or mode_maybe == null;
+                var has_content_conflict = false;
 
                 const base_file_oid_maybe = if (base_entry_maybe) |base_entry| &base_entry.oid else null;
                 const patch_oid_maybe = if (oid_maybe == null and merge_algo == .patch)
-                    try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_conflict, path)
+                    try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_content_conflict, path)
                 else
                     null;
-                const oid = oid_maybe orelse patch_oid_maybe orelse try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_conflict);
+                const oid = oid_maybe orelse patch_oid_maybe orelse try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_content_conflict);
                 const mode = mode_maybe orelse target_entry.mode;
 
                 return .{
@@ -1217,7 +1190,7 @@ fn samePathConflict(
                         .old = target_change.new,
                         .new = .{ .oid = oid, .mode = mode },
                     },
-                    .conflict = if (has_conflict)
+                    .conflict = if (has_content_conflict or mode_maybe == null)
                         .{
                             .base = base_entry_maybe,
                             .target = target_entry,
@@ -1319,6 +1292,70 @@ fn fileDirConflict(
         }
         parent_path_maybe = std.fs.path.dirname(parent_path);
     }
+}
+
+fn migrateWorktree(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    diff: tr.TreeDiff(repo_kind, repo_opts),
+    conflicts: std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)),
+) !void {
+    // release the index lock before the caller updates refs or writes a commit
+    var lock_maybe: ?fs.LockFile = null;
+    defer if (lock_maybe) |*lock| lock.deinit(io);
+    const write_state: rp.Repo(repo_kind, repo_opts).State(.read_write) = switch (repo_kind) {
+        .git => blk: {
+            const lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
+            lock_maybe = lock;
+            break :blk .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
+        },
+        .xit => state,
+    };
+    var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+    defer index.deinit();
+
+    // a merge commit must not include unrelated staged changes
+    var head_tree = try tr.Tree(repo_kind, repo_opts).init(state.readOnly(), io, allocator, null);
+    defer head_tree.deinit();
+    if (index.entries.count() != head_tree.entries.count()) return error.CannotMergeWithLocalChanges;
+    for (head_tree.entries.keys(), head_tree.entries.values()) |path, entry| {
+        const staged = (index.entries.get(path) orelse return error.CannotMergeWithLocalChanges)[0] orelse return error.CannotMergeWithLocalChanges;
+        if (!entry.eql(.{ .oid = staged.oid, .mode = staged.mode })) return error.CannotMergeWithLocalChanges;
+    }
+
+    var check_diff = tr.TreeDiff(repo_kind, repo_opts).init(allocator);
+    defer check_diff.deinit();
+    check_diff.changes = try diff.changes.clone(allocator);
+    for (diff.changes.keys(), diff.changes.values()) |path, change| {
+        // checkout allows missing tracked files, but merging must preserve local deletions
+        if (change.old != null) {
+            _ = state.core.work_dir.statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir => return error.CannotMergeWithLocalChanges,
+                else => return err,
+            };
+        }
+    }
+    for (conflicts.values()) |conflict| {
+        if (conflict.renamed) |renamed| {
+            try check_diff.changes.put(allocator, renamed.path, .{ .old = null, .new = renamed.tree_entry });
+        }
+    }
+    var check = work.Switch(repo_kind, repo_opts){ .arena = &check_diff.arena, .allocator = allocator, .result = .success };
+    try work.migrate(repo_kind, repo_opts, state, io, allocator, check_diff, &index, true, true, &check);
+    if (check.result == .conflict) return error.CannotMergeWithLocalChanges;
+
+    try work.migrate(repo_kind, repo_opts, state, io, allocator, diff, &index, true, false, null);
+    for (conflicts.keys(), conflicts.values()) |path, conflict| {
+        try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
+        if (conflict.renamed) |renamed| {
+            try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
+        }
+    }
+    try index.write(allocator, write_state, io);
+    if (lock_maybe) |*lock| lock.success = true;
 }
 
 const merge_head_names = &[_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD" };
@@ -1452,8 +1489,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 .cont => return error.CannotContinueMergeAtRef,
             };
 
-            // TODO: exit early if work dir is dirty
-
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer {
@@ -1533,23 +1568,29 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         .oid => |oid| oid,
                     });
 
-                    // get the source and target oid
-                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
-                    const target_oid = target_oid_maybe orelse {
+                    // get the source, target, and base oids
+                    const source_oid, const target_commit_oid_maybe, const base_oid = blk: {
+                        const source_ref_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, source_ref_or_oid) orelse return error.InvalidMergeSource;
+                        var ancestry = try Ancestry(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &(target_oid_maybe orelse source_ref_oid), &source_ref_oid);
+                        defer ancestry.deinit();
+                        // use commit oids for diffs, refs, and parents when a tip is a tag
+                        const target: ?[hash.hexLen(repo_opts.hash)]u8 = if (target_oid_maybe != null) ancestry.tips[0] else null;
+                        break :blk .{
+                            ancestry.tips[1],
+                            target,
+                            if (target != null) try ancestry.mergeBase(merge_input.kind) else [_]u8{0} ** hash.hexLen(repo_opts.hash),
+                        };
+                    };
+                    const target_oid = target_commit_oid_maybe orelse {
                         // make a TreeDiff that adds all files from source
                         try clean_diff.compare(state.readOnly(), io, null, &source_oid, null);
 
-                        // the target branch is completely empty, so just set it to the source oid
-                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
-
                         if (target_ref_maybe == null) {
-                            // read index
-                            var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                            defer index.deinit();
-
-                            // update the work dir
-                            try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, false, null);
+                            try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
                         }
+
+                        // update the empty branch only after the work dir checks succeed
+                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
 
                         return .{
                             .arena = arena,
@@ -1562,21 +1603,6 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .result = .fast_forward,
                         };
                     };
-
-                    // get the base oid
-                    var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-                    switch (merge_input.kind) {
-                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
-                        .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
-                            defer object.deinit();
-                            const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
-                            switch (object.content) {
-                                .commit => base_oid = parent_oid.*,
-                                else => return error.CommitObjectNotFound,
-                            }
-                        },
-                    }
 
                     // if the base ancestor is the source oid, do nothing
                     if (std.mem.eql(u8, &source_oid, &base_oid)) {
@@ -1663,43 +1689,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             };
                         }
                     } else {
-                        // this block must end before the commit is written below, because
-                        // the git backend holds a lock on the index file until then and
-                        // writing the commit will read the index file
-
-                        // the git backend needs a lock on the index file while it's updated
-                        var lock_maybe: ?fs.LockFile = null;
-                        defer if (lock_maybe) |*lock| lock.deinit(io);
-                        const write_state: rp.Repo(repo_kind, repo_opts).State(.read_write) = switch (repo_kind) {
-                            .git => blk: {
-                                const lock = try fs.LockFile.init(io, state.core.repo_dir, "index");
-                                lock_maybe = lock;
-                                break :blk .{ .core = state.core, .extra = .{ .lock_file_maybe = lock.lock_file } };
-                            },
-                            .xit => state,
-                        };
-
-                        // read index
-                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                        defer index.deinit();
-
-                        // update the work dir
-                        try work.migrate(repo_kind, repo_opts, state, io, allocator, clean_diff, &index, true, false, null);
-
-                        for (conflicts.keys(), conflicts.values()) |path, conflict| {
-                            // add conflict to index
-                            try index.addConflictEntries(path, .{ conflict.base, conflict.target, conflict.source });
-                            // write renamed file if necessary
-                            if (conflict.renamed) |renamed| {
-                                try work.objectToFile(repo_kind, repo_opts, state.readOnly(), io, allocator, renamed.path, renamed.tree_entry);
-                            }
-                        }
-
-                        // update the index
-                        try index.write(allocator, write_state, io);
-
-                        // finish lock
-                        if (lock_maybe) |*lock| lock.success = true;
+                        try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
 
                         // exit early if there were conflicts
                         if (conflicts.count() > 0) {
@@ -1783,7 +1773,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // make sure there isn't another kind of merge in progress
                     try checkForOtherMerge(repo_kind, repo_opts, state.readOnly(), io, merge_head_name);
 
-                    const source_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .none, .name = merge_head_name } }) orelse return error.MergeHeadNotFound;
+                    const source_head_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = .{ .kind = .none, .name = merge_head_name } }) orelse return error.MergeHeadNotFound;
 
                     // read the merge message
                     var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
@@ -1794,23 +1784,15 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // we need to return the source name but we don't have it,
                     // so just copy the source oid into a buffer and return that instead
-                    const source_name = try arena.allocator().dupe(u8, &source_oid);
+                    const source_name = try arena.allocator().dupe(u8, &source_head_oid);
 
-                    // get the base oid
-                    var base_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
-                    const target_oid = target_oid_maybe orelse return error.TargetOidNotFound;
-                    switch (merge_input.kind) {
-                        .full => base_oid = try commonAncestor(repo_kind, repo_opts, state.readOnly(), io, allocator, &target_oid, &source_oid),
-                        .pick => {
-                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
-                            defer object.deinit();
-                            const parent_oid = object.content.commit.metadata.firstParent() orelse return error.CommitMustHaveOneParent;
-                            switch (object.content) {
-                                .commit => base_oid = parent_oid.*,
-                                else => return error.CommitObjectNotFound,
-                            }
-                        },
-                    }
+                    // get the source, target, and base oids
+                    const source_oid, const target_oid, const base_oid = blk: {
+                        const target_ref_oid = target_oid_maybe orelse return error.TargetOidNotFound;
+                        var ancestry = try Ancestry(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &target_ref_oid, &source_head_oid);
+                        defer ancestry.deinit();
+                        break :blk .{ ancestry.tips[1], ancestry.tips[0], try ancestry.mergeBase(merge_input.kind) };
+                    };
 
                     // clean up the stored merge state
                     try removeMergeState(repo_kind, repo_opts, state, io);

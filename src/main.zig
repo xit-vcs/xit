@@ -286,6 +286,8 @@ pub fn runPrint(
             ,
             error.SubmodulesNotSupported => "repos with submodules aren't supported right now, sowwy\n",
             error.InvalidMergeSource => "your merge source doesn't look right and you should feel bad\n",
+            error.MultipleMergeBases => "these histories have multiple merge bases; merging them isn't supported yet\n",
+            error.CannotMergeWithLocalChanges => "commit or unstage staged changes, and move or restore local files that the merge would overwrite\n",
             error.InvalidSwitchTarget => "your switch target doesn't look right and you should feel bad\n",
             error.UnfinishedMergeInProgress => "there is an unfinished merge in progress! use `--continue` or `--abort` to finish it.\n",
             error.OtherMergeInProgress => "there's another merge already in progress! use `--continue` or `--abort` to finish it.\n",

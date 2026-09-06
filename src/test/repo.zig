@@ -324,6 +324,421 @@ test "merge" {
     try testMerge(.xit, .{ .is_test = true });
 }
 
+test "merge ancestry" {
+    try testMergeAncestry(.git, .{ .is_test = true }, .basic);
+    try testMergeAncestry(.git, .{ .is_test = true }, .equal_timestamps);
+    try testMergeAncestry(.git, .{ .is_test = true }, .clock_skew);
+    try testMergeAncestry(.git, .{ .is_test = true }, .criss_cross);
+    try testMergeAncestry(.git, .{ .is_test = true }, .diamonds);
+    try testMergeAncestry(.git, .{ .is_test = true }, .tags);
+
+    try testMergeAncestry(.xit, .{ .is_test = true }, .basic);
+    try testMergeAncestry(.xit, .{ .is_test = true }, .equal_timestamps);
+    try testMergeAncestry(.xit, .{ .is_test = true }, .clock_skew);
+    try testMergeAncestry(.xit, .{ .is_test = true }, .criss_cross);
+    try testMergeAncestry(.xit, .{ .is_test = true }, .diamonds);
+    try testMergeAncestry(.xit, .{ .is_test = true }, .tags);
+}
+
+fn testMergeAncestry(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime case: enum { basic, equal_timestamps, clock_skew, criss_cross, diamonds, tags },
+) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    errdefer std.debug.print("merge ancestry: {s}, {s}\n", .{ @tagName(repo_kind), @tagName(case) });
+
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    const parents: []const []const usize = switch (case) {
+        .basic => &.{ &.{}, &.{0}, &.{0}, &.{ 1, 2 }, &.{3}, &.{} },
+        // a--b--c, with d's parents [b, c], so c is the base of c and d
+        .equal_timestamps => &.{ &.{}, &.{0}, &.{1}, &.{ 1, 2 } },
+        // d merges b and c, and both tips descend from d despite their dates
+        .clock_skew => &.{ &.{}, &.{0}, &.{0}, &.{ 2, 1 }, &.{ 3, 2 }, &.{ 1, 4 }, &.{ 3, 2 } },
+        // b and c are incomparable best bases of the two merge commits
+        .criss_cross => &.{ &.{}, &.{0}, &.{0}, &.{ 1, 2 }, &.{ 2, 1 } },
+        // many paths through a small graph must not cause repeated reads
+        .diamonds => &.{
+            &.{},         &.{0},        &.{0},        &.{ 1, 2 },   &.{ 1, 2 },
+            &.{ 3, 4 },   &.{ 3, 4 },   &.{ 5, 6 },   &.{ 5, 6 },   &.{ 7, 8 },
+            &.{ 7, 8 },   &.{ 9, 10 },  &.{ 9, 10 },  &.{ 11, 12 }, &.{ 11, 12 },
+            &.{ 13, 14 }, &.{ 13, 14 }, &.{ 15, 16 }, &.{ 15, 16 }, &.{ 17, 18 },
+            &.{ 17, 18 }, &.{ 19, 20 }, &.{ 19, 20 }, &.{ 21, 22 }, &.{ 21, 22 },
+            &.{},
+        },
+        .tags => &.{ &.{}, &.{0} },
+    };
+    const oid_count = parents.len + (if (case == .tags) 2 else 0);
+    var oids: [oid_count][hash.hexLen(repo_opts.hash)]u8 = undefined;
+    for (parents, 0..) |parent_indices, i| {
+        var parent_oids: [2][hash.hexLen(repo_opts.hash)]u8 = undefined;
+        for (parent_indices, 0..) |parent, j| parent_oids[j] = oids[parent];
+        const message = [_]u8{'a' + @as(u8, @intCast(i))};
+        if (case == .tags) try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", &message);
+        oids[i] = try repo.commit(io, allocator, .{
+            .message = &message,
+            .parent_oids = parent_oids[0..parent_indices.len],
+            .allow_empty = true,
+            .timestamp = switch (case) {
+                .equal_timestamps => 100,
+                .clock_skew => ([_]u64{ 161, 137, 173, 146, 117, 166, 120 })[i],
+                else => 100 + i,
+            },
+        });
+    }
+    if (case == .tags) {
+        oids[2] = try repo.addTag(io, allocator, .{ .name = "tag", .message = "annotated" });
+        try repo.resetAdd(io, .{ .oid = &oids[2] });
+        oids[3] = try repo.addTag(io, allocator, .{ .name = "nested", .message = "annotated" });
+        try repo.resetAdd(io, .{ .oid = &oids[1] });
+    }
+
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    // count open object readers through Io
+    var files = struct {
+        threaded: std.Io.Threaded,
+        open_count: usize = 0,
+        read_count: usize = 0,
+
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, opts: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, opts);
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata.?));
+            const self: *@This() = @fieldParentPtr("threaded", threaded);
+            self.open_count += 1;
+            self.read_count += 1;
+            return file;
+        }
+
+        fn close(userdata: ?*anyopaque, handles: []const std.Io.File) void {
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata.?));
+            const self: *@This() = @fieldParentPtr("threaded", threaded);
+            self.open_count -= handles.len;
+            std.testing.io.vtable.fileClose(userdata, handles);
+        }
+    }{ .threaded = std.Io.Threaded.init(allocator, .{}) };
+    defer files.threaded.deinit();
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirOpenFile = @TypeOf(files).open;
+    vtable.fileClose = @TypeOf(files).close;
+    const ancestry_io: std.Io = .{ .userdata = &files.threaded, .vtable = &vtable };
+
+    const Query = struct { a: usize, b: usize, ancestor: anyerror!usize, descendent: ?usize, max_reads: usize = oid_count };
+    const queries: []const Query = switch (case) {
+        .basic => &.{
+            .{ .a = 0, .b = 0, .ancestor = 0, .descendent = 0, .max_reads = 1 },
+            .{ .a = 0, .b = 4, .ancestor = 0, .descendent = 4 },
+            .{ .a = 3, .b = 4, .ancestor = 3, .descendent = 4 },
+            .{ .a = 1, .b = 2, .ancestor = 0, .descendent = null },
+            .{ .a = 2, .b = 4, .ancestor = 2, .descendent = 4 },
+            .{ .a = 4, .b = 5, .ancestor = error.NoCommonAncestor, .descendent = null },
+        },
+        .equal_timestamps => &.{.{ .a = 2, .b = 3, .ancestor = 2, .descendent = 3 }},
+        .clock_skew => &.{.{ .a = 5, .b = 6, .ancestor = 3, .descendent = null }},
+        .criss_cross => &.{.{ .a = 3, .b = 4, .ancestor = error.MultipleMergeBases, .descendent = null }},
+        .diamonds => &.{
+            .{ .a = 21, .b = 23, .ancestor = 21, .descendent = 23, .max_reads = 3 },
+            .{ .a = 0, .b = 23, .ancestor = 0, .descendent = 23 },
+            .{ .a = 23, .b = 24, .ancestor = error.MultipleMergeBases, .descendent = null },
+            .{ .a = 23, .b = 25, .ancestor = error.NoCommonAncestor, .descendent = null },
+        },
+        .tags => &.{
+            .{ .a = 0, .b = 2, .ancestor = 0, .descendent = 1 },
+            .{ .a = 1, .b = 2, .ancestor = 1, .descendent = 1, .max_reads = 2 },
+            .{ .a = 2, .b = 2, .ancestor = 1, .descendent = 1, .max_reads = 2 },
+            .{ .a = 2, .b = 3, .ancestor = 1, .descendent = 1, .max_reads = 3 },
+            .{ .a = 3, .b = 3, .ancestor = 1, .descendent = 1, .max_reads = 3 },
+        },
+    };
+    for (queries) |query| {
+        for ([_][2]usize{ .{ query.a, query.b }, .{ query.b, query.a } }) |pair| {
+            errdefer std.debug.print("commits: {d}, {d}\n", .{ pair[0], pair[1] });
+            files.read_count = 0;
+            const descendent = mrg.getDescendent(repo_kind, repo_opts, state, ancestry_io, allocator, &oids[pair[0]], &oids[pair[1]]);
+            try std.testing.expectEqual(0, files.open_count);
+            try std.testing.expect(files.read_count <= query.max_reads);
+            if (query.descendent) |expected| {
+                try std.testing.expectEqualStrings(&oids[expected], &(try descendent));
+            } else {
+                try std.testing.expectError(error.DescendentNotFound, descendent);
+            }
+            files.read_count = 0;
+            const ancestor = mrg.commonAncestor(repo_kind, repo_opts, state, ancestry_io, allocator, &oids[pair[0]], &oids[pair[1]]);
+            try std.testing.expectEqual(0, files.open_count);
+            try std.testing.expect(files.read_count <= query.max_reads);
+            if (query.ancestor) |expected| {
+                try std.testing.expectEqualStrings(&oids[expected], &(try ancestor));
+            } else |err| {
+                try std.testing.expectError(err, ancestor);
+            }
+        }
+    }
+    if (case == .criss_cross) {
+        try repo.core.work_dir.writeFile(io, .{ .sub_path = "local.txt", .data = "local" });
+        try std.testing.expectError(error.MultipleMergeBases, repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .oid = &oids[3] }} } } }, null));
+        try std.testing.expectEqual(oids[4], (try repo.readRef(io, .{ .kind = .none, .name = "HEAD" })).?);
+        try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = "MERGE_HEAD" }));
+        var status = try repo.status(io, allocator);
+        defer status.deinit(allocator);
+        try std.testing.expectEqual(0, status.index.entries.count());
+        const content = try repo.core.work_dir.readFileAlloc(io, "local.txt", allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings("local", content);
+    }
+    if (case == .tags) {
+        var reset = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &oids[0] } });
+        defer reset.deinit();
+        try repo.addBranch(io, .{ .name = "target" });
+        var at_ref = try repo.mergeAtRef(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .oid = &oids[2] }} } } }, .{ .kind = .head, .name = "target" }, null);
+        defer at_ref.deinit();
+        try std.testing.expect(at_ref.result == .fast_forward);
+        try std.testing.expectEqual(oids[1], (try repo.readRef(io, .{ .kind = .head, .name = "target" })).?);
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .oid = &oids[3] }} } } }, null);
+        defer merge.deinit();
+        try std.testing.expect(merge.result == .fast_forward);
+        try std.testing.expectEqual(oids[1], (try repo.readRef(io, .{ .kind = .none, .name = "HEAD" })).?);
+        const content = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings("b", content);
+    }
+}
+
+test "merge local changes" {
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .unstaged);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .staged);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .untracked);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .deleted);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .unrelated);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .unrelated_staged);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .unborn);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .unborn_clean);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .backup);
+
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .unstaged);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .staged);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .untracked);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .deleted);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .unrelated);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .unrelated_staged);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .unborn);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .unborn_clean);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .backup);
+}
+
+fn testMergeLocalChanges(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    case: enum { unstaged, staged, untracked, deleted, unrelated, unrelated_staged, unborn, unborn_clean, backup },
+) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    errdefer std.debug.print("merge local changes: {s}, {s}\n", .{ @tagName(repo_kind), @tagName(case) });
+
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    var target_oid: ?[hash.hexLen(repo_opts.hash)]u8 = null;
+    const source_oid = if (case == .unborn or case == .unborn_clean) blk: {
+        // create the source without giving HEAD a commit or leaving staged files
+        try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "source");
+        var status = try repo.status(io, allocator);
+        defer status.deinit(allocator);
+        const entry = status.index.entries.get("f.txt").?[0].?;
+        var tree = try obj.Tree.init(allocator);
+        defer tree.deinit();
+        try tree.addBlobEntry(entry.mode, "f.txt", &entry.oid);
+        const oid = try repo.commitAtRef(io, allocator, .{ .message = "source", .timestamp = 1 }, &tree, .{ .kind = .head, .name = "source" });
+        try repo.remove(io, allocator, &.{"f.txt"}, .{ .force = true });
+        break :blk oid;
+    } else blk: {
+        if (case != .untracked and case != .backup) try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "base");
+        if (case == .unrelated or case == .unrelated_staged) try addFile(repo_kind, repo_opts, &repo, io, allocator, "other.txt", "base");
+        const base_oid = try repo.commit(io, allocator, .{ .message = "base", .allow_empty = true, .timestamp = 1 });
+        try addFile(repo_kind, repo_opts, &repo, io, allocator, if (case == .backup) "f.txt/child" else "f.txt", "source");
+        const oid = try repo.commit(io, allocator, .{ .message = "source", .timestamp = 2 });
+        var result = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &base_oid } });
+        defer result.deinit();
+        target_oid = base_oid;
+        if (case == .backup) {
+            try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "target");
+            target_oid = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 3 });
+        }
+        break :blk oid;
+    };
+    const local_path = switch (case) {
+        .unrelated, .unrelated_staged, .unborn_clean => "other.txt",
+        .backup => "f.txt~master",
+        else => "f.txt",
+    };
+    if (case == .deleted) {
+        try repo.core.work_dir.deleteFile(io, local_path);
+    } else {
+        try repo.core.work_dir.writeFile(io, .{ .sub_path = local_path, .data = "local" });
+    }
+    if (case == .staged or case == .unrelated_staged) try repo.add(io, allocator, &.{local_path});
+    var before = try repo.status(io, allocator);
+    defer before.deinit(allocator);
+
+    const allowed = case == .unrelated or case == .unborn_clean;
+    var result_or_err = repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = .diff3, .source = &.{.{ .oid = &source_oid }} } } }, null);
+    if (result_or_err) |*result| {
+        defer result.deinit();
+        try std.testing.expect(allowed);
+        try std.testing.expect(result.result == .fast_forward);
+    } else |err| {
+        if (allowed) return err;
+        try std.testing.expectEqual(error.CannotMergeWithLocalChanges, err);
+    }
+
+    var after = try repo.status(io, allocator);
+    defer after.deinit(allocator);
+    if (case == .deleted) {
+        try std.testing.expect(after.work_dir_deleted.contains(local_path));
+    } else {
+        const content = try repo.core.work_dir.readFileAlloc(io, local_path, allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings("local", content);
+    }
+    try std.testing.expectEqual(if (allowed) source_oid else target_oid, try repo.readRef(io, .{ .kind = .none, .name = "HEAD" }));
+    if (allowed) {
+        try std.testing.expectEqual(0, after.index_added.count() + after.index_modified.count() + after.index_deleted.count());
+        const content = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings("source", content);
+    } else {
+        try std.testing.expectEqualDeep(before.index.entries.get("f.txt"), after.index.entries.get("f.txt"));
+        try std.testing.expectEqualDeep(before.index.entries.get(local_path), after.index.entries.get(local_path));
+    }
+    try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = "MERGE_HEAD" }));
+}
+
+test "merge abort" {
+    try testMergeAbort(.git, .{ .is_test = true }, .file_dir);
+    try testMergeAbort(.git, .{ .is_test = true }, .dir_file);
+    try testMergeAbort(.xit, .{ .is_test = true }, .file_dir);
+    try testMergeAbort(.xit, .{ .is_test = true }, .dir_file);
+}
+
+fn testMergeAbort(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), case: enum { file_dir, dir_file }) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    errdefer std.debug.print("merge abort: {s}, {s}\n", .{ @tagName(repo_kind), @tagName(case) });
+
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    const target_path = if (case == .file_dir) "f.txt" else "f.txt/dir/g.txt";
+    const source_path = if (case == .file_dir) "f.txt/dir/g.txt" else "f.txt";
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "local.txt", "base");
+    const base_oid = try repo.commit(io, allocator, .{ .message = "base", .timestamp = 1 });
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, source_path, "source");
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "added.txt", "source");
+    const source_oid = try repo.commit(io, allocator, .{ .message = "source", .timestamp = 2 });
+    {
+        var result = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &base_oid } });
+        defer result.deinit();
+    }
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, target_path, "target");
+    const target_oid = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 3 });
+    try repo.core.work_dir.writeFile(io, .{ .sub_path = "local.txt", .data = "local" });
+    if (case == .dir_file) try repo.core.work_dir.writeFile(io, .{ .sub_path = "f.txt/local.txt", .data = "untracked" });
+    {
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .oid = &source_oid }} } } }, null);
+        defer merge.deinit();
+        try std.testing.expect(merge.result == .conflict);
+    }
+    {
+        var result = try repo.resetDir(io, allocator, .{ .target = null, .force = true });
+        defer result.deinit();
+    }
+    var status = try repo.status(io, allocator);
+    defer status.deinit(allocator);
+    try std.testing.expectEqual(0, status.unresolved_conflicts.count() + status.index_added.count() + status.index_modified.count() + status.index_deleted.count() + status.work_dir_deleted.count());
+    try std.testing.expectEqual(1, status.work_dir_modified.count());
+    for ([_][]const u8{ target_path, "local.txt" }, [_][]const u8{ "target", "local" }) |path, expected| {
+        const content = try repo.core.work_dir.readFileAlloc(io, path, allocator, .limited(1024));
+        defer allocator.free(content);
+        try std.testing.expectEqualStrings(expected, content);
+    }
+    try std.testing.expect(!status.untracked.contains("added.txt"));
+    if (case == .dir_file) try std.testing.expect(status.untracked.contains("f.txt/local.txt"));
+    try std.testing.expectEqual(target_oid, (try repo.readRef(io, .{ .kind = .none, .name = "HEAD" })).?);
+    try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = "MERGE_HEAD" }));
+}
+
+test "merge conflict mode" {
+    try testMergeConflictMode(.git, .{ .is_test = true }, .diff3);
+    try testMergeConflictMode(.xit, .{ .is_test = true }, .diff3);
+    try testMergeConflictMode(.xit, .{ .is_test = true }, .patch);
+}
+
+fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), algo: mrg.MergeAlgorithm) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    errdefer std.debug.print("mode merge: {s}, {s}\n", .{ @tagName(repo_kind), @tagName(algo) });
+
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    // text edits merge cleanly, but changing a regular file to a symlink
+    // on one side and making it executable on the other is a mode conflict
+    // build trees directly so this also works without filesystem symlinks
+    const names = [_][]const u8{ "base", "target", "source" };
+    const modes = [_]u32{ 0o100644, 0o120000, 0o100755 };
+    var oids: [3][hash.hexLen(repo_opts.hash)]u8 = undefined;
+    for ([_][]const u8{ "a\nb\nc\nd\ne", "A\nb\nc\nd\ne", "a\nb\nc\nd\nE" }, 0..) |content, i| {
+        try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", content);
+        var status = try repo.status(io, allocator);
+        defer status.deinit(allocator);
+        var tree = try obj.Tree.init(allocator);
+        defer tree.deinit();
+        try tree.addBlobEntry(@bitCast(modes[i]), "f.txt", &status.index.entries.get("f.txt").?[0].?.oid);
+        oids[i] = try repo.commitAtRef(io, allocator, .{
+            .message = names[i],
+            .parent_oids = if (i == 0) &.{} else &.{oids[0]},
+            .timestamp = i + 1,
+        }, &tree, .{ .kind = .head, .name = names[i] });
+    }
+    for ([_]usize{ 1, 2 }) |target| {
+        const source = 3 - target;
+        var merge = try repo.mergeAtRef(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = algo, .source = &.{.{ .oid = &oids[source] }} } } }, .{ .kind = .head, .name = names[target] }, null);
+        defer merge.deinit();
+        try std.testing.expect(merge.result == .conflict);
+        const conflict = merge.result.conflict.conflicts.get("f.txt") orelse return error.ConflictNotFound;
+        try std.testing.expectEqual(modes[0], @as(u32, @bitCast(conflict.base.?.mode)));
+        try std.testing.expectEqual(modes[target], @as(u32, @bitCast(conflict.target.?.mode)));
+        try std.testing.expectEqual(modes[source], @as(u32, @bitCast(conflict.source.?.mode)));
+        try std.testing.expectEqual(oids[target], (try repo.readRef(io, .{ .kind = .head, .name = names[target] })).?);
+    }
+}
+
 test "merge patch application" {
     try testMergePatchApplication(.patch, .multiple);
     try testMergePatchApplication(.diff3, .multiple);
