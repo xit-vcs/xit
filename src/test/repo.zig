@@ -9,6 +9,7 @@ const obj = @import("../object.zig");
 const mrg = @import("../merge.zig");
 const ui = @import("../ui.zig");
 const patch = @import("../patch.zig");
+const df = @import("../diff.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -362,9 +363,22 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
     const allocator = std.testing.allocator;
     const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     errdefer std.debug.print("patch application: {s}, {s}\n", .{ @tagName(case), @tagName(algo) });
-    var temp = std.testing.tmpDir(.{});
-    defer temp.cleanup();
-    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    const temp_dir_name = "temp-test-repo-merge-patch-application";
+
+    // create the temp dir
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -456,19 +470,31 @@ test "applied patches" {
     try testAppliedPatches(.later_edit);
     try testAppliedPatches(.conflict);
     try testAppliedPatches(.rollback);
-    try testAppliedPatches(.discard);
     try testAppliedPatches(.merge);
 }
 
-fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, discard, merge }) !void {
+fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, merge }) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
     const DB = rp.Repo(.xit, opts).DB;
     errdefer std.debug.print("applied patches: {s}\n", .{@tagName(case)});
-    var temp = std.testing.tmpDir(.{});
-    defer temp.cleanup();
-    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    const temp_dir_name = "temp-test-repo-applied-patches";
+
+    // create the temp dir
+    const cwd = std.Io.Dir.cwd();
+    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
+    if (temp_dir_or_err) |*temp_dir| {
+        temp_dir.close(io);
+        try cwd.deleteTree(io, temp_dir_name);
+    } else |_| {}
+    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
+    defer cwd.deleteTree(io, temp_dir_name) catch {};
+    defer temp_dir.close(io);
+
+    const cwd_path = try std.process.currentPathAlloc(io, allocator);
+    defer allocator.free(cwd_path);
+    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -503,22 +529,6 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, disca
             const content = try repo.core.work_dir.readFileAlloc(io, path, allocator, .limited(4096));
             defer allocator.free(content);
             try std.testing.expectEqualStrings("a\nB\nc\nd\nE", content);
-        }
-        return;
-    }
-    if (case == .discard) {
-        try addFile(.xit, opts, &repo, io, allocator, paths[0], "\xffbinary");
-        const binary_oid = try repo.commit(io, allocator, .{ .message = "binary", .timestamp = 4 });
-        try repo.patchAll(io, allocator, null);
-        const moment = try repo.core.latestMoment();
-        for (paths, 0..) |path, i| {
-            const membership = try moment.cursor.readPath(void, &.{
-                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
-                .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &binary_oid) } },
-                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "path->patch-id-set") } },
-                .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, path) } },
-            });
-            try std.testing.expectEqual(i != 0, membership != null);
         }
         return;
     }
@@ -2529,15 +2539,36 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 }
 
 test "merge conflict binary" {
-    try testMergeConflictBinary(.git, .{ .is_test = true });
-    try testMergeConflictBinary(.xit, .{ .is_test = true });
+    try testMergeConflictBinary(.git, .{ .is_test = true }, .diff3, .binary);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .binary);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .base);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .target);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .source);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .target_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .source_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .diff3, .source_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .target_neighbors);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .source_neighbors);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .shared_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .diff3, .shared_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .empty_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .initial_binary);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .deleted_text);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .text_conflict);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .diff3, .source_neighbors);
+    try testMergeConflictBinary(.xit, .{ .is_test = true }, .patch, .first_parent);
 }
 
-/// creates a merge conflict with binary files, asserting that
-/// it will not attempt to insert conflict markers or auto-resolve.
-pub fn testMergeConflictBinary(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
+/// tests binary conflicts and transitions between binary and text
+fn testMergeConflictBinary(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    algo: mrg.MergeAlgorithm,
+    case: enum { binary, base, target, source, target_text, source_text, target_neighbors, source_neighbors, shared_text, empty_text, initial_binary, deleted_text, text_conflict, first_parent },
+) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
+    errdefer std.debug.print("binary merge: {s}, {s}, {s}\n", .{ @tagName(repo_kind), @tagName(algo), @tagName(case) });
     const temp_dir_name = "temp-test-repo-merge-conflict-binary";
 
     // create the temp dir
@@ -2564,6 +2595,118 @@ pub fn testMergeConflictBinary(comptime repo_kind: rp.RepoKind, comptime repo_op
 
     var repo = try rp.Repo(repo_kind, repo_opts).open(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
+
+    if (case != .binary) {
+        const initial = "a\nb\nc\nd\ne";
+        const binary = "\xffbinary";
+        const target = "a\nB\nc\nd\ne";
+        const neighboring = case == .shared_text or case == .target_neighbors or case == .source_neighbors;
+        const source = if (case == .text_conflict) "a\nother\nc\nd\ne" else if (neighboring) "a\nb\nC\nd\ne" else "a\nb\nc\nd\nE";
+        const histories = [_][]const ?[]const u8{
+            switch (case) {
+                .base => &.{ initial, binary },
+                .initial_binary => &.{ binary, null, "\xfebinary", "", initial },
+                .deleted_text => &.{ "older text", null, binary, initial },
+                .shared_text, .first_parent => &.{ initial, binary, initial },
+                .empty_text => &.{ initial, binary, initial, binary, "", initial },
+                else => &.{initial},
+            },
+            switch (case) {
+                .target => &.{ target, binary },
+                .target_text, .target_neighbors => &.{ binary, initial, target },
+                else => &.{target},
+            },
+            switch (case) {
+                .source => &.{ source, binary },
+                .source_text => &.{ binary, "\xfebinary", "a\nb\nc\nd\nchanged", source },
+                .source_neighbors, .text_conflict => &.{ binary, source },
+                else => &.{source},
+            },
+        };
+        var oids: [3][hash.hexLen(repo_opts.hash)]u8 = undefined;
+        var root_oid: [hash.hexLen(repo_opts.hash)]u8 = undefined;
+        for (histories, 0..) |history, side| {
+            var parent_oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = if (side == 0) null else if (side == 2 and case == .first_parent) root_oid else oids[0];
+            for (history, 0..) |content_maybe, i| {
+                if (content_maybe) |content| {
+                    try addFile(repo_kind, repo_opts, &repo, io, allocator, "bin", content);
+                } else {
+                    try repo.remove(io, allocator, &.{"bin"}, .{});
+                }
+                const oid = try repo.commit(io, allocator, .{
+                    .message = "edit",
+                    .parent_oids = if (parent_oid_maybe) |parent_oid| &.{parent_oid} else null,
+                    .timestamp = 1 + side * 10 + i,
+                });
+                if (side == 0 and i == 0) root_oid = oid;
+                oids[side] = oid;
+                var iter = try df.LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, content_maybe orelse "");
+                defer iter.deinit();
+                const is_binary = !std.unicode.utf8ValidateSlice(content_maybe orelse "");
+                try std.testing.expectEqual(is_binary, iter.source == .binary);
+
+                if (repo_kind == .xit) {
+                    try repo.patchAll(io, allocator, null);
+                    const moment = try repo.core.latestMoment();
+                    const snapshot = (try moment.cursor.readPath(void, &.{
+                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "commit-id->snapshot") } },
+                        .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, &oid) } },
+                    })).?;
+                    const parent_snapshot_maybe = if (is_binary and parent_oid_maybe != null)
+                        (try moment.cursor.readPath(void, &.{
+                            .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "commit-id->snapshot") } },
+                            .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, &parent_oid_maybe.?) } },
+                        })).?
+                    else
+                        null;
+                    for ([_][]const u8{ "path->patch-id", "path->patch-id-set", "path->live-parent->children", "path->child->parent", "path->line-id-list" }) |name| {
+                        const entry = try snapshot.readPath(void, &.{
+                            .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, name) } },
+                            .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
+                        });
+                        try std.testing.expectEqual(!(case == .initial_binary and side == 0 and i == 0), entry != null);
+                        if (parent_snapshot_maybe) |parent_snapshot| {
+                            const parent_entry = try parent_snapshot.readPath(void, &.{
+                                .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, name) } },
+                                .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
+                            });
+                            try std.testing.expectEqualDeep(parent_entry.?.slot(), entry.?.slot());
+                        }
+                    }
+                }
+                parent_oid_maybe = oid;
+            }
+            if (side == 1) try repo.addBranch(io, .{ .name = "target" });
+        }
+        if (case == .first_parent) {
+            // the merge base is the second parent, so patch selection reaches
+            // back past its binary transition to the original text commit
+            oids[2] = try repo.commit(io, allocator, .{ .message = "merge", .parent_oids = &.{ oids[2], oids[0] }, .allow_empty = true, .timestamp = 30 });
+        }
+        {
+            var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
+            defer result.deinit();
+        }
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = algo, .source = &.{.{ .oid = &oids[2] }} } } }, null);
+        defer merge.deinit();
+        try std.testing.expectEqualStrings(&oids[0], &merge.base_oid);
+        const binary_conflict = case == .base or case == .target or case == .source;
+        const text_conflict = case == .text_conflict or (neighboring and algo == .diff3);
+        try std.testing.expectEqual(binary_conflict or text_conflict, merge.result == .conflict);
+        const content = try repo.core.work_dir.readFileAlloc(io, "bin", allocator, .limited(4096));
+        defer allocator.free(content);
+        if (binary_conflict) {
+            try std.testing.expectEqualStrings(if (case == .source) binary else source, content);
+        } else if (text_conflict) {
+            try std.testing.expect(std.mem.indexOf(u8, content, "<<<<<<<") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, "B") != null);
+            try std.testing.expect(std.mem.indexOf(u8, content, if (case == .text_conflict) "other" else "C") != null);
+        } else {
+            try std.testing.expect(merge.result == .success);
+            try std.testing.expectEqualStrings(if (neighboring) "a\nB\nC\nd\ne" else "a\nB\nc\nd\nE", content);
+        }
+        return;
+    }
 
     // A --- B --------- D [master]
     //  \               /
@@ -2605,7 +2748,7 @@ pub fn testMergeConflictBinary(comptime repo_kind: rp.RepoKind, comptime repo_op
     _ = try repo.commit(io, allocator, .{ .message = "b" });
 
     {
-        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .source = &.{.{ .ref = .{ .kind = .head, .name = "foo" } }} } } }, null);
+        var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = algo, .source = &.{.{ .ref = .{ .kind = .head, .name = "foo" } }} } } }, null);
         defer merge.deinit();
         try std.testing.expect(.conflict == merge.result);
     }

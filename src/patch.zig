@@ -87,31 +87,51 @@ pub fn writeAndApplyPatches(
     while (try file_iter.next()) |*line_iter_pair_ptr| {
         var line_iter_pair = line_iter_pair_ptr.*;
         defer line_iter_pair.deinit();
-        if (line_iter_pair.a.source == .binary or line_iter_pair.b.source == .binary) {
-            // the file is or was binary, so we can't create a patch for it.
-            // remove existing patch data if there is any.
-            try removePatch(repo_opts, &snapshot, line_iter_pair.path);
-        } else {
-            // store path
-            const path_hash = hash.hashInt(repo_opts.hash, line_iter_pair.path);
-            const path_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "path-set"));
-            const path_set = try rp.Repo(.xit, repo_opts).DB.HashSet(.read_write).init(path_set_cursor);
-            var path_cursor = try path_set.putCursor(path_hash);
-            try path_cursor.writeIfEmpty(.{ .bytes = line_iter_pair.path });
 
-            // create patch
-            const patch_hash_bytes = try writePatch(repo_opts, state.extra.moment, &snapshot, allocator, &line_iter_pair, path_hash);
-            const patch_hash = hash.bytesToInt(repo_opts.hash, &patch_hash_bytes);
+        // keep the last text graph while the file is binary
+        if (line_iter_pair.b.source == .binary) continue;
 
-            // apply patch
-            try applyPatch(repo_opts, state.readOnly().extra.moment, &snapshot, allocator, path_hash, patch_hash);
+        // store path
+        const path_hash = hash.hashInt(repo_opts.hash, line_iter_pair.path);
+        const path_set_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "path-set"));
+        const path_set = try rp.Repo(.xit, repo_opts).DB.HashSet(.read_write).init(path_set_cursor);
+        var path_cursor = try path_set.putCursor(path_hash);
+        try path_cursor.writeIfEmpty(.{ .bytes = line_iter_pair.path });
 
-            // associate patch hash with path/commit
-            const path_to_patch_id_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->patch-id"));
-            const path_to_patch_id = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_patch_id_cursor);
-            try path_to_patch_id.putKey(path_hash, .{ .slot = path_cursor.slot() });
-            try path_to_patch_id.put(path_hash, .{ .bytes = &patch_hash_bytes });
+        const path_to_patch_id_cursor = try snapshot.putCursor(hash.hashInt(repo_opts.hash, "path->patch-id"));
+        const path_to_patch_id = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(path_to_patch_id_cursor);
+        if (line_iter_pair.a.source == .binary) {
+            // compare to the last text version, whose oid is stored with its patch
+            var text_oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            if (try path_to_patch_id.getCursor(path_hash)) |patch_id_cursor| {
+                var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                _ = try patch_id_cursor.readBytes(&patch_id_bytes);
+                var offset_list_cursor = (try state.extra.moment.cursor.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "patch-id->offset-list") } },
+                    .{ .hash_map_get = .{ .value = hash.bytesToInt(repo_opts.hash, &patch_id_bytes) } },
+                })) orelse return error.KeyNotFound;
+                var read_buffer: [repo_opts.buffer_size]u8 = undefined;
+                var reader = try offset_list_cursor.reader(&read_buffer);
+                text_oid = (try reader.interface.takeArray(hash.byteLen(repo_opts.hash))).*;
+            }
+            const text_iter = if (hash.bytesToInt(repo_opts.hash, &text_oid) == 0)
+                try df.LineIterator(.xit, repo_opts).initFromNothing(io, allocator, line_iter_pair.path)
+            else
+                try df.LineIterator(.xit, repo_opts).initFromOid(state.readOnly(), io, allocator, line_iter_pair.path, &text_oid, null);
+            line_iter_pair.a.deinit();
+            line_iter_pair.a = text_iter;
         }
+
+        // create patch
+        const patch_hash_bytes = try writePatch(repo_opts, state.extra.moment, &snapshot, allocator, &line_iter_pair, path_hash);
+        const patch_hash = hash.bytesToInt(repo_opts.hash, &patch_hash_bytes);
+
+        // apply patch
+        try applyPatch(repo_opts, state.readOnly().extra.moment, &snapshot, allocator, path_hash, patch_hash);
+
+        // associate patch hash with path/commit
+        try path_to_patch_id.putKey(path_hash, .{ .slot = path_cursor.slot() });
+        try path_to_patch_id.put(path_hash, .{ .bytes = &patch_hash_bytes });
     }
 
     // this will force xitdb consider the start of the transaction
@@ -294,24 +314,6 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             }
         }
     };
-}
-
-fn removePatch(comptime repo_opts: rp.RepoOpts(.xit), snapshot: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_write), path: []const u8) !void {
-    const path_hash = hash.hashInt(repo_opts.hash, path);
-
-    for ([_][]const u8{
-        "path->patch-id-set",
-        "path->live-parent->children",
-        "path->child->parent",
-        "path->line-id-list",
-    }) |name| {
-        const map_hash = hash.hashInt(repo_opts.hash, name);
-        if (try snapshot.getCursor(map_hash)) |_| {
-            const map_cursor = try snapshot.putCursor(map_hash);
-            const map = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(map_cursor);
-            _ = try map.remove(path_hash);
-        }
-    }
 }
 
 pub fn applyPatch(

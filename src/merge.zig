@@ -617,6 +617,8 @@ fn writeBlobWithPatches(
     state: rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
+    base_file_oid_maybe: ?*const [hash.byteLen(repo_opts.hash)]u8,
+    target_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
     source_file_oid: *const [hash.byteLen(repo_opts.hash)]u8,
     base_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
@@ -625,8 +627,19 @@ fn writeBlobWithPatches(
     source_name: []const u8,
     has_conflict: *bool,
     path: []const u8,
-) ![hash.byteLen(repo_opts.hash)]u8 {
+) !?[hash.byteLen(repo_opts.hash)]u8 {
     if (repo_kind != .xit) return error.PatchBasedMergeRequiresXitBackend;
+
+    // a binary file may still have a graph from its last text version
+    for ([_]?*const [hash.byteLen(repo_opts.hash)]u8{ base_file_oid_maybe, target_file_oid, source_file_oid }) |file_oid_maybe| {
+        const file_oid = file_oid_maybe orelse continue;
+        var iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, path, file_oid, null);
+        defer iter.deinit();
+        if (iter.source == .binary) {
+            has_conflict.* = true;
+            return source_file_oid.*;
+        }
+    }
 
     //get commit-id->snapshot
     const commit_id_to_snapshot_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"));
@@ -714,12 +727,7 @@ fn writeBlobWithPatches(
         }
     }
 
-    // if there are no patches, it is most likely because the file was determined to be binary,
-    // so just return the source oid because there is no point in trying to merge them
-    if (patch_ids.items.len == 0) {
-        has_conflict.* = true;
-        return source_file_oid.*;
-    }
+    if (patch_ids.items.len == 0) return null;
 
     // put target snapshot in temp location
     const merge_in_progress_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "merge-in-progress"));
@@ -1196,10 +1204,11 @@ fn samePathConflict(
                 var has_conflict = oid_maybe == null or mode_maybe == null;
 
                 const base_file_oid_maybe = if (base_entry_maybe) |base_entry| &base_entry.oid else null;
-                const oid = oid_maybe orelse switch (merge_algo) {
-                    .diff3 => try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_conflict),
-                    .patch => try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_conflict, path),
-                };
+                const patch_oid_maybe = if (oid_maybe == null and merge_algo == .patch)
+                    try writeBlobWithPatches(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_oid, source_oid, target_name, source_name, &has_conflict, path)
+                else
+                    null;
+                const oid = oid_maybe orelse patch_oid_maybe orelse try writeBlobWithDiff3(repo_kind, repo_opts, state, io, allocator, base_file_oid_maybe, &target_entry.oid, &source_entry.oid, base_oid, target_name, source_name, &has_conflict);
                 const mode = mode_maybe orelse target_entry.mode;
 
                 return .{
