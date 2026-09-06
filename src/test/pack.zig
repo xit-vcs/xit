@@ -29,26 +29,17 @@ test "create delta" {
 test "create and read pack" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-create-and-read-pack";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    // get the cwd path
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // create the work dir
@@ -121,7 +112,7 @@ test "create and read pack" {
         var pack_writer = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = true }) orelse return error.PackWriterIsEmpty;
         defer pack_writer.deinit();
 
-        var pack_file = try temp_dir.createFile(io, "test.pack", .{});
+        var pack_file = try temp.dir.createFile(io, "test.pack", .{});
         defer pack_file.close(io);
 
         var buffer = [_]u8{0} ** 1;
@@ -134,7 +125,7 @@ test "create and read pack" {
         }
 
         for (&[_]*const [hash.hexLen(repo_opts.hash)]u8{ &commit_oid1, &commit_oid2 }) |commit_oid_hex| {
-            var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
+            var pack_reader = try pack.PackReader.initFile(io, allocator, temp.dir, "test.pack");
             defer pack_reader.deinit();
 
             var pack_obj_rdr = try pack.PackObjectReader(.git, repo_opts).initWithoutIndex(io, allocator, .{ .core = &r.core, .extra = .{} }, &pack_reader, commit_oid_hex);
@@ -149,25 +140,16 @@ test "create and read pack" {
 test "write pack file" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-write-pack-file";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    // get the cwd path
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = client_path });
@@ -216,7 +198,7 @@ test "write pack file" {
 
     const commit2 = try client_repo.commit(io, allocator, .{ .message = "more stuff" });
 
-    var pack_file = try temp_dir.createFile(io, "test.pack", .{});
+    var pack_file = try temp.dir.createFile(io, "test.pack", .{});
     defer pack_file.close(io);
 
     var obj_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &client_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
@@ -244,14 +226,14 @@ test "write pack file" {
 
     // make sure the pack file is valid
     {
-        const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+        const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
         defer allocator.free(server_path);
 
         var server_repo = try rp.Repo(.git, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
         defer server_repo.deinit(io, allocator);
 
         {
-            var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
+            var pack_reader = try pack.PackReader.initFile(io, allocator, temp.dir, "test.pack");
             defer pack_reader.deinit();
 
             var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
@@ -262,7 +244,7 @@ test "write pack file" {
         // should contain delta objects
         var object_count: usize = 0;
         {
-            var pack_reader = try pack.PackReader.initFile(io, allocator, temp_dir, "test.pack");
+            var pack_reader = try pack.PackReader.initFile(io, allocator, temp.dir, "test.pack");
             defer pack_reader.deinit();
 
             var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
@@ -324,26 +306,17 @@ fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
 test "iterate pack from file" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-iterate-file-packreader";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    // get the cwd path
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var r = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -363,26 +336,17 @@ test "iterate pack from file" {
 test "iterate pack from stream" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-iterate-stream-packreader";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    // get the cwd path
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var r = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -410,26 +374,17 @@ test "iterate pack from stream" {
 test "read packed refs" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-read-packed-refs";
     const repo_opts = rp.RepoOpts(.git){ .is_test = true };
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    // get the cwd path
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // create the work dir

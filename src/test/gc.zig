@@ -26,24 +26,15 @@ fn addFile(
 test "gc" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-repo-gc";
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -124,7 +115,7 @@ test "gc" {
     // committed content survived and reads back through the rewritten
     // chunk record positions
     {
-        var work_dir = try temp_dir.openDir(io, "repo", .{});
+        var work_dir = try temp.dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
 
         try work_dir.deleteFile(io, "keep.bin");
@@ -140,7 +131,7 @@ test "gc" {
     {
         _ = try repo.commit(io, allocator, .{ .message = "staged" });
 
-        var work_dir = try temp_dir.openDir(io, "repo", .{});
+        var work_dir = try temp.dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
 
         try work_dir.deleteFile(io, "staged.bin");
@@ -155,7 +146,7 @@ test "gc" {
     {
         _ = try repo.garbageCollect(io, allocator, &.{});
 
-        var work_dir = try temp_dir.openDir(io, "repo", .{});
+        var work_dir = try temp.dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
 
         try work_dir.deleteFile(io, "keep.bin");
@@ -170,24 +161,15 @@ test "gc" {
 test "gc ignores a stale temporary db" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-repo-gc-stale-temp";
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -197,7 +179,7 @@ test "gc ignores a stale temporary db" {
         _ = try repo.commit(io, allocator, .{ .message = "hello" });
     }
 
-    var xit_dir = try temp_dir.openDir(io, "repo/.xit", .{});
+    var xit_dir = try temp.dir.openDir(io, "repo/.xit", .{});
     defer xit_dir.close(io);
 
     // A crash before the rename can leave db.gc behind. Opening ignores it,
@@ -220,24 +202,15 @@ test "gc ignores a stale temporary db" {
 test "gc with patches" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-repo-gc-patches";
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "repo" });
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });

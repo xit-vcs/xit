@@ -142,7 +142,6 @@ test "git push large subprocess" {
 fn Server(
     comptime server_repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
-    comptime temp_dir_name: []const u8,
     comptime port: u16,
 ) type {
     if (server_repo_kind == .xit and transport_def == .wire and transport_def.wire == .raw) {
@@ -158,7 +157,7 @@ fn Server(
                 .http => struct {
                     io: std.Io,
                     allocator: std.mem.Allocator,
-                    temp_dir_name: []const u8,
+                    temp_path: []const u8,
                     stop_server_endpoint: []const u8,
                     net_server: std.Io.net.Server,
                     server_thread: std.Thread,
@@ -166,10 +165,12 @@ fn Server(
                 .raw => struct {
                     io: std.Io,
                     process: ?std.process.Child,
+                    temp_path: []const u8,
                 },
                 .ssh => struct {
                     io: std.Io,
                     process: ?std.process.Child,
+                    temp_path: []const u8,
                 },
             },
         };
@@ -177,7 +178,9 @@ fn Server(
         fn init(
             io: std.Io,
             allocator: std.mem.Allocator,
-        ) !Server(server_repo_kind, transport_def, temp_dir_name, port) {
+            temp_dir: std.Io.Dir,
+            temp_path: []const u8,
+        ) !Server(server_repo_kind, transport_def, port) {
             switch (transport_def) {
                 .file => return .{ .core = {} },
                 .wire => |wire_kind| switch (wire_kind) {
@@ -189,7 +192,7 @@ fn Server(
                             .core = .{
                                 .io = io,
                                 .allocator = allocator,
-                                .temp_dir_name = temp_dir_name,
+                                .temp_path = temp_path,
                                 .stop_server_endpoint = std.fmt.comptimePrint("http://127.0.0.1:{}/stop-server", .{port}),
                                 .net_server = net_server,
                                 .server_thread = undefined,
@@ -197,11 +200,11 @@ fn Server(
                         };
                     },
                     .raw => return .{
-                        .core = .{ .io = io, .process = null },
+                        .core = .{ .io = io, .process = null, .temp_path = temp_path },
                     },
                     .ssh => {
                         // create priv host key
-                        const host_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/host_key", .{});
+                        const host_key_file = try temp_dir.createFile(io, "host_key", .{});
                         defer host_key_file.close(io);
                         try host_key_file.writeStreamingAll(io,
                             \\-----BEGIN OPENSSH PRIVATE KEY-----
@@ -220,7 +223,7 @@ fn Server(
                         }
 
                         // create priv client key
-                        const priv_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key", .{});
+                        const priv_key_file = try temp_dir.createFile(io, "key", .{});
                         defer priv_key_file.close(io);
                         try priv_key_file.writeStreamingAll(io,
                             \\-----BEGIN OPENSSH PRIVATE KEY-----
@@ -237,7 +240,7 @@ fn Server(
                         }
 
                         // create pub key
-                        const pub_key_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/key.pub", .{});
+                        const pub_key_file = try temp_dir.createFile(io, "key.pub", .{});
                         defer pub_key_file.close(io);
                         try pub_key_file.writeStreamingAll(io,
                             \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
@@ -248,7 +251,7 @@ fn Server(
                         }
 
                         // create authorized_keys file
-                        const auth_keys_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/authorized_keys", .{});
+                        const auth_keys_file = try temp_dir.createFile(io, "authorized_keys", .{});
                         defer auth_keys_file.close(io);
                         try auth_keys_file.writeStreamingAll(io,
                             \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
@@ -259,7 +262,7 @@ fn Server(
                         }
 
                         // create known_hosts file
-                        const known_hosts_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/known_hosts", .{});
+                        const known_hosts_file = try temp_dir.createFile(io, "known_hosts", .{});
                         defer known_hosts_file.close(io);
                         const port_str = std.fmt.comptimePrint("{}", .{port});
                         try known_hosts_file.writeStreamingAll(io, "[localhost]:" ++ port_str ++ " ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLWmlR+TyfvK9UoSDPe1eO3irvpUa6MtxCVHCaiDOi9XjQstxfRpM5tmVBotZ/Mkw2kJr/O0ylCWvzqexqsTiUQ=");
@@ -294,7 +297,7 @@ fn Server(
                         };
                         defer allocator.free(sshd_config_str);
 
-                        const sshd_config_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd_config", .{});
+                        const sshd_config_file = try temp_dir.createFile(io, "sshd_config", .{});
                         defer sshd_config_file.close(io);
                         try sshd_config_file.writeStreamingAll(io, sshd_config_str);
                         if (.windows != builtin.os.tag) {
@@ -302,11 +305,9 @@ fn Server(
                         }
 
                         // create sshd.sh contents
-                        const cwd_path = try std.process.currentPathAlloc(io, allocator);
-                        defer allocator.free(cwd_path);
-                        const host_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "host_key" });
+                        const host_key_path = try std.fs.path.join(allocator, &.{ temp_path, "host_key" });
                         defer allocator.free(host_key_path);
-                        const auth_keys_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "authorized_keys" });
+                        const auth_keys_path = try std.fs.path.join(allocator, &.{ temp_path, "authorized_keys" });
                         defer allocator.free(auth_keys_path);
                         const sshd_contents = try std.fmt.allocPrint(
                             allocator,
@@ -320,7 +321,7 @@ fn Server(
 
                         // create sshd.sh
                         {
-                            const sshd_file = try std.Io.Dir.cwd().createFile(io, temp_dir_name ++ "/sshd.sh", .{});
+                            const sshd_file = try temp_dir.createFile(io, "sshd.sh", .{});
                             defer sshd_file.close(io);
                             try sshd_file.writeStreamingAll(io, sshd_contents);
                             if (.windows != builtin.os.tag) {
@@ -329,14 +330,14 @@ fn Server(
                         }
 
                         return .{
-                            .core = .{ .io = io, .process = null },
+                            .core = .{ .io = io, .process = null, .temp_path = temp_path },
                         };
                     },
                 },
             }
         }
 
-        fn start(self: *Server(server_repo_kind, transport_def, temp_dir_name, port)) !void {
+        fn start(self: *Server(server_repo_kind, transport_def, port)) !void {
             switch (transport_def) {
                 .file => {},
                 .wire => |wire_kind| switch (wire_kind) {
@@ -370,12 +371,8 @@ fn Server(
                                         else
                                             return error.SlashNotFound;
 
-                                        const cwd_path = try std.process.currentPathAlloc(core.io, core.allocator);
-                                        defer core.allocator.free(cwd_path);
-                                        const temp_dir_path = try std.fs.path.join(core.allocator, &.{ cwd_path, core.temp_dir_name });
-                                        defer core.allocator.free(temp_dir_path);
                                         const path_translated = try std.fmt.allocPrint(core.allocator, "{s}{s}", .{
-                                            temp_dir_path,
+                                            core.temp_path,
                                             uri.path.percent_encoded,
                                         });
                                         defer core.allocator.free(path_translated);
@@ -427,14 +424,19 @@ fn Server(
                                             try env_map.put("HTTP_ACCEPT", accept_str);
                                         }
 
+                                        const cwd_path = try std.process.currentPathAlloc(core.io, core.allocator);
+                                        defer core.allocator.free(cwd_path);
+                                        const xit_path = try std.fs.path.join(core.allocator, &.{ cwd_path, "zig-out", "bin", "xit" });
+                                        defer core.allocator.free(xit_path);
+
                                         var process = try std.process.spawn(core.io, .{
                                             .argv = switch (server_repo_kind) {
                                                 .git => &.{ "git", "http-backend" },
-                                                .xit => &.{ "../zig-out/bin/xit", "http-backend" },
+                                                .xit => &.{ xit_path, "http-backend" },
                                             },
                                             .cwd = switch (server_repo_kind) {
                                                 .git => .inherit,
-                                                .xit => .{ .path = temp_dir_name },
+                                                .xit => .{ .path = core.temp_path },
                                             },
                                             .environ_map = &env_map,
                                             .stdin = .pipe,
@@ -504,7 +506,7 @@ fn Server(
                         const port_str = std.fmt.comptimePrint("{}", .{port});
                         self.core.process = try std.process.spawn(self.core.io, .{
                             .argv = &.{ "git", "daemon", "--reuseaddr", "--base-path=.", "--export-all", "--enable=receive-pack", "--log-destination=stderr", "--port=" ++ port_str },
-                            .cwd = .{ .path = temp_dir_name },
+                            .cwd = .{ .path = self.core.temp_path },
                             .stdin = .ignore,
                             .stdout = .ignore,
                             .stderr = .ignore,
@@ -514,7 +516,7 @@ fn Server(
                         std.debug.assert(self.core.process == null);
                         self.core.process = try std.process.spawn(self.core.io, .{
                             .argv = &.{"./sshd.sh"},
-                            .cwd = .{ .path = temp_dir_name },
+                            .cwd = .{ .path = self.core.temp_path },
                             .stdin = .pipe,
                             .stdout = .ignore,
                             .stderr = .ignore,
@@ -537,7 +539,7 @@ fn Server(
             }
         }
 
-        fn stop(self: *Server(server_repo_kind, transport_def, temp_dir_name, port)) void {
+        fn stop(self: *Server(server_repo_kind, transport_def, port)) void {
             switch (transport_def) {
                 .file => {},
                 .wire => |wire_kind| switch (wire_kind) {
@@ -569,28 +571,21 @@ fn testFetch(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-fetch";
-
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // init server
-    var server = try Server(server_repo_kind, transport_def, temp_dir_name, port).init(io, allocator);
+    var server = try Server(server_repo_kind, transport_def, port).init(io, allocator, temp.dir, temp_path);
     try server.start();
     defer server.stop();
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
@@ -612,7 +607,7 @@ fn testFetch(
     // add a tag
     _ = try server_repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
 
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
@@ -654,10 +649,10 @@ fn testFetch(
         .wire => |wire_kind| .ssh == wire_kind,
     };
     const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
+        const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
         defer allocator.free(known_hosts_path);
 
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
 
         break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
@@ -685,7 +680,7 @@ fn testFetch(
 
     // make sure fetch was successful
     {
-        const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
+        const hello_txt = try temp.dir.openFile(io, "client/hello.txt", .{});
         defer hello_txt.close(io);
 
         try std.testing.expect(null != try client_repo.readRef(io, .{ .kind = .tag, .name = "1.0.0" }));
@@ -715,7 +710,7 @@ fn testFetch(
 
     // make sure fetch was successful
     {
-        const goodbye_txt = try temp_dir.openFile(io, "client/goodbye.txt", .{});
+        const goodbye_txt = try temp.dir.openFile(io, "client/goodbye.txt", .{});
         defer goodbye_txt.close(io);
 
         const oid_master = (try client_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
@@ -732,28 +727,21 @@ fn testPush(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-push";
-
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // init server
-    var server = try Server(server_repo_kind, transport_def, temp_dir_name, port).init(io, allocator);
+    var server = try Server(server_repo_kind, transport_def, port).init(io, allocator, temp.dir, temp_path);
     try server.start();
     defer server.stop();
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
@@ -769,7 +757,7 @@ fn testPush(
         defer export_file.close(io);
     }
 
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
@@ -818,10 +806,10 @@ fn testPush(
         .wire => |wire_kind| .ssh == wire_kind,
     };
     const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-        const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
+        const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
         defer allocator.free(known_hosts_path);
 
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
 
         break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
@@ -1062,7 +1050,7 @@ fn testPush(
         try client_repo.push(io, allocator, "origin", "master", false, .{});
 
         // also exercise conversion to an empty non-bare local destination.
-        const checkout_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "checkout" });
+        const checkout_path = try std.fs.path.join(allocator, &.{ temp_path, "checkout" });
         defer allocator.free(checkout_path);
         const Checkout = rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true });
         var checkout = try Checkout.init(io, allocator, .{ .path = checkout_path });
@@ -1128,31 +1116,22 @@ fn testClone(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-clone";
-
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // init server
-    var server = try Server(server_repo_kind, transport_def, temp_dir_name, port).init(io, allocator);
+    var server = try Server(server_repo_kind, transport_def, port).init(io, allocator, temp.dir, temp_path);
     try server.start();
     defer server.stop();
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const temp_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(temp_path);
-
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
     // init server repo with default branch name as main
@@ -1194,7 +1173,7 @@ fn testClone(
         defer export_file.close(io);
     }
 
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     // get remote url
@@ -1228,7 +1207,7 @@ fn testClone(
     defer allocator.free(upload_pack_command);
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
         const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
@@ -1252,7 +1231,7 @@ fn testClone(
 
         // make sure shallow clone was successful
         {
-            const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
+            const hello_txt = try temp.dir.openFile(io, "client/hello.txt", .{});
             hello_txt.close(io);
         }
 
@@ -1281,12 +1260,12 @@ fn testClone(
 
         // make sure unshallow pull was successful
         {
-            const extra_txt = try temp_dir.openFile(io, "client/extra.txt", .{});
+            const extra_txt = try temp.dir.openFile(io, "client/extra.txt", .{});
             extra_txt.close(io);
         }
 
         // delete client and clone again with --shallow-since
-        try cwd.deleteTree(io, temp_dir_name ++ "/client");
+        try temp.dir.deleteTree(io, "client");
 
         {
             var process = try std.process.spawn(io, .{
@@ -1307,12 +1286,12 @@ fn testClone(
 
         // make sure shallow clone was successful
         {
-            const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
+            const hello_txt = try temp.dir.openFile(io, "client/hello.txt", .{});
             hello_txt.close(io);
         }
 
         // delete client and clone again with --shallow-exclude
-        try cwd.deleteTree(io, temp_dir_name ++ "/client");
+        try temp.dir.deleteTree(io, "client");
 
         {
             var process = try std.process.spawn(io, .{
@@ -1333,12 +1312,12 @@ fn testClone(
 
         // make sure shallow clone was successful
         {
-            const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
+            const hello_txt = try temp.dir.openFile(io, "client/hello.txt", .{});
             hello_txt.close(io);
         }
 
         // delete client and clone again with --filter=blob:none
-        try cwd.deleteTree(io, temp_dir_name ++ "/client");
+        try temp.dir.deleteTree(io, "client");
 
         {
             var process = try std.process.spawn(io, .{
@@ -1359,12 +1338,12 @@ fn testClone(
 
         // make sure partial clone was successful
         {
-            const hello_txt = try temp_dir.openFile(io, "client/hello.txt", .{});
+            const hello_txt = try temp.dir.openFile(io, "client/hello.txt", .{});
             hello_txt.close(io);
         }
 
         // delete client and clone again with --filter=tree:0
-        try cwd.deleteTree(io, temp_dir_name ++ "/client");
+        try temp.dir.deleteTree(io, "client");
 
         {
             var process = try std.process.spawn(io, .{
@@ -1385,15 +1364,15 @@ fn testClone(
 
         // make sure treeless clone was successful
         {
-            const goodbye_txt = try temp_dir.openFile(io, "client/goodbye.txt", .{});
+            const goodbye_txt = try temp.dir.openFile(io, "client/goodbye.txt", .{});
             goodbye_txt.close(io);
         }
     } else {
         const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
+            const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
             defer allocator.free(known_hosts_path);
 
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+            const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
             defer allocator.free(priv_key_path);
 
             break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
@@ -1476,28 +1455,21 @@ fn testFetchLarge(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-fetch-large";
-
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // init server
-    var server = try Server(server_repo_kind, transport_def, temp_dir_name, port).init(io, allocator);
+    var server = try Server(server_repo_kind, transport_def, port).init(io, allocator, temp.dir, temp_path);
     try server.start();
     defer server.stop();
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
@@ -1516,7 +1488,7 @@ fn testFetchLarge(
         try server_repo.addConfig(io, allocator, .{ .name = "uploadpack.allowrefinwant", .value = "true" });
     }
 
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
@@ -1556,7 +1528,7 @@ fn testFetchLarge(
     defer allocator.free(upload_pack_command);
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
         const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
@@ -1618,10 +1590,10 @@ fn testFetchLarge(
         };
 
         const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
+            const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
             defer allocator.free(known_hosts_path);
 
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+            const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
             defer allocator.free(priv_key_path);
 
             break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
@@ -1658,28 +1630,22 @@ fn testPushLarge(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-push-large";
-
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
     // init server
-    var server = try Server(server_repo_kind, transport_def, temp_dir_name, port).init(io, allocator);
+    var server = try Server(server_repo_kind, transport_def, port).init(io, allocator, temp.dir, temp_path);
     try server.start();
     defer server.stop();
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const server_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "server" });
+    const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
     var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
@@ -1693,7 +1659,7 @@ fn testPushLarge(
         defer export_file.close(io);
     }
 
-    const client_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "client" });
+    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
@@ -1783,7 +1749,7 @@ fn testPushLarge(
     defer allocator.free(receive_pack_command);
 
     if (shell_out_to_git) {
-        const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+        const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
         const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
         defer allocator.free(ssh_config_arg);
@@ -1805,10 +1771,10 @@ fn testPushLarge(
         }
     } else {
         const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "known_hosts" });
+            const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
             defer allocator.free(known_hosts_path);
 
-            const priv_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key" });
+            const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
             defer allocator.free(priv_key_path);
 
             break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });

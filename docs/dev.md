@@ -14,15 +14,11 @@ The primary tests can be run with `zig build test`. This runs a few things worth
 
   * This is a basic end-to-end test. Most actions are done through `main.run` which programmatically executes things via CLI args (in-process, not subprocessing). This helps to test that the CLI commands work correctly.
 
-  * The work is done in a temp dir named `temp-test-main`.
-
   * The tests are run multiple times: once with the xit backend and once with the git backend. The git backend is also validated by running libgit2 functions at various points, to ensure that the git implementation is correct.
 
 * `src/test/repo.zig`
 
   * A variety of tests that execute xit programmatically using the `Repo` struct. This is how xit is meant to be used as a library. Some of the more complicated stuff is tested here, like merging.
-
-  * The tests are run in various temp dirs starting with `temp-test-repo-`.
 
   * Much like the main test, the repo tests are run both with the xit backend and the git backend.
 
@@ -32,7 +28,7 @@ Networking is tested with a separate command: `zig build testnet`
 
 * On Linux/Macos they assume that `git`, `ssh`, and `sshd` are on your PATH. On Windows, only `git` is assumed to be on your PATH.
 
-* There are three networking actions tested: push, fetch, and clone. They create server and client repos in temp dirs starting with `temp-testnet-`. Each of these is run over each of the supported protocols:
+* There are three networking actions tested: push, fetch, and clone. They create server and client repos in a temp dir. Each of these is run over each of the supported protocols:
 
   * `http` - Runs a server using the built-in HTTP server from the Zig standard library. This is run in-process using a separate thread. The server implements CGI by forwarding requests to `git http-backend` or `xit http-backend`, which it runs in a separate short-lived process. The client then communicates with it using the Zig's built-in HTTP client.
 

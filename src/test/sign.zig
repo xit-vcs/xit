@@ -17,30 +17,18 @@ fn testSign(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
-    const temp_dir_name = "temp-testnet-sign";
 
     // create the temp dir
-    const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
 
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
-    defer allocator.free(work_path);
-
-    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
+    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     // create priv key
-    const priv_key_file = try temp_dir.createFile(io, "key", .{});
+    const priv_key_file = try temp.dir.createFile(io, "key", .{});
     defer priv_key_file.close(io);
     try priv_key_file.writeStreamingAll(io,
         \\-----BEGIN OPENSSH PRIVATE KEY-----
@@ -57,9 +45,9 @@ fn testSign(
     }
 
     // create pub key
-    const pub_key_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name, "key.pub" });
+    const pub_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key.pub" });
     defer allocator.free(pub_key_path);
-    const pub_key_file = try cwd.createFile(io, pub_key_path, .{});
+    const pub_key_file = try temp.dir.createFile(io, "key.pub", .{});
     defer pub_key_file.close(io);
     try pub_key_file.writeStreamingAll(io,
         \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark

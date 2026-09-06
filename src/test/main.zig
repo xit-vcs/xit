@@ -32,7 +32,6 @@ test "main" {
 fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoOpts(repo_kind)) ![hash.hexLen(any_repo_opts.hash.?)]u8 {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const temp_dir_name = "temp-test-main";
 
     var null_writer = std.Io.Writer.Discarding.init(&.{});
     var environ_map = std.process.Environ.Map.init(allocator);
@@ -45,19 +44,9 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
 
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
-    var temp_dir_or_err = cwd.openDir(io, temp_dir_name, .{});
-    if (temp_dir_or_err) |*temp_dir| {
-        temp_dir.close(io);
-        try cwd.deleteTree(io, temp_dir_name);
-    } else |_| {}
-    var temp_dir = try cwd.createDirPathOpen(io, temp_dir_name, .{});
-    defer cwd.deleteTree(io, temp_dir_name) catch {};
-    defer temp_dir.close(io);
-
-    const cwd_path = try std.process.currentPathAlloc(io, allocator);
-    defer allocator.free(cwd_path);
-
-    const temp_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
     // init repo
@@ -229,7 +218,9 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                     const sha1_hex = std.fmt.bytesToHex(&sha1_bytes_buffer, .lower);
 
                     var oid: c.git_oid = undefined;
-                    try std.testing.expectEqual(0, c.git_odb_hashfile(&oid, temp_dir_name ++ "/repo/README", c.GIT_OBJECT_BLOB));
+                    const readme_path = try std.fs.path.joinZ(allocator, &.{ work_path, "README" });
+                    defer allocator.free(readme_path);
+                    try std.testing.expectEqual(0, c.git_odb_hashfile(&oid, readme_path, c.GIT_OBJECT_BLOB));
                     const oid_str = c.git_oid_tostr_s(&oid);
                     try std.testing.expect(oid_str != null);
 
