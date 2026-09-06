@@ -649,29 +649,67 @@ fn writeBlobWithPatches(
 
     const path_hash = hash.hashInt(repo_opts.hash, path);
 
-    // get all the patch ids from source
+    // patches are created by comparing each commit to its first parent.
+    // for merge commits, this already includes the changes from the
+    // other parent, so we shouldn't apply that parent's patches again.
     {
-        var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-        defer iter.deinit();
-        try iter.include(source_oid);
+        // the base may not be in source's first-parent history, so find
+        // the most recent commit that both first-parent histories share.
+        // walk from both ends so we don't have to read the entire history.
+        const patch_base_oid_maybe = blk: {
+            var ancestors: std.AutoHashMapUnmanaged(hash.HashInt(repo_opts.hash), void) = .empty;
+            defer ancestors.deinit(allocator);
+            var oids = [2]?[hash.hexLen(repo_opts.hash)]u8{ base_oid.*, source_oid.* };
+            while (oids[0] != null or oids[1] != null) {
+                for (&oids) |*oid_maybe| {
+                    if (oid_maybe.*) |oid| {
+                        const entry = try ancestors.getOrPut(allocator, try hash.hexToInt(repo_opts.hash, &oid));
+                        if (entry.found_existing) break :blk oid;
+                        var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oid);
+                        defer object.deinit();
+                        oid_maybe.* = if (object.content.commit.metadata.firstParent()) |parent_oid| parent_oid.* else null;
+                    }
+                }
+            }
+            break :blk null;
+        };
 
-        const source_path_to_patch_id_cursor_maybe = try source_snapshot.getCursor(hash.hashInt(repo_opts.hash, "path->patch-id"));
-
-        while (try iter.next(allocator)) |object| {
+        var oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = source_oid.*;
+        var child_patch_id_maybe: ?hash.HashInt(repo_opts.hash) = null;
+        while (oid_maybe) |oid| {
+            var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oid);
             defer object.deinit();
 
-            if (std.mem.eql(u8, base_oid, &object.oid)) {
-                break;
-            }
+            // get this file's patch id from the current commit's snapshot,
+            // since the source snapshot only has its most recent patch id
+            const patch_id_maybe = blk: {
+                const snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &object.oid))) orelse return error.KeyNotFound;
+                const patch_id_cursor = (try snapshot_cursor.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "path->patch-id") } },
+                    .{ .hash_map_get = .{ .value = path_hash } },
+                })) orelse break :blk null;
+                var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                _ = try patch_id_cursor.readBytes(&patch_id_bytes);
+                break :blk hash.bytesToInt(repo_opts.hash, &patch_id_bytes);
+            };
 
-            if (source_path_to_patch_id_cursor_maybe) |path_to_patch_id_cursor| {
-                const path_to_patch_id = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(path_to_patch_id_cursor);
-                if (try path_to_patch_id.getCursor(path_hash)) |patch_id_cursor| {
-                    var patch_id_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    _ = try patch_id_cursor.readBytes(&patch_id_buffer);
-                    const patch_id = hash.bytesToInt(repo_opts.hash, &patch_id_buffer);
-                    try patch_ids.append(allocator, patch_id);
+            // wait until we reach the parent to check whether its child
+            // introduced a patch or just inherited the same id.
+            if (child_patch_id_maybe) |child_patch_id| {
+                if (child_patch_id != patch_id_maybe) {
+                    try patch_ids.append(allocator, child_patch_id);
                 }
+            }
+            child_patch_id_maybe = patch_id_maybe;
+
+            if (patch_base_oid_maybe) |*patch_base_oid| {
+                if (std.mem.eql(u8, patch_base_oid, &oid)) break;
+            }
+            oid_maybe = if (object.content.commit.metadata.firstParent()) |parent_oid| parent_oid.* else null;
+        } else {
+            // if we reached the root, its patch has no parent to compare with
+            if (child_patch_id_maybe) |child_patch_id| {
+                try patch_ids.append(allocator, child_patch_id);
             }
         }
     }
@@ -692,6 +730,7 @@ fn writeBlobWithPatches(
 
     const patch = @import("./patch.zig");
 
+    // apply patches from oldest to newest
     for (0..patch_ids.items.len) |i| {
         const patch_id = patch_ids.items[patch_ids.items.len - i - 1];
         try patch.applyPatch(repo_opts, state.readOnly().extra.moment, &merge_snapshot, allocator, path_hash, patch_id);

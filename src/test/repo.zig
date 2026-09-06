@@ -348,6 +348,108 @@ test "merge" {
     try testMerge(.xit, .{ .is_test = true });
 }
 
+test "merge patch application" {
+    try testMergePatchApplication(.patch, .multiple);
+    try testMergePatchApplication(.diff3, .multiple);
+    try testMergePatchApplication(.patch, .dependent);
+    try testMergePatchApplication(.patch, .first_parents);
+    try testMergePatchApplication(.patch, .second_parent);
+}
+
+fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, dependent, first_parents, second_parent }) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    errdefer std.debug.print("patch application: {s}, {s}\n", .{ @tagName(case), @tagName(algo) });
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    const initial = "a\nb\nc\nd\ne\nf\ng";
+    try addFile(.xit, opts, &repo, io, allocator, "f.txt", initial);
+    const root_oid = try repo.commit(io, allocator, .{ .message = "root", .timestamp = 1 });
+    const base_oid = if (case == .second_parent) blk: {
+        try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nc\nd\ne\nf\nbase");
+        break :blk try repo.commit(io, allocator, .{ .message = "base", .timestamp = 2 });
+    } else root_oid;
+    try addFile(.xit, opts, &repo, io, allocator, "f.txt", if (case == .second_parent) "A\nb\nc\nd\ne\nf\nbase" else "A\nb\nc\nd\ne\nf\ng");
+    _ = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 3 });
+    try repo.addBranch(io, .{ .name = "target" });
+
+    const expected = switch (case) {
+        .multiple, .dependent => blk: {
+            // unrelated commits inherit the previous patch id, including the base's
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", initial);
+            try addFile(.xit, opts, &repo, io, allocator, "other.txt", "before");
+            _ = try repo.commit(io, allocator, .{ .message = "unrelated before", .parent_oids = &.{root_oid}, .timestamp = 4 });
+            const sources: []const []const u8 = if (case == .multiple) &.{
+                "a\nb\nC\nd\ne\nf\ng",
+                "a\nb\nC\nd\ne\nf\nG",
+            } else &.{
+                "a\nb\nnew\nc\nd\ne\nf\ng",
+                "a\nb\nnew\nmore\nc\nd\ne\nf\ng",
+            };
+            for (sources, 0..) |source, i| {
+                try addFile(.xit, opts, &repo, io, allocator, "f.txt", source);
+                _ = try repo.commit(io, allocator, .{ .message = "source", .timestamp = 5 + i * 2 });
+                try addFile(.xit, opts, &repo, io, allocator, "other.txt", source);
+                _ = try repo.commit(io, allocator, .{ .message = "unrelated after", .timestamp = 6 + i * 2 });
+            }
+            break :blk if (case == .multiple) "A\nb\nC\nd\ne\nf\nG" else "A\nb\nnew\nmore\nc\nd\ne\nf\ng";
+        },
+        .first_parents => blk: {
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nside\nd\ne\nf\ng");
+            _ = try repo.commit(io, allocator, .{ .message = "side", .parent_oids = &.{root_oid}, .timestamp = 4 });
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nside\nmore\nd\ne\nf\ng");
+            const side_oid = try repo.commit(io, allocator, .{ .message = "side follow-up", .timestamp = 5 });
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nc\nd\nE\nf\ng");
+            var source_oid = try repo.commit(io, allocator, .{ .message = "source", .parent_oids = &.{root_oid}, .timestamp = 6 });
+            // make the first-parent chain longer than the side chain.
+            // reversing a breadth-first walk would put some children before their parents.
+            for (0..3) |i| {
+                source_oid = try repo.commit(io, allocator, .{ .message = "empty", .allow_empty = true, .timestamp = 7 + i });
+            }
+            // create a merge commit with a manual resolution.
+            // we shouldn't apply the side branch's patches separately.
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nresolved\nd\nE\nf\ng");
+            _ = try repo.commit(io, allocator, .{ .message = "resolved merge", .parent_oids = &.{ source_oid, side_oid }, .timestamp = 10 });
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nresolved\nfollow-up\nd\nE\nf\ng");
+            _ = try repo.commit(io, allocator, .{ .message = "merge follow-up", .timestamp = 11 });
+            break :blk "A\nb\nresolved\nfollow-up\nd\nE\nf\ng";
+        },
+        .second_parent => blk: {
+            // root --- base --- target
+            //    \       \
+            //     source--merge---follow-up
+            // the merge's first parent is source; base is its second parent
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nc\nd\nE\nf\ng");
+            const source_oid = try repo.commit(io, allocator, .{ .message = "source", .parent_oids = &.{root_oid}, .timestamp = 4 });
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nc\nd\nE\nf\nbase");
+            _ = try repo.commit(io, allocator, .{ .message = "merge", .parent_oids = &.{ source_oid, base_oid }, .timestamp = 5 });
+            try addFile(.xit, opts, &repo, io, allocator, "f.txt", "a\nb\nC\nd\nE\nf\nbase");
+            _ = try repo.commit(io, allocator, .{ .message = "follow-up", .timestamp = 6 });
+            break :blk "A\nb\nC\nd\nE\nf\nbase";
+        },
+    };
+    {
+        var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "target" } } });
+        defer result.deinit();
+    }
+    var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{
+        .algo = algo,
+        .source = &.{.{ .ref = .{ .kind = .head, .name = "master" } }},
+    } } }, null);
+    defer merge.deinit();
+    try std.testing.expectEqualStrings(&base_oid, &merge.base_oid);
+    try std.testing.expect(merge.result == .success);
+    const actual = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(4096));
+    defer allocator.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
 test "merge at ref" {
     inline for (.{ false, true }) |bare| {
         try testMergeAtRef(.git, .{ .is_test = true }, bare);
