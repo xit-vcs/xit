@@ -600,10 +600,10 @@ fn testAppliedPatches(case: enum { repeat, later_edit, conflict, rollback, disca
 }
 
 test "merge at ref" {
-    inline for (.{ false, true }) |bare| {
-        try testMergeAtRef(.git, .{ .is_test = true }, bare);
-        try testMergeAtRef(.xit, .{ .is_test = true }, bare);
-    }
+    try testMergeAtRef(.git, .{ .is_test = true }, false);
+    try testMergeAtRef(.xit, .{ .is_test = true }, false);
+    try testMergeAtRef(.git, .{ .is_test = true }, true);
+    try testMergeAtRef(.xit, .{ .is_test = true }, true);
 }
 
 fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), bare: bool) !void {
