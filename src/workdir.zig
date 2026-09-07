@@ -972,7 +972,8 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     }
                     for (index.entries.keys()) |path| {
                         if (!target_tree.entries.contains(path)) {
-                            try tree_diff.changes.put(tree_diff.allocator, path, .{ .old = null, .new = null });
+                            const owned_path = try tree_diff.arena.allocator().dupe(u8, path);
+                            try tree_diff.changes.put(tree_diff.allocator, owned_path, .{ .old = null, .new = null });
                         }
                     }
                 }
