@@ -12,6 +12,7 @@ pub const ref = @import("./ref.zig");
 pub const fs = @import("./fs.zig");
 pub const diff = @import("./diff.zig");
 pub const merge = @import("./merge.zig");
+pub const patch = @import("./patch.zig");
 pub const config = @import("./config.zig");
 pub const chunk = @import("./chunk.zig");
 pub const pack = @import("./pack.zig");

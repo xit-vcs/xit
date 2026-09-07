@@ -200,6 +200,7 @@ test "gc ignores a stale temporary db" {
 }
 
 test "gc with patches" {
+    const patch = @import("../patch.zig");
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
@@ -229,7 +230,7 @@ test "gc with patches" {
 
     // changing the line count replaces some gap chunks and shares the rest
     try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ middle ++ "e\nX\nd");
-    _ = try repo.commit(io, allocator, .{ .message = "b" });
+    const keep_oid = try repo.commit(io, allocator, .{ .message = "b" });
 
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "foo" } } });
@@ -265,6 +266,9 @@ test "gc with patches" {
             while (try iter.next()) |_| count += 1;
             try std.testing.expectEqual(expected, count);
         }
+        const summaries = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_PATCH_STATS_KEY))).?);
+        try std.testing.expectEqual(roots.len > 0, try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &trash_oid)) != null);
+        try std.testing.expectEqualDeep(patch.CommitStats{ .lines_added = 2, .lines_removed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &keep_oid })).?);
     }
 
     // create an insertion from the surviving gaps, then merge after gc

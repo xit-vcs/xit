@@ -62,15 +62,6 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     try repo.remove(io, allocator, &.{"README.md"}, .{});
     const commit_c = try repo.commit(io, allocator, .{ .message = "c" });
 
-    if (repo_kind == .xit) {
-        try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &commit_a }));
-        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_b }));
-        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
-        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "master" } }));
-        try std.testing.expectError(error.RefNotFound, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
-        try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
-    }
-
     inline for (.{ false, true }) |bare| {
         try repo.addConfig(io, allocator, .{ .name = "core.bare", .value = if (bare) "true" else "false" });
         var root = try ui.rootWidget(repo_kind, repo_opts, &repo, io, allocator, .log);
@@ -174,11 +165,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         else => |e| return e,
     }
 
-    const tag_oid = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
-    if (repo_kind == .xit) {
-        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .tag, .name = "1.0.0" } }));
-        try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &tag_oid }));
-    }
+    _ = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
 
     // we can enable patches after adding a tag
     if (repo_kind == .xit) {
@@ -201,51 +188,101 @@ test "empty branch" {
     try testEmptyBranch(.xit, .{ .is_test = true });
 }
 
-test "commit count missing legacy index" {
+test "commit count and stats" {
+    try testCommitCountAndStats(.{ .is_test = true });
+    try testCommitCountAndStats(.{ .is_test = true, .hash = .sha256 });
+}
+
+fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
-    const DB = rp.Repo(.xit, repo_opts).DB;
-
+    const DB = rp.Repo(.xit, opts).DB;
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
-    defer allocator.free(temp_path);
-
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(work_path);
-
-    var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
+    try repo.addBranch(io, .{ .name = "empty", .target = .none });
+    try std.testing.expectEqual(0, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "empty" } }));
+    try std.testing.expectEqual(null, try repo.commitStats(io, allocator, .{ .ref = .{ .kind = .head, .name = "empty" } }));
+    try std.testing.expectError(error.RefNotFound, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
+    try std.testing.expectError(error.RefNotFound, repo.commitStats(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
+    try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
+    try std.testing.expectError(error.UnsupportedRefKind, repo.commitStats(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
 
-    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "a");
-    _ = try repo.commit(io, allocator, .{ .message = "a" });
-    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "b");
-    const commit_b = try repo.commit(io, allocator, .{ .message = "b" });
-
-    // simulate a repository created before the depth index existed.
-    const Ctx = struct {
-        pub fn run(_: @This(), cursor: *DB.Cursor(.read_write)) !void {
-            var moment = try DB.HashMap(.read_write).init(cursor.*);
-            if (!try moment.remove(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) {
-                return error.CommitDepthNotFound;
-            }
-        }
+    // identical files share edits; only f changes after the root commit.
+    try addFile(.xit, opts, &repo, io, allocator, "copy", "a\nb\n");
+    try addFile(.xit, opts, &repo, io, allocator, "large", "line\n" ** 4096);
+    const cases = [_]struct { content: ?[]const u8, stats: patch.CommitStats }{
+        .{ .content = "a\nb\n", .stats = .{ .lines_added = 4100 } },
+        .{ .content = "a\nB\n", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
+        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 1 } },
+        .{ .content = "a\n", .stats = .{ .lines_removed = 2 } },
+        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 2 } },
+        .{ .content = "", .stats = .{ .lines_removed = 3 } },
+        // empty files, real blank lines, and changes to the final newline.
+        .{ .content = "\n", .stats = .{ .lines_added = 1 } },
+        .{ .content = "", .stats = .{ .lines_removed = 1 } },
+        .{ .content = null, .stats = .{} },
+        .{ .content = "a", .stats = .{ .lines_added = 1 } },
+        .{ .content = "a\n", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
+        .{ .content = "a", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
+        // binary transitions have zero totals even when retained text changes.
+        .{ .content = "\xffbinary", .stats = .{} },
+        .{ .content = "changed\n", .stats = .{} },
+        .{ .content = "\xfebinary", .stats = .{} },
+        .{ .content = null, .stats = .{} },
+        .{ .content = "hello\n", .stats = .{ .lines_added = 1 } },
     };
-    {
-        try repo.core.db_file.lock(io, .exclusive);
-        defer repo.core.db_file.unlock(io);
-        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-        try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{});
+    var root_oid: [hash.hexLen(opts.hash)]u8 = undefined;
+    var last_oid: [hash.hexLen(opts.hash)]u8 = undefined;
+    for (cases, 0..) |case, i| {
+        errdefer std.debug.print("commit count and stats: {s}, case {d}\n", .{ @tagName(opts.hash), i });
+        if (case.content) |content| {
+            try addFile(.xit, opts, &repo, io, allocator, "f", content);
+        } else {
+            try repo.remove(io, allocator, &.{"f"}, .{});
+        }
+        last_oid = try repo.commit(io, allocator, .{ .message = "edit", .timestamp = i });
+        if (i == 0) root_oid = last_oid;
+        // indexed queries need no allocations, even for the large root commit.
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        try std.testing.expectEqual(@as(u64, i + 1), try repo.commitCount(io, failing.allocator(), .{ .oid = &last_oid }));
+        try std.testing.expectEqual(null, try repo.commitStats(io, allocator, .{ .oid = &last_oid }));
+        try repo.patchAll(io, allocator, null);
+        try std.testing.expectEqualDeep(case.stats, (try repo.commitStats(io, failing.allocator(), .{ .oid = &last_oid })).?);
     }
 
-    try std.testing.expectError(error.CommitDepthNotFound, repo.commitCount(io, allocator, .{ .oid = &commit_b }));
+    last_oid = try repo.commit(io, allocator, .{ .message = "empty", .allow_empty = true });
+    try repo.patchAll(io, allocator, null);
+    try std.testing.expectEqual(cases.len + 1, try repo.commitCount(io, allocator, .{ .oid = &last_oid }));
+    try std.testing.expectEqualDeep(patch.CommitStats{}, (try repo.commitStats(io, allocator, .{ .oid = &last_oid })).?);
 
-    // a later write fills the missing chain before indexing the new commit.
-    try addFile(.xit, repo_opts, &repo, io, allocator, "file", "c");
-    const commit_c = try repo.commit(io, allocator, .{ .message = "c" });
-    try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_b }));
-    try std.testing.expectEqual(3, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
+    // both queries use the first parent of a merge.
+    const merge_oid = try repo.commit(io, allocator, .{ .message = "merge", .parent_oids = &.{ root_oid, last_oid } });
+    try repo.patchAll(io, allocator, null);
+    const expected = patch.CommitStats{ .lines_added = 1, .lines_removed = 2 };
+    const tag_oid = try repo.addTag(io, allocator, .{ .name = "stats", .message = "stats" });
+    for ([_]rf.RefOrOid(opts.hash){ .{ .oid = &merge_oid }, .{ .ref = .{ .kind = .head, .name = "master" } }, .{ .ref = .{ .kind = .tag, .name = "stats" } }, .{ .oid = &tag_oid } }) |target| {
+        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, target));
+        try std.testing.expectEqualDeep(expected, (try repo.commitStats(io, allocator, target)).?);
+    }
+    try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &root_oid }));
+    try std.testing.expectEqualDeep(cases[0].stats, (try repo.commitStats(io, allocator, .{ .oid = &root_oid })).?);
+
+    // a malformed summary is an error.
+    const Ctx = struct {
+        oid: [hash.hexLen(opts.hash)]u8,
+        pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+            const moment = try DB.HashMap(.read_write).init(cursor.*);
+            const summaries = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, patch.COMMIT_ID_TO_PATCH_STATS_KEY)));
+            try summaries.put(try hash.hexToInt(opts.hash, &ctx.oid), .{ .bytes = &.{0} });
+        }
+    };
+    const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+    try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .oid = merge_oid });
+    try std.testing.expectError(error.InvalidCommitStats, repo.commitStats(io, allocator, .{ .oid = &merge_oid }));
 }
 
 fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
@@ -739,6 +776,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             try repo.patchAll(io, allocator, null);
             const moment = try repo.core.latestMoment();
             const snapshots = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
+            try std.testing.expectEqualDeep(patch.CommitStats{}, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
             const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
             const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
             const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{.{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } }};

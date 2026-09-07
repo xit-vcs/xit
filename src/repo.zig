@@ -6,6 +6,7 @@ const work = @import("./workdir.zig");
 const rf = @import("./ref.zig");
 const fs = @import("./fs.zig");
 const df = @import("./diff.zig");
+const patch = @import("./patch.zig");
 const mrg = @import("./merge.zig");
 const cfg = @import("./config.zig");
 const chunk = @import("./chunk.zig");
@@ -968,6 +969,38 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return try depth_cursor.readUint();
         }
 
+        /// returns added/removed line totals against the target's first parent,
+        /// excluding binary changes. null means no patch summary is stored.
+        /// reads only the summary, without generating patches or inspecting files.
+        pub fn commitStats(
+            self: *Repo(.xit, repo_opts),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            target: rf.RefOrOid(repo_opts.hash),
+        ) !?patch.CommitStats {
+            var moment = try self.core.latestMoment();
+            const state = Repo(.xit, repo_opts).State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
+            if (target == .ref) switch (target.ref.kind) {
+                .head, .tag => {},
+                else => return error.UnsupportedRefKind,
+            };
+            const oid = (try rf.readRecurExisting(.xit, repo_opts, state, io, target)) orelse return null;
+            const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_PATCH_STATS_KEY))) orelse return null;
+            const summaries = try DB.HashMap(.read_only).init(summaries_cursor);
+            const cursor = (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse blk: {
+                // annotated tags use their target commit's summary.
+                var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+                defer commit_object.deinit();
+                break :blk (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return null;
+            };
+            var bytes: [16]u8 = undefined;
+            if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
+            return .{
+                .lines_added = std.mem.readInt(u64, bytes[0..8], .big),
+                .lines_removed = std.mem.readInt(u64, bytes[8..16], .big),
+            };
+        }
+
         pub fn listBranches(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, start: rf.RefIteratorStart) !rf.RefIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
@@ -1426,8 +1459,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             }
                         }
                     }
-
-                    const patch = @import("./patch.zig");
 
                     var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
                     defer patch_writer.deinit(ctx.io, ctx.allocator);
