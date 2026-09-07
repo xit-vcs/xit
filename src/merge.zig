@@ -1359,6 +1359,11 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // commit the change
+                    if (merge_input.kind == .pick and commit_metadata.committer == null) {
+                        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                        defer config.deinit();
+                        commit_metadata.committer = try obj.userIdentity(repo_kind, repo_opts, &config, arena.allocator());
+                    }
                     commit_metadata.parent_oids = switch (merge_input.kind) {
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
@@ -1429,6 +1434,11 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     };
 
                     // commit the change
+                    if (merge_input.kind == .pick and commit_metadata.committer == null) {
+                        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                        defer config.deinit();
+                        commit_metadata.committer = try obj.userIdentity(repo_kind, repo_opts, &config, arena.allocator());
+                    }
                     commit_metadata.parent_oids = switch (merge_input.kind) {
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},

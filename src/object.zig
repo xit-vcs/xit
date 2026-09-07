@@ -521,15 +521,8 @@ pub fn writeCommit(
             @intCast(metadata.timestamp)
         else if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
-        // a copied author must not become the default committer
-        for ([_][]const u8{ "author", "committer" }, [_]?[]const u8{ metadata.author, metadata.committer }) |kind, identity_maybe| {
-            const identity = identity_maybe orelse identity_blk: {
-                if (repo_opts.is_test) break :identity_blk "radar <radar@roark>";
-                const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
-                const name = user_section.get("name") orelse return error.UserConfigNotFound;
-                const email = user_section.get("email") orelse return error.UserConfigNotFound;
-                break :identity_blk try std.fmt.allocPrint(arena.allocator(), "{s} <{s}>", .{ name, email });
-            };
+        const author = metadata.author orelse try userIdentity(repo_kind, repo_opts, &config, arena.allocator());
+        for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
             try metadata_lines.append(arena.allocator(), try formatCommitIdentity(arena.allocator(), kind, identity, ts));
         }
 
@@ -591,6 +584,19 @@ fn formatCommitIdentity(allocator: std.mem.Allocator, kind: []const u8, value: [
     return std.fmt.allocPrint(allocator, "{s} {s} {} +0000", .{ kind, identity, timestamp });
 }
 
+pub fn userIdentity(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    config: *const cfg.Config(repo_kind, repo_opts),
+    allocator: std.mem.Allocator,
+) ![]const u8 {
+    if (repo_opts.is_test) return "radar <radar@roark>";
+    const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
+    const name = user_section.get("name") orelse return error.UserConfigNotFound;
+    const email = user_section.get("email") orelse return error.UserConfigNotFound;
+    return try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ name, email });
+}
+
 pub fn writeTag(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -621,13 +627,7 @@ pub fn writeTag(
 
         const ts = if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
-        const tagger = input.tagger orelse auth_blk: {
-            if (repo_opts.is_test) break :auth_blk "radar <radar@roark>";
-            const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
-            const name = user_section.get("name") orelse return error.UserConfigNotFound;
-            const email = user_section.get("email") orelse return error.UserConfigNotFound;
-            break :auth_blk try std.fmt.allocPrint(arena.allocator(), "{s} <{s}>", .{ name, email });
-        };
+        const tagger = input.tagger orelse try userIdentity(repo_kind, repo_opts, &config, arena.allocator());
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tagger {s} {} +0000", .{ tagger, ts }));
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{input.message orelse ""}));
