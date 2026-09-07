@@ -641,9 +641,9 @@ fn writeBlobWithPatches(
         }
     }
 
-    //get commit-id->snapshot
-    const commit_id_to_snapshot_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"));
-    const commit_id_to_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_write).init(commit_id_to_snapshot_cursor);
+    // get commit-id->snapshot
+    const commit_id_to_snapshot_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) orelse return error.KeyNotFound;
+    const commit_id_to_snapshot = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(commit_id_to_snapshot_cursor);
 
     // get base snapshot
     const base_snapshot_cursor = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, base_oid))) orelse return error.KeyNotFound;
@@ -666,25 +666,26 @@ fn writeBlobWithPatches(
     // for merge commits, this already includes the changes from the
     // other parent, so we shouldn't apply that parent's patches again.
     {
-        // the base may not be in source's first-parent history, so find
-        // the most recent commit that both first-parent histories share.
-        // walk from both ends so we don't have to read the entire history.
-        const patch_base_oid_maybe = blk: {
-            var ancestors: std.AutoHashMapUnmanaged(hash.HashInt(repo_opts.hash), void) = .empty;
-            defer ancestors.deinit(allocator);
-            var oids = [2]?[hash.hexLen(repo_opts.hash)]u8{ base_oid.*, source_oid.* };
-            while (oids[0] != null or oids[1] != null) {
-                for (&oids) |*oid_maybe| {
-                    if (oid_maybe.*) |oid| {
-                        const entry = try ancestors.getOrPut(allocator, try hash.hexToInt(repo_opts.hash, &oid));
-                        if (entry.found_existing) break :blk oid;
-                        var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oid);
-                        defer object.deinit();
-                        oid_maybe.* = if (object.content.commit.metadata.firstParent()) |parent_oid| parent_oid.* else null;
-                    }
-                }
+        // the base may not be in source's first-parent history. use the
+        // stored depths to find their common first-parent ancestor.
+        const patch_base_oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = blk: {
+            const depths = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return error.CommitDepthNotFound;
+            var oids = [2][hash.hexLen(repo_opts.hash)]u8{ base_oid.*, source_oid.* };
+            var counts: [2]u64 = undefined;
+            for (oids, &counts) |oid, *count| {
+                const cursor = (try depths.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, &oid) } },
+                })) orelse return error.CommitDepthNotFound;
+                count.* = try cursor.readUint();
             }
-            break :blk null;
+            while (!std.mem.eql(u8, &oids[0], &oids[1])) {
+                const side: usize = if (counts[0] >= counts[1]) 0 else 1;
+                var object = try obj.Object(.xit, repo_opts).initCommit(state.readOnly(), io, allocator, &oids[side]);
+                defer object.deinit();
+                oids[side] = (object.content.commit.metadata.firstParent() orelse break :blk null).*;
+                counts[side] = std.math.sub(u64, counts[side], 1) catch return error.InvalidCommitDepth;
+            }
+            break :blk oids[0];
         };
 
         var oid_maybe: ?[hash.hexLen(repo_opts.hash)]u8 = source_oid.*;
