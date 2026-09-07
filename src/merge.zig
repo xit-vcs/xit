@@ -1328,6 +1328,15 @@ fn migrateWorktree(
     }
     for (conflicts.values()) |conflict| {
         if (conflict.renamed) |renamed| {
+            for (check_diff.changes.keys(), check_diff.changes.values()) |path, change| {
+                if (change.new == null) continue;
+                const shorter, const longer = if (path.len <= renamed.path.len) .{ path, renamed.path } else .{ renamed.path, path };
+                if (std.mem.startsWith(u8, longer, shorter) and
+                    (longer.len == shorter.len or longer[shorter.len] == '/'))
+                {
+                    return error.MergeBackupPathConflict;
+                }
+            }
             try check_diff.changes.put(allocator, renamed.path, .{ .old = null, .new = renamed.tree_entry });
         }
     }
@@ -1650,12 +1659,9 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name}),
                         },
                         .pick => blk: {
-                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
+                            var object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &source_oid);
                             defer object.deinit();
-                            const metadata = switch (object.content) {
-                                .commit => |commit| commit.metadata,
-                                else => return error.CommitObjectNotFound,
-                            };
+                            const metadata = object.content.commit.metadata;
                             var message: std.ArrayList(u8) = .empty;
                             try object.readMessage(arena.allocator(), &message, .limited(repo_opts.max_read_size));
                             break :blk .{
@@ -1667,49 +1673,37 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         },
                     };
 
-                    if (target_ref_maybe != null) {
-                        if (repo_kind == .xit and merge_algo == .patch) {
-                            // patch merging can leave temporary state behind
-                            try removeMergeState(repo_kind, repo_opts, state, io);
-                        }
-
-                        if (conflicts.count() > 0) {
-                            return .{
-                                .arena = arena,
-                                .allocator = allocator,
-                                .changes = clean_diff.changes,
-                                .auto_resolved_conflicts = auto_resolved_conflicts,
-                                .base_oid = base_oid,
-                                .target_name = target_name,
-                                .source_name = source_name,
-                                .result = .{ .conflict = .{ .conflicts = conflicts } },
-                            };
-                        }
-                    } else {
+                    if (target_ref_maybe == null) {
                         try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
+                    } else if (repo_kind == .xit and merge_algo == .patch) {
+                        // patch merging can leave temporary state behind
+                        try removeMergeState(repo_kind, repo_opts, state, io);
+                    }
 
-                        // exit early if there were conflicts
-                        if (conflicts.count() > 0) {
+                    // exit early if there were conflicts
+                    if (conflicts.count() > 0) {
+                        if (target_ref_maybe == null) {
                             try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
 
                             const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
                             defer merge_msg.close(io);
                             try merge_msg.writeStreamingAll(io, commit_metadata.message);
-
-                            return .{
-                                .arena = arena,
-                                .allocator = allocator,
-                                .changes = clean_diff.changes,
-                                .auto_resolved_conflicts = auto_resolved_conflicts,
-                                .base_oid = base_oid,
-                                .target_name = target_name,
-                                .source_name = source_name,
-                                .result = .{ .conflict = .{ .conflicts = conflicts } },
-                            };
-                        } else if (repo_kind == .xit) {
-                            // if any file conflicts were auto-resolved, there will be temporary state that must be cleaned up
-                            try removeMergeState(repo_kind, repo_opts, state, io);
                         }
+                        return .{
+                            .arena = arena,
+                            .allocator = allocator,
+                            .changes = clean_diff.changes,
+                            .auto_resolved_conflicts = auto_resolved_conflicts,
+                            .base_oid = base_oid,
+                            .target_name = target_name,
+                            .source_name = source_name,
+                            .result = .{ .conflict = .{ .conflicts = conflicts } },
+                        };
+                    }
+
+                    if (target_ref_maybe == null and repo_kind == .xit) {
+                        // clear temporary patch state when no conflicts remain
+                        try removeMergeState(repo_kind, repo_opts, state, io);
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
@@ -1772,6 +1766,18 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // read the merge message
                     var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
+                    if (merge_input.kind == .pick) {
+                        var object = try obj.Object(repo_kind, repo_opts).initCommit(state.readOnly(), io, allocator, &source_head_oid);
+                        defer object.deinit();
+                        const metadata = object.content.commit.metadata;
+                        if (commit_metadata.author == null) {
+                            commit_metadata.author = if (metadata.author) |author| try arena.allocator().dupe(u8, author) else null;
+                        }
+                        if (commit_metadata.committer == null) {
+                            commit_metadata.committer = if (metadata.committer) |committer| try arena.allocator().dupe(u8, committer) else null;
+                        }
+                        if (commit_metadata.timestamp == 0) commit_metadata.timestamp = metadata.timestamp;
+                    }
                     commit_metadata.message = state.core.repo_dir.readFileAlloc(io, merge_msg_name, arena.allocator(), .limited(repo_opts.max_read_size)) catch |err| switch (err) {
                         error.FileNotFound => return error.MergeMessageNotFound,
                         else => |e| return e,
@@ -1836,20 +1842,11 @@ fn writePossiblePatches(
     var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
     defer patch_writer.deinit(io, allocator);
 
-    var source_iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-    defer source_iter.deinit();
-    try source_iter.include(source_oid);
-    while (try source_iter.next(allocator)) |commit_object| {
-        defer commit_object.deinit();
-
-        const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
-        try patch_writer.add(state.readOnly(), io, allocator, &oid);
-    }
-
-    var target_iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-    defer target_iter.deinit();
-    try target_iter.include(target_oid);
-    while (try target_iter.next(allocator)) |commit_object| {
+    var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
+    defer iter.deinit();
+    try iter.include(source_oid);
+    try iter.include(target_oid);
+    while (try iter.next(allocator)) |commit_object| {
         defer commit_object.deinit();
 
         const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);

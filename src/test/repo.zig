@@ -522,6 +522,8 @@ test "merge local changes" {
     try testMergeLocalChanges(.git, .{ .is_test = true }, .unborn);
     try testMergeLocalChanges(.git, .{ .is_test = true }, .unborn_clean);
     try testMergeLocalChanges(.git, .{ .is_test = true }, .backup);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .backup_incoming);
+    try testMergeLocalChanges(.git, .{ .is_test = true }, .backup_directory);
 
     try testMergeLocalChanges(.xit, .{ .is_test = true }, .unstaged);
     try testMergeLocalChanges(.xit, .{ .is_test = true }, .staged);
@@ -532,16 +534,20 @@ test "merge local changes" {
     try testMergeLocalChanges(.xit, .{ .is_test = true }, .unborn);
     try testMergeLocalChanges(.xit, .{ .is_test = true }, .unborn_clean);
     try testMergeLocalChanges(.xit, .{ .is_test = true }, .backup);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .backup_incoming);
+    try testMergeLocalChanges(.xit, .{ .is_test = true }, .backup_directory);
 }
 
 fn testMergeLocalChanges(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    case: enum { unstaged, staged, untracked, deleted, unrelated, unrelated_staged, unborn, unborn_clean, backup },
+    case: enum { unstaged, staged, untracked, deleted, unrelated, unrelated_staged, unborn, unborn_clean, backup, backup_incoming, backup_directory },
 ) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     errdefer std.debug.print("merge local changes: {s}, {s}\n", .{ @tagName(repo_kind), @tagName(case) });
+    const incoming_backup = case == .backup_incoming or case == .backup_directory;
+    const backup = case == .backup or incoming_backup;
 
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
@@ -566,22 +572,23 @@ fn testMergeLocalChanges(
         try repo.remove(io, allocator, &.{"f.txt"}, .{ .force = true });
         break :blk oid;
     } else blk: {
-        if (case != .untracked and case != .backup) try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "base");
+        if (case != .untracked and !backup) try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "base");
         if (case == .unrelated or case == .unrelated_staged) try addFile(repo_kind, repo_opts, &repo, io, allocator, "other.txt", "base");
         const base_oid = try repo.commit(io, allocator, .{ .message = "base", .allow_empty = true, .timestamp = 1 });
-        try addFile(repo_kind, repo_opts, &repo, io, allocator, if (case == .backup) "f.txt/child" else "f.txt", "source");
+        try addFile(repo_kind, repo_opts, &repo, io, allocator, if (backup) "f.txt/child" else "f.txt", "source");
+        if (incoming_backup) try addFile(repo_kind, repo_opts, &repo, io, allocator, if (case == .backup_incoming) "f.txt~master" else "f.txt~master/child", "incoming");
         const oid = try repo.commit(io, allocator, .{ .message = "source", .timestamp = 2 });
         var result = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &base_oid } });
         defer result.deinit();
         target_oid = base_oid;
-        if (case == .backup) {
+        if (backup) {
             try addFile(repo_kind, repo_opts, &repo, io, allocator, "f.txt", "target");
             target_oid = try repo.commit(io, allocator, .{ .message = "target", .timestamp = 3 });
         }
         break :blk oid;
     };
     const local_path = switch (case) {
-        .unrelated, .unrelated_staged, .unborn_clean => "other.txt",
+        .unrelated, .unrelated_staged, .unborn_clean, .backup_incoming, .backup_directory => "other.txt",
         .backup => "f.txt~master",
         else => "f.txt",
     };
@@ -602,7 +609,7 @@ fn testMergeLocalChanges(
         try std.testing.expect(result.result == .fast_forward);
     } else |err| {
         if (allowed) return err;
-        try std.testing.expectEqual(error.CannotMergeWithLocalChanges, err);
+        try std.testing.expectEqual(if (incoming_backup) error.MergeBackupPathConflict else error.CannotMergeWithLocalChanges, err);
     }
 
     var after = try repo.status(io, allocator);
@@ -3436,7 +3443,7 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
     const message = "d\n\nmessage body\n";
-    const commit_d = try repo.commit(io, allocator, .{ .message = message });
+    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com> 123 +0530", .committer = "bob <bob@example.com> 456 -0700", .timestamp = 456 });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3493,6 +3500,8 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         defer actual.deinit(allocator);
         try commit.readMessage(allocator, &actual, .limited(4096));
         try std.testing.expectEqualStrings(message, actual.items);
+        try std.testing.expectEqualStrings("alice <alice@example.com> 123 +0530", commit.content.commit.metadata.author.?);
+        try std.testing.expectEqualStrings("bob <bob@example.com> 456 -0700", commit.content.commit.metadata.committer.?);
     }
 
     // make sure stuff.md does not exist
@@ -3559,7 +3568,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
     const message = "d\n\nmessage body\n";
-    const commit_d = try repo.commit(io, allocator, .{ .message = message });
+    const commit_d = try repo.commit(io, allocator, .{ .message = message, .author = "alice <alice@example.com>", .committer = "bob <bob@example.com>", .timestamp = 456 });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3639,6 +3648,8 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
         defer actual.deinit(allocator);
         try commit.readMessage(allocator, &actual, .limited(4096));
         try std.testing.expectEqualStrings(message, actual.items);
+        try std.testing.expectEqualStrings("alice <alice@example.com> 456 +0000", commit.content.commit.metadata.author.?);
+        try std.testing.expectEqualStrings("bob <bob@example.com> 456 +0000", commit.content.commit.metadata.committer.?);
     }
 }
 

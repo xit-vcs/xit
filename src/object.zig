@@ -411,8 +411,13 @@ pub fn writeCommitWithoutRef(
 
     const author = metadata.author orelse return error.AuthorNotFound;
     const timestamp: i64 = @intCast(metadata.timestamp);
-    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "author {s} {} +0000", .{ author, timestamp }));
-    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "committer {s} {} +0000", .{ metadata.committer orelse author, timestamp }));
+    for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
+        const has_date = if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| end + 1 < identity.len else false;
+        try metadata_lines.append(arena.allocator(), if (has_date)
+            try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ kind, identity })
+        else
+            try std.fmt.allocPrint(arena.allocator(), "{s} {s} {} +0000", .{ kind, identity, timestamp }));
+    }
     try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
 
     const commit_contents = try std.mem.join(allocator, "\n", metadata_lines.items);
@@ -527,10 +532,13 @@ pub fn writeCommit(
             const email = user_section.get("email") orelse return error.UserConfigNotFound;
             break :auth_blk try std.fmt.allocPrint(arena.allocator(), "{s} <{s}>", .{ name, email });
         };
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "author {s} {} +0000", .{ author, ts }));
-
-        const committer = metadata.committer orelse author;
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "committer {s} {} +0000", .{ committer, ts }));
+        for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
+            const has_date = if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| end + 1 < identity.len else false;
+            try metadata_lines.append(arena.allocator(), if (has_date)
+                try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ kind, identity })
+            else
+                try std.fmt.allocPrint(arena.allocator(), "{s} {s} {} +0000", .{ kind, identity, ts }));
+        }
 
         try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
 
