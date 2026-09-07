@@ -3435,7 +3435,8 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "stuff.md", "c");
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
-    const commit_d = try repo.commit(io, allocator, .{ .message = "d" });
+    const message = "d\n\nmessage body\n";
+    const commit_d = try repo.commit(io, allocator, .{ .message = message });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3443,10 +3444,55 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         defer result.deinit();
     }
 
+    // count open files through io, including files created by the merge
+    var files = struct {
+        threaded: std.Io.Threaded,
+        count: usize = 0,
+
+        fn open(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, opts: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirOpenFile(userdata, dir, path, opts);
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata.?));
+            const self: *@This() = @fieldParentPtr("threaded", threaded);
+            self.count += 1;
+            return file;
+        }
+
+        fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, opts: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            const file = try std.testing.io.vtable.dirCreateFile(userdata, dir, path, opts);
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata.?));
+            const self: *@This() = @fieldParentPtr("threaded", threaded);
+            self.count += 1;
+            return file;
+        }
+
+        fn close(userdata: ?*anyopaque, handles: []const std.Io.File) void {
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata.?));
+            const self: *@This() = @fieldParentPtr("threaded", threaded);
+            self.count -= handles.len;
+            std.testing.io.vtable.fileClose(userdata, handles);
+        }
+    }{ .threaded = std.Io.Threaded.init(allocator, .{}) };
+    defer files.threaded.deinit();
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirOpenFile = @TypeOf(files).open;
+    vtable.dirCreateFile = @TypeOf(files).create;
+    vtable.fileClose = @TypeOf(files).close;
+    const merge_io: std.Io = .{ .userdata = &files.threaded, .vtable = &vtable };
     {
-        var merge = try repo.merge(io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &commit_d }} } } }, null);
+        var merge = try repo.merge(merge_io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &commit_d }} } } }, null);
         defer merge.deinit();
         try std.testing.expect(.success == merge.result);
+    }
+    try std.testing.expectEqual(0, files.count);
+    {
+        var iter = try repo.log(io, allocator, .{});
+        defer iter.deinit();
+        const commit = (try iter.next(allocator)).?;
+        defer commit.deinit();
+        var actual: std.ArrayList(u8) = .empty;
+        defer actual.deinit(allocator);
+        try commit.readMessage(allocator, &actual, .limited(4096));
+        try std.testing.expectEqualStrings(message, actual.items);
     }
 
     // make sure stuff.md does not exist
@@ -3468,11 +3514,13 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 }
 
 test "cherry-pick conflict" {
-    try testCherryPickConflict(.git, .{ .is_test = true });
-    try testCherryPickConflict(.xit, .{ .is_test = true });
+    try testCherryPickConflict(.git, .{ .is_test = true }, false);
+    try testCherryPickConflict(.xit, .{ .is_test = true }, false);
+    try testCherryPickConflict(.git, .{ .is_test = true }, true);
+    try testCherryPickConflict(.xit, .{ .is_test = true }, true);
 }
 
-fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) !void {
+fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), allow_empty: bool) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
@@ -3510,7 +3558,8 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "c");
     _ = try repo.commit(io, allocator, .{ .message = "c" });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "d");
-    const commit_d = try repo.commit(io, allocator, .{ .message = "d" });
+    const message = "d\n\nmessage body\n";
+    const commit_d = try repo.commit(io, allocator, .{ .message = message });
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
     _ = try repo.commit(io, allocator, .{ .message = "e" });
     {
@@ -3555,54 +3604,41 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     }
 
     // ensure cherry-pick cannot be run again while there are unresolved conflicts
+    try std.testing.expectError(error.UnfinishedMergeInProgress, repo.merge(io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &([_]u8{0} ** hash.hexLen(repo_opts.hash)) }} } } }, null));
+    try std.testing.expectError(error.CannotContinueMergeWithUnresolvedConflicts, repo.merge(io, allocator, .{ .kind = .pick, .action = .cont }, null));
+
+    // a failed continuation must preserve the cherry-pick state
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "b");
+    try std.testing.expectError(error.EmptyCommit, repo.merge(io, allocator, .{ .kind = .pick, .action = .cont }, null));
+    const pick_head = (try repo.readRef(io, .{ .kind = .none, .name = "CHERRY_PICK_HEAD" })).?;
+    try std.testing.expectEqualStrings(&commit_d, &pick_head);
     {
-        // can't cherry-pick again with an unresolved cherry-pick
-        {
-            var result_or_err = repo.merge(io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &([_]u8{0} ** hash.hexLen(repo_opts.hash)) }} } } }, null);
-            if (result_or_err) |*result| {
-                defer result.deinit();
-                return error.ExpectedMergeToNotFinish;
-            } else |err| switch (err) {
-                error.UnfinishedMergeInProgress => {},
-                else => |e| return e,
-            }
-        }
-
-        // can't continue cherry-pick with unresolved conflicts
-        {
-            var result_or_err = repo.merge(io, allocator, .{ .kind = .pick, .action = .cont }, null);
-            if (result_or_err) |*result| {
-                defer result.deinit();
-                return error.ExpectedMergeToNotFinish;
-            } else |err| switch (err) {
-                error.CannotContinueMergeWithUnresolvedConflicts => {},
-                else => |e| return e,
-            }
-        }
+        const actual = try repo.core.repo_dir.readFileAlloc(io, "MERGE_MSG", allocator, .limited(4096));
+        defer allocator.free(actual);
+        try std.testing.expectEqualStrings(message, actual);
     }
-
-    // resolve conflict
-    try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md",
-        \\e
-    );
+    if (!allow_empty) try addFile(repo_kind, repo_opts, &repo, io, allocator, "readme.md", "e");
 
     // can't continue with .kind = merge
-    {
-        var result_or_err = repo.merge(io, allocator, .{ .kind = .full, .action = .cont }, null);
-        if (result_or_err) |*result| {
-            defer result.deinit();
-            return error.ExpectedMergeToNotFinish;
-        } else |err| switch (err) {
-            error.OtherMergeInProgress => {},
-            else => |e| return e,
-        }
-    }
+    try std.testing.expectError(error.OtherMergeInProgress, repo.merge(io, allocator, .{ .kind = .full, .action = .cont }, null));
 
     // continue cherry-pick
     {
-        var merge = try repo.merge(io, allocator, .{ .kind = .pick, .action = .cont }, null);
+        var merge = try repo.merge(io, allocator, .{ .kind = .pick, .action = .cont, .commit_metadata = .{ .allow_empty = allow_empty } }, null);
         defer merge.deinit();
         try std.testing.expect(.success == merge.result);
+    }
+    try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = "CHERRY_PICK_HEAD" }));
+    try std.testing.expectError(error.FileNotFound, repo.core.repo_dir.access(io, "MERGE_MSG", .{}));
+    {
+        var iter = try repo.log(io, allocator, .{});
+        defer iter.deinit();
+        const commit = (try iter.next(allocator)).?;
+        defer commit.deinit();
+        var actual: std.ArrayList(u8) = .empty;
+        defer actual.deinit(allocator);
+        try commit.readMessage(allocator, &actual, .limited(4096));
+        try std.testing.expectEqualStrings(message, actual.items);
     }
 }
 

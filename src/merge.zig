@@ -425,74 +425,64 @@ fn writeBlobWithDiff3(
         line_buffer: std.ArrayList([]const u8) = .empty,
         line_index: usize = 0,
         current_line: ?[]const u8,
+        needs_newline: bool = false,
         has_conflict: bool,
         interface: std.Io.Reader,
 
-        const Parent = @This();
-
-        pub const Reader = struct {
-            parent: *Parent,
-
-            pub fn read(self: @This(), buf: []u8) !usize {
-                var size: usize = 0;
-                while (size < buf.len) {
-                    const read_size = try self.readStep(buf[size..]);
-                    if (read_size == 0) {
-                        break;
+        fn read(self: *@This(), buf: []u8) !usize {
+            var size: usize = 0;
+            while (size < buf.len) {
+                if (self.current_line != null) {
+                    if (self.needs_newline) {
+                        buf[size] = '\n';
+                        size += 1;
+                        self.needs_newline = false;
+                    } else {
+                        size += self.drainCurrentLine(buf[size..]);
                     }
-                    size += read_size;
-                }
-                return size;
-            }
-
-            fn readStep(self: @This(), buf: []u8) !usize {
-                if (self.parent.current_line != null) {
-                    return self.parent.drainCurrentLine(buf);
+                    continue;
                 }
 
-                if (try self.parent.diff3_iter.next()) |chunk| {
-                    switch (chunk) {
-                        .clean => |clean| {
-                            for (clean.begin..clean.end) |line_num| {
-                                const line = try self.parent.base_iter.get(line_num);
-                                defer self.parent.base_iter.free(line);
-                                {
-                                    const line_dupe = try self.parent.allocator.dupe(u8, line);
-                                    errdefer self.parent.allocator.free(line_dupe);
-                                    try self.parent.line_buffer.append(self.parent.allocator, line_dupe);
-                                }
+                const chunk = try self.diff3_iter.next() orelse break;
+                switch (chunk) {
+                    .clean => |clean| {
+                        for (clean.begin..clean.end) |line_num| {
+                            const line = try self.base_iter.get(line_num);
+                            defer self.base_iter.free(line);
+                            {
+                                const line_dupe = try self.allocator.dupe(u8, line);
+                                errdefer self.allocator.free(line_dupe);
+                                try self.line_buffer.append(self.allocator, line_dupe);
                             }
-                        },
-                        .conflict => |conflict| {
-                            var base_lines = try initLineRange(self.parent.allocator, self.parent.base_iter, conflict.o_range);
-                            defer base_lines.deinit(self.parent.allocator);
-                            var target_lines = try initLineRange(self.parent.allocator, self.parent.target_iter, conflict.a_range);
-                            defer target_lines.deinit(self.parent.allocator);
-                            var source_lines = try initLineRange(self.parent.allocator, self.parent.source_iter, conflict.b_range);
-                            defer source_lines.deinit(self.parent.allocator);
+                        }
+                    },
+                    .conflict => |conflict| {
+                        var base_lines = try initLineRange(self.allocator, self.base_iter, conflict.o_range);
+                        defer base_lines.deinit(self.allocator);
+                        var target_lines = try initLineRange(self.allocator, self.target_iter, conflict.a_range);
+                        defer target_lines.deinit(self.allocator);
+                        var source_lines = try initLineRange(self.allocator, self.source_iter, conflict.b_range);
+                        defer source_lines.deinit(self.allocator);
 
-                            if (try appendResolvedOrConflict(self.parent.allocator, &self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
-                                self.parent.has_conflict = true;
-                            }
-                        },
-                    }
-                    if (self.parent.line_buffer.items.len > 0) {
-                        self.parent.current_line = self.parent.line_buffer.items[0];
-                    }
-                    return self.readStep(buf);
-                } else {
-                    return 0;
+                        if (try appendResolvedOrConflict(self.allocator, &self.line_buffer, self.markers, &base_lines, &target_lines, &source_lines)) {
+                            self.has_conflict = true;
+                        }
+                    },
+                }
+                if (self.line_buffer.items.len > 0) {
+                    self.current_line = self.line_buffer.items[0];
                 }
             }
-        };
+            return size;
+        }
 
-        /// copy from the current line and add a newline when another line follows
+        /// copy from the current line and defer the newline until another line follows
         fn drainCurrentLine(self: *@This(), buf: []u8) usize {
             const current_line = self.current_line orelse return 0;
             const size = @min(buf.len, current_line.len);
             @memcpy(buf[0..size], current_line[0..size]);
             self.current_line = current_line[size..];
-            if (size < current_line.len or size == buf.len) return size;
+            if (size < current_line.len) return size;
 
             self.allocator.free(self.line_buffer.items[self.line_index]);
             self.line_index += 1;
@@ -503,10 +493,7 @@ fn writeBlobWithDiff3(
                 self.line_index = 0;
                 self.current_line = null;
             }
-            if (self.current_line != null or !self.diff3_iter.finished) {
-                buf[size] = '\n';
-                return size + 1;
-            }
+            self.needs_newline = true;
             return size;
         }
 
@@ -521,15 +508,10 @@ fn writeBlobWithDiff3(
             self.line_buffer.clearAndFree(self.allocator);
             self.line_index = 0;
             self.current_line = null;
+            self.needs_newline = false;
             self.has_conflict = false;
             self.interface.seek = 0;
             self.interface.end = 0;
-        }
-
-        pub fn reader(self: *@This()) Reader {
-            return Reader{
-                .parent = self,
-            };
         }
 
         pub fn count(self: *@This()) !usize {
@@ -537,7 +519,7 @@ fn writeBlobWithDiff3(
             var read_buffer = [_]u8{0} ** repo_opts.read_size;
             try self.reset();
             while (true) {
-                const size = try self.reader().read(&read_buffer);
+                const size = try self.read(&read_buffer);
                 if (size == 0) {
                     break;
                 }
@@ -549,7 +531,7 @@ fn writeBlobWithDiff3(
         fn stream(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
             const r: *@This() = @alignCast(@fieldParentPtr("interface", io_r));
             const dest = limit.slice(try io_w.writableSliceGreedy(1));
-            const size = r.reader().read(dest) catch return error.ReadFailed;
+            const size = r.read(dest) catch return error.ReadFailed;
             if (size == 0) return error.EndOfStream;
             io_w.advance(size);
             return size;
@@ -1668,11 +1650,20 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name}),
                         },
                         .pick => blk: {
-                            const object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, arena.allocator(), &source_oid);
-                            switch (object.content) {
-                                .commit => break :blk object.content.commit.metadata,
+                            var object = try obj.Object(repo_kind, repo_opts).init(state.readOnly(), io, allocator, &source_oid);
+                            defer object.deinit();
+                            const metadata = switch (object.content) {
+                                .commit => |commit| commit.metadata,
                                 else => return error.CommitObjectNotFound,
-                            }
+                            };
+                            var message: std.ArrayList(u8) = .empty;
+                            try object.readMessage(arena.allocator(), &message, .limited(repo_opts.max_read_size));
+                            break :blk .{
+                                .author = if (metadata.author) |author| try arena.allocator().dupe(u8, author) else null,
+                                .committer = if (metadata.committer) |committer| try arena.allocator().dupe(u8, committer) else null,
+                                .timestamp = metadata.timestamp,
+                                .message = message.items,
+                            };
                         },
                     };
 
@@ -1765,14 +1756,12 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 },
                 .cont => {
                     // ensure there are no conflict entries in the index
-                    {
-                        var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
-                        defer index.deinit();
+                    var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+                    defer index.deinit();
 
-                        for (index.entries.values()) |*entries_for_path| {
-                            if (null == entries_for_path[0]) {
-                                return error.CannotContinueMergeWithUnresolvedConflicts;
-                            }
+                    for (index.entries.values()) |*entries_for_path| {
+                        if (null == entries_for_path[0]) {
+                            return error.CannotContinueMergeWithUnresolvedConflicts;
                         }
                     }
 
@@ -1800,15 +1789,17 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         break :blk .{ ancestry.tips[1], ancestry.tips[0], try ancestry.mergeBase(merge_input.kind) };
                     };
 
-                    // clean up the stored merge state
-                    try removeMergeState(repo_kind, repo_opts, state, io);
-
                     // commit the change
                     commit_metadata.parent_oids = switch (merge_input.kind) {
                         .full => &.{ target_oid, source_oid },
                         .pick => &.{target_oid},
                     };
-                    const commit_oid = try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
+                    var tree = try obj.Tree.initFromIndex(repo_kind, repo_opts, state, io, allocator, &index);
+                    defer tree.deinit();
+                    const commit_oid = try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata, &tree, .{ .kind = .none, .name = "HEAD" });
+
+                    // clean up the stored merge state after the commit succeeds
+                    try removeMergeState(repo_kind, repo_opts, state, io);
 
                     return .{
                         .arena = arena,
