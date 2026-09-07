@@ -389,14 +389,6 @@ fn writeBlobWithDiff3(
     var diff3_iter = try df.Diff3Iterator(repo_kind, repo_opts).init(allocator, &base_iter, &target_iter, &source_iter);
     defer diff3_iter.deinit();
 
-    var line_buffer: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (line_buffer.items) |buffer| {
-            allocator.free(buffer);
-        }
-        line_buffer.deinit(allocator);
-    }
-
     const initLineRange = struct {
         fn init(inner_allocator: std.mem.Allocator, iter: *df.LineIterator(repo_kind, repo_opts), range_maybe: ?df.Diff3Iterator(repo_kind, repo_opts).Range) !LineRange {
             var lines: std.ArrayList([]const u8) = .empty;
@@ -430,7 +422,8 @@ fn writeBlobWithDiff3(
         target_iter: *df.LineIterator(repo_kind, repo_opts),
         source_iter: *df.LineIterator(repo_kind, repo_opts),
         diff3_iter: *df.Diff3Iterator(repo_kind, repo_opts),
-        line_buffer: *std.ArrayList([]const u8),
+        line_buffer: std.ArrayList([]const u8) = .empty,
+        line_index: usize = 0,
         current_line: ?[]const u8,
         has_conflict: bool,
         interface: std.Io.Reader,
@@ -452,19 +445,9 @@ fn writeBlobWithDiff3(
                 return size;
             }
 
-            pub fn readByte(self: @This()) !u8 {
-                var buffer = [_]u8{0} ** 1;
-                const size = try self.read(&buffer);
-                if (size == 0) {
-                    return error.EndOfStream;
-                } else {
-                    return buffer[0];
-                }
-            }
-
             fn readStep(self: @This(), buf: []u8) !usize {
                 if (self.parent.current_line != null) {
-                    return drainCurrentLine(self.parent.allocator, self.parent.line_buffer, &self.parent.current_line, !self.parent.diff3_iter.finished, buf);
+                    return self.parent.drainCurrentLine(buf);
                 }
 
                 if (try self.parent.diff3_iter.next()) |chunk| {
@@ -478,7 +461,6 @@ fn writeBlobWithDiff3(
                                     errdefer self.parent.allocator.free(line_dupe);
                                     try self.parent.line_buffer.append(self.parent.allocator, line_dupe);
                                 }
-                                self.parent.current_line = self.parent.line_buffer.items[0];
                             }
                         },
                         .conflict => |conflict| {
@@ -489,13 +471,13 @@ fn writeBlobWithDiff3(
                             var source_lines = try initLineRange(self.parent.allocator, self.parent.source_iter, conflict.b_range);
                             defer source_lines.deinit(self.parent.allocator);
 
-                            if (try appendResolvedOrConflict(self.parent.allocator, self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
+                            if (try appendResolvedOrConflict(self.parent.allocator, &self.parent.line_buffer, self.parent.markers, &base_lines, &target_lines, &source_lines)) {
                                 self.parent.has_conflict = true;
                             }
-                            if (self.parent.line_buffer.items.len > 0) {
-                                self.parent.current_line = self.parent.line_buffer.items[0];
-                            }
                         },
+                    }
+                    if (self.parent.line_buffer.items.len > 0) {
+                        self.parent.current_line = self.parent.line_buffer.items[0];
                     }
                     return self.readStep(buf);
                 } else {
@@ -504,23 +486,44 @@ fn writeBlobWithDiff3(
             }
         };
 
-        pub fn seekTo(self: *@This(), offset: usize) !void {
+        /// copy from the current line and add a newline when another line follows
+        fn drainCurrentLine(self: *@This(), buf: []u8) usize {
+            const current_line = self.current_line orelse return 0;
+            const size = @min(buf.len, current_line.len);
+            @memcpy(buf[0..size], current_line[0..size]);
+            self.current_line = current_line[size..];
+            if (size < current_line.len or size == buf.len) return size;
+
+            self.allocator.free(self.line_buffer.items[self.line_index]);
+            self.line_index += 1;
+            if (self.line_index < self.line_buffer.items.len) {
+                self.current_line = self.line_buffer.items[self.line_index];
+            } else {
+                self.line_buffer.clearRetainingCapacity();
+                self.line_index = 0;
+                self.current_line = null;
+            }
+            if (self.current_line != null or !self.diff3_iter.finished) {
+                buf[size] = '\n';
+                return size + 1;
+            }
+            return size;
+        }
+
+        pub fn reset(self: *@This()) !void {
             try self.base_iter.reset();
             try self.target_iter.reset();
             try self.source_iter.reset();
             try self.diff3_iter.reset();
-            for (self.line_buffer.items) |buffer| {
+            for (self.line_buffer.items[self.line_index..]) |buffer| {
                 self.allocator.free(buffer);
             }
             self.line_buffer.clearAndFree(self.allocator);
+            self.line_index = 0;
             self.current_line = null;
             self.has_conflict = false;
             self.interface.seek = 0;
             self.interface.end = 0;
-
-            for (0..offset) |_| {
-                _ = try self.reader().readByte();
-            }
         }
 
         pub fn reader(self: *@This()) Reader {
@@ -532,7 +535,7 @@ fn writeBlobWithDiff3(
         pub fn count(self: *@This()) !usize {
             var n: usize = 0;
             var read_buffer = [_]u8{0} ** repo_opts.read_size;
-            try self.seekTo(0);
+            try self.reset();
             while (true) {
                 const size = try self.reader().read(&read_buffer);
                 if (size == 0) {
@@ -564,7 +567,6 @@ fn writeBlobWithDiff3(
         .target_iter = &target_iter,
         .source_iter = &source_iter,
         .diff3_iter = &diff3_iter,
-        .line_buffer = &line_buffer,
         .current_line = null,
         .has_conflict = false,
         .interface = .{
@@ -574,10 +576,14 @@ fn writeBlobWithDiff3(
             .end = 0,
         },
     };
+    defer {
+        for (stream.line_buffer.items[stream.line_index..]) |buffer| allocator.free(buffer);
+        stream.line_buffer.deinit(allocator);
+    }
 
     const header = obj.ObjectHeader{ .kind = .blob, .size = try stream.count() };
     has_conflict.* = stream.has_conflict;
-    try stream.seekTo(0);
+    try stream.reset();
 
     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
     try obj.writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
