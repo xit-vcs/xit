@@ -1091,6 +1091,26 @@ fn writeLengthPrefixedBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeAll(bytes);
 }
 
+pub fn writePatches(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    iter: *obj.ObjectIterator(.xit, repo_opts),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    var patch_writer = try PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
+    defer patch_writer.deinit(io, allocator);
+
+    while (try iter.next(allocator)) |commit_object| {
+        defer commit_object.deinit();
+        const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
+        try patch_writer.add(state.readOnly(), io, allocator, &oid);
+    }
+
+    try patch_writer.write(state, io, allocator, progress_ctx_maybe);
+}
+
 pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         const DB = rp.Repo(.xit, repo_opts).DB;

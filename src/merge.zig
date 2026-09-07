@@ -1470,19 +1470,9 @@ fn writePossiblePatches(
     source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    var patch_writer = try patch.PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
-    defer patch_writer.deinit(io, allocator);
-
     var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
     defer iter.deinit();
     try iter.include(source_oid);
     try iter.include(target_oid);
-    while (try iter.next(allocator)) |commit_object| {
-        defer commit_object.deinit();
-
-        const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
-        try patch_writer.add(state.readOnly(), io, allocator, &oid);
-    }
-
-    try patch_writer.write(state, io, allocator, progress_ctx_maybe);
+    try patch.writePatches(repo_opts, state, io, allocator, &iter, progress_ctx_maybe);
 }
