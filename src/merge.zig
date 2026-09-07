@@ -113,7 +113,7 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
 
         fn step(self: *Self) !bool {
             const entry = self.queue.pop() orelse return false;
-            const node = self.nodes.getPtr(entry.oid).?;
+            const node = self.nodes.getPtr(entry.oid) orelse unreachable;
             node.queued = false;
             if (node.flags & stale == 0) self.pending -= 1;
 
@@ -126,7 +126,8 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         }
 
         fn tipIsCommon(self: *const Self, side: usize) bool {
-            return self.nodes.get(self.tips[side]).?.flags & both == both;
+            const node = self.nodes.get(self.tips[side]) orelse unreachable;
+            return node.flags & both == both;
         }
 
         fn commonAncestor(self: *Self) !Oid {
@@ -147,7 +148,7 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
 
         fn mergeBase(self: *Self, kind: MergeKind) !Oid {
             if (kind == .full) return self.commonAncestor();
-            const parents = self.nodes.get(self.tips[1]).?.parents;
+            const parents = (self.nodes.get(self.tips[1]) orelse unreachable).parents;
             return if (parents.len > 0) parents[0] else error.CommitMustHaveOneParent;
         }
     };

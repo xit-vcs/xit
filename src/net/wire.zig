@@ -758,8 +758,9 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 if (has_head) continue;
                 var head = net.RemoteHead(repo_kind, repo_opts).init(try allocator.dupe(u8, "HEAD"));
                 errdefer allocator.free(head.name);
-                head.symref = try allocator.dupe(u8, spec.dst);
-                errdefer allocator.free(head.symref.?);
+                const symref = try allocator.dupe(u8, spec.dst);
+                errdefer allocator.free(symref);
+                head.symref = symref;
                 try self.refs.ensureUnusedCapacity(allocator, 1);
                 try self.heads.ensureUnusedCapacity(allocator, 1);
                 self.refs.appendAssumeCapacity(.{ .head = head, .capabilities = null });
