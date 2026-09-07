@@ -18,6 +18,43 @@ pub const Options = struct {
     is_stateless: bool = false,
     allowed_ref: ?[]const u8 = null,
     applied_ref_updates: ?*AppliedRefUpdates = null,
+    // keep the final response until the caller's transaction settles
+    deferred_response: ?*Response = null,
+};
+
+// initialize one response per push and keep it alive through the transaction.
+// after run, send progress while doing extra work, then finish after commit or
+// rollback. pass a failure message if run or the enclosing transaction failed.
+pub const Response = struct {
+    buffer: std.Io.Writer.Allocating,
+    sideband: bool = false,
+    quiet: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) Response {
+        return .{ .buffer = .init(allocator) };
+    }
+
+    pub fn deinit(self: *Response) void {
+        self.buffer.deinit();
+    }
+
+    pub fn progress(self: *const Response, writer: *std.Io.Writer, text: []const u8) !void {
+        if (!self.sideband or self.quiet) return;
+        try pkt.sendSideband(writer, 2, text);
+        try writer.flush();
+    }
+
+    // call once after the transaction settles. failure discards the buffered
+    // status and sends a fatal sideband error, so no success reaches the client.
+    pub fn finish(self: *Response, writer: *std.Io.Writer, failure: ?[]const u8) !void {
+        if (failure) |message| {
+            if (self.sideband) try pkt.sendSideband(writer, 3, message);
+            try writer.writeAll("0000");
+        } else {
+            try writer.writeAll(self.buffer.written());
+        }
+        try writer.flush();
+    }
 };
 
 pub const AppliedRefUpdate = struct {
@@ -90,6 +127,11 @@ pub fn run(
     defer arena.deinit();
 
     const ref_updates = try receive_pack.readRefUpdates(repo_opts.hash, &arena, reader);
+    const response_writer = if (options.deferred_response) |response| blk: {
+        response.sideband = receive_pack.use_sideband;
+        response.quiet = receive_pack.quiet;
+        break :blk &response.buffer.writer;
+    } else writer;
 
     var transaction_failure = false;
 
@@ -161,11 +203,11 @@ pub fn run(
             }
             try pkt.bufPktFlush(&buf, allocator);
 
-            try pkt.sendSideband(writer, 1, buf.items);
+            try pkt.sendSideband(response_writer, 1, buf.items);
         }
     }
 
-    try writer.writeAll("0000");
+    try response_writer.writeAll("0000");
 
     if (transaction_failure) return error.CancelTransaction;
 
@@ -189,6 +231,7 @@ const ReceivePack = struct {
     // protocol state
     sent_capabilities: bool = false,
     use_sideband: bool = false,
+    quiet: bool = false,
     atomic: bool = false,
     report_status: bool = false,
     report_status_v2: bool = false,
@@ -319,6 +362,7 @@ const ReceivePack = struct {
                     if (common.hasFeature(features, "side-band-64k")) {
                         self.use_sideband = true;
                     }
+                    if (common.hasFeature(features, "quiet")) self.quiet = true;
                     if (common.hasFeature(features, "atomic")) {
                         self.atomic = true;
                     }
