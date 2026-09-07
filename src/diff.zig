@@ -249,8 +249,6 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             mode_maybe: ?fs.Mode,
             buffer: []const u8,
         ) !LineIterator(repo_kind, repo_opts) {
-            var reader = std.Io.Reader.fixed(buffer);
-
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             errdefer {
@@ -261,20 +259,11 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             var lines: std.ArrayList([]const u8) = .empty;
             errdefer lines.deinit(arena.allocator());
 
-            // for each line...
-            while (reader.peekByte()) |_| {
-                var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
-                _ = try reader.streamDelimiterLimit(&line_writer.writer, '\n', .limited(repo_opts.max_line_size));
-
-                // skip delimiter
-                if (reader.bufferedLen() > 0) {
-                    reader.toss(1);
-                }
-
-                try lines.append(arena.allocator(), line_writer.written());
-            } else |err| switch (err) {
-                error.EndOfStream => {},
-                else => |e| return e,
+            // match object readers, including the empty line at the end
+            var line_iter = std.mem.splitScalar(u8, buffer, '\n');
+            while (line_iter.next()) |line| {
+                if (buffer.len > 0 and line.len >= repo_opts.max_line_size) return error.StreamTooLong;
+                try lines.append(arena.allocator(), try arena.allocator().dupe(u8, line));
             }
 
             var iter = LineIterator(repo_kind, repo_opts){
