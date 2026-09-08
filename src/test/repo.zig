@@ -211,29 +211,36 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
     try std.testing.expectError(error.UnsupportedRefKind, repo.commitStats(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
 
-    // identical files share edits; only f changes after the root commit.
+    // identical files share edits; only f changes in the cases below.
     try addFile(.xit, opts, &repo, io, allocator, "copy", "a\nb\n");
     try addFile(.xit, opts, &repo, io, allocator, "large", "line\n" ** 4096);
+    try addFile(.xit, opts, &repo, io, allocator, "binary", "\xffbinary");
     const cases = [_]struct { content: ?[]const u8, stats: patch.CommitStats }{
-        .{ .content = "a\nb\n", .stats = .{ .lines_added = 4100 } },
-        .{ .content = "a\nB\n", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
-        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 1 } },
-        .{ .content = "a\n", .stats = .{ .lines_removed = 2 } },
-        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 2 } },
-        .{ .content = "", .stats = .{ .lines_removed = 3 } },
+        .{ .content = "a\nb\n", .stats = .{ .lines_added = 4100, .bytes_added = 20495, .files_added = 4 } },
+        .{ .content = "a\nB\n", .stats = .{ .lines_changed = 1, .files_changed = 1 } },
+        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 1, .bytes_added = 2, .files_changed = 1 } },
+        .{ .content = "a\n", .stats = .{ .lines_removed = 2, .bytes_removed = 4, .files_changed = 1 } },
+        .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 2, .bytes_added = 4, .files_changed = 1 } },
+        // replacements count paired lines once; separate edits aren't paired.
+        .{ .content = "x\ny\nz\nw\n", .stats = .{ .lines_added = 1, .lines_changed = 3, .bytes_added = 2, .files_changed = 1 } },
+        .{ .content = "p\nq\n", .stats = .{ .lines_changed = 2, .lines_removed = 2, .bytes_removed = 4, .files_changed = 1 } },
+        .{ .content = "q\nr\n", .stats = .{ .lines_added = 1, .lines_removed = 1, .files_changed = 1 } },
+        .{ .content = "", .stats = .{ .lines_removed = 2, .bytes_removed = 4, .files_changed = 1 } },
         // empty files, real blank lines, and changes to the final newline.
-        .{ .content = "\n", .stats = .{ .lines_added = 1 } },
-        .{ .content = "", .stats = .{ .lines_removed = 1 } },
-        .{ .content = null, .stats = .{} },
-        .{ .content = "a", .stats = .{ .lines_added = 1 } },
-        .{ .content = "a\n", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
-        .{ .content = "a", .stats = .{ .lines_added = 1, .lines_removed = 1 } },
-        // binary transitions have zero totals even when retained text changes.
-        .{ .content = "\xffbinary", .stats = .{} },
-        .{ .content = "changed\n", .stats = .{} },
-        .{ .content = "\xfebinary", .stats = .{} },
-        .{ .content = null, .stats = .{} },
-        .{ .content = "hello\n", .stats = .{ .lines_added = 1 } },
+        .{ .content = "\n", .stats = .{ .lines_added = 1, .bytes_added = 1, .files_changed = 1 } },
+        .{ .content = "", .stats = .{ .lines_removed = 1, .bytes_removed = 1, .files_changed = 1 } },
+        .{ .content = null, .stats = .{ .files_removed = 1 } },
+        .{ .content = "", .stats = .{ .files_added = 1 } },
+        .{ .content = "a", .stats = .{ .lines_added = 1, .bytes_added = 1, .files_changed = 1 } },
+        .{ .content = "a\n", .stats = .{ .lines_changed = 1, .bytes_added = 1, .files_changed = 1 } },
+        .{ .content = "a", .stats = .{ .lines_changed = 1, .bytes_removed = 1, .files_changed = 1 } },
+        // binary transitions have zero line totals even when retained text changes.
+        .{ .content = "\xffbinary", .stats = .{ .bytes_added = 6, .files_changed = 1 } },
+        .{ .content = "changed\n", .stats = .{ .bytes_added = 1, .files_changed = 1 } },
+        .{ .content = "\xfebinary", .stats = .{ .bytes_removed = 1, .files_changed = 1 } },
+        .{ .content = "\xfebinary\n", .stats = .{ .bytes_added = 1, .files_changed = 1 } },
+        .{ .content = null, .stats = .{ .bytes_removed = 8, .files_removed = 1 } },
+        .{ .content = "hello\n", .stats = .{ .lines_added = 1, .bytes_added = 6, .files_added = 1 } },
     };
     var root_oid: [hash.hexLen(opts.hash)]u8 = undefined;
     var last_oid: [hash.hexLen(opts.hash)]u8 = undefined;
@@ -259,10 +266,11 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     try std.testing.expectEqual(cases.len + 1, try repo.commitCount(io, allocator, .{ .oid = &last_oid }));
     try std.testing.expectEqualDeep(patch.CommitStats{}, (try repo.commitStats(io, allocator, .{ .oid = &last_oid })).?);
 
-    // both queries use the first parent of a merge.
+    // use the first parent of a merge, retaining growth and shrinkage separately.
+    try addFile(.xit, opts, &repo, io, allocator, "copy", "a\n");
     const merge_oid = try repo.commit(io, allocator, .{ .message = "merge", .parent_oids = &.{ root_oid, last_oid } });
     try repo.patchAll(io, allocator, null);
-    const expected = patch.CommitStats{ .lines_added = 1, .lines_removed = 2 };
+    const expected = patch.CommitStats{ .lines_changed = 1, .lines_removed = 2, .bytes_added = 2, .bytes_removed = 2, .files_changed = 2 };
     const tag_oid = try repo.addTag(io, allocator, .{ .name = "stats", .message = "stats" });
     for ([_]rf.RefOrOid(opts.hash){ .{ .oid = &merge_oid }, .{ .ref = .{ .kind = .head, .name = "master" } }, .{ .ref = .{ .kind = .tag, .name = "stats" } }, .{ .oid = &tag_oid } }) |target| {
         try std.testing.expectEqual(2, try repo.commitCount(io, allocator, target));
@@ -276,7 +284,7 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
         oid: [hash.hexLen(opts.hash)]u8,
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             const moment = try DB.HashMap(.read_write).init(cursor.*);
-            const summaries = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, patch.COMMIT_ID_TO_PATCH_STATS_KEY)));
+            const summaries = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, patch.COMMIT_ID_TO_STATS_KEY)));
             try summaries.put(try hash.hexToInt(opts.hash, &ctx.oid), .{ .bytes = &.{0} });
         }
     };
@@ -776,7 +784,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             try repo.patchAll(io, allocator, null);
             const moment = try repo.core.latestMoment();
             const snapshots = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
-            try std.testing.expectEqualDeep(patch.CommitStats{}, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
+            try std.testing.expectEqualDeep(patch.CommitStats{ .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
             const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
             const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
             const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{.{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } }};

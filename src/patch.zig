@@ -12,8 +12,11 @@
 //! - gaps: a persistent sequence of blobs containing live boundaries, including
 //!   both file ends. stable positions choose boundaries (about 16 gaps per blob,
 //!   at most 64). unchanged blobs and tree nodes are shared between snapshots.
-//! commit-id->patch-stats stores added/removed line totals as two u64s.
-//! binary changes are excluded; trailing empty entries aren't counted.
+//! commit-id->stats stores eight u64s: lines added/changed/removed,
+//! bytes added/removed, then files added/changed/removed. paired removals and
+//! insertions within each edit count only as changed lines. bytes sum per-file
+//! growth/shrinkage and exclude submodules. file counts include binary and
+//! mode-only changes; line counts exclude binary changes and the final empty entry.
 //!
 //! patch-id->edit-list stores ordered edit ids, without a count. the patch id
 //! hashes those ids. edit-id->edit stores each edit once, in this order:
@@ -41,7 +44,7 @@
 //! new identity.
 //!
 //! how patches are created: compare changed files with their first parent using
-//! myers, recording edits, line totals, and gap changes. apply the edits and save
+//! myers, recording edits, statistics, and gap changes. apply the edits and save
 //! the snapshot, sharing unchanged gap chunks.
 //!
 //! how patches are applied: load the snapshot and collect edits from the chosen
@@ -120,6 +123,17 @@ pub fn writeAndApplyPatches(
         var line_iter_pair = line_iter_pair_ptr.*;
         defer line_iter_pair.deinit();
 
+        // count files and bytes before skipping binary or mode-only changes.
+        stats.bytes_added +|= line_iter_pair.b.size -| line_iter_pair.a.size;
+        stats.bytes_removed +|= line_iter_pair.a.size -| line_iter_pair.b.size;
+        if (line_iter_pair.a.source == .nothing) {
+            stats.files_added += 1;
+        } else if (line_iter_pair.b.source == .nothing) {
+            stats.files_removed += 1;
+        } else {
+            stats.files_changed += 1;
+        }
+
         // keep the last text state while the file is binary
         if (line_iter_pair.b.source == .binary) continue;
         if (std.mem.eql(u8, &line_iter_pair.a.oid, &line_iter_pair.b.oid)) continue;
@@ -180,8 +194,13 @@ pub fn writeAndApplyPatches(
                     const old_has_newline = edit.eql.old_line.num + 1 < line_iter_pair.a.count();
                     const new_has_newline = edit.eql.new_line.num + 1 < line_iter_pair.b.count();
                     if (old_has_newline != new_has_newline) {
-                        if (edit.eql.old_line.num < line_counts[0]) stats.lines_removed += 1;
-                        if (edit.eql.new_line.num < line_counts[1]) stats.lines_added += 1;
+                        if (edit.eql.old_line.num < line_counts[0] and edit.eql.new_line.num < line_counts[1]) {
+                            stats.lines_changed += 1;
+                        } else if (edit.eql.old_line.num < line_counts[0]) {
+                            stats.lines_removed += 1;
+                        } else if (edit.eql.new_line.num < line_counts[1]) {
+                            stats.lines_added += 1;
+                        }
                     }
                     old_index += 1;
                     if (gap_list) |list| try next_gaps.append(allocator, list.values[old_index]);
@@ -196,12 +215,14 @@ pub fn writeAndApplyPatches(
                 var offsets: std.ArrayList(u64) = .empty;
                 defer offsets.deinit(allocator);
                 var text_count: usize = 0;
+                var lines_added: u64 = 0;
+                var lines_removed: u64 = 0;
                 // write inserted text as the diff yields it
                 while (next_edit) |change| : (next_edit = try diff.next()) {
                     switch (change) {
                         .del => |del| {
                             old_index += 1;
-                            if (del.old_line.num < line_counts[0]) stats.lines_removed += 1;
+                            if (del.old_line.num < line_counts[0]) lines_removed += 1;
                         },
                         .ins => |ins| {
                             const line = try line_iter_pair.b.get(ins.new_line.num);
@@ -209,11 +230,16 @@ pub fn writeAndApplyPatches(
                             if (text_count > 0 and text_count % File(repo_opts).text_block_size == 0) try offsets.append(allocator, text_buffer.written().len);
                             try writeLengthPrefixedBytes(&text_buffer.writer, line);
                             text_count += 1;
-                            if (ins.new_line.num < line_counts[1]) stats.lines_added += 1;
+                            if (ins.new_line.num < line_counts[1]) lines_added += 1;
                         },
                         .eql => break,
                     }
                 }
+                // pair removals and insertions within this edit; count only the excess separately.
+                const lines_changed = @min(lines_added, lines_removed);
+                stats.lines_added += lines_added - lines_changed;
+                stats.lines_changed += lines_changed;
+                stats.lines_removed += lines_removed - lines_changed;
                 // deletions in this edit are a contiguous slice of the old lines
                 const removed = file.lines.items[start..old_index];
                 // one-line replacements preserve every gap. load them only when
@@ -329,10 +355,16 @@ pub fn writeAndApplyPatches(
     }
 
     // save even zero totals, so an indexed commit differs from a missing summary.
-    var stats_bytes: [16]u8 = undefined;
+    var stats_bytes: [64]u8 = undefined;
     std.mem.writeInt(u64, stats_bytes[0..8], stats.lines_added, .big);
-    std.mem.writeInt(u64, stats_bytes[8..16], stats.lines_removed, .big);
-    const summaries = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_PATCH_STATS_KEY)));
+    std.mem.writeInt(u64, stats_bytes[8..16], stats.lines_changed, .big);
+    std.mem.writeInt(u64, stats_bytes[16..24], stats.lines_removed, .big);
+    std.mem.writeInt(u64, stats_bytes[24..32], stats.bytes_added, .big);
+    std.mem.writeInt(u64, stats_bytes[32..40], stats.bytes_removed, .big);
+    std.mem.writeInt(u64, stats_bytes[40..48], stats.files_added, .big);
+    std.mem.writeInt(u64, stats_bytes[48..56], stats.files_changed, .big);
+    std.mem.writeInt(u64, stats_bytes[56..64], stats.files_removed, .big);
+    const summaries = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
     try summaries.put(commit_id_int, .{ .bytes = &stats_bytes });
 
     // this will force xitdb consider the start of the transaction
@@ -346,11 +378,17 @@ pub fn writeAndApplyPatches(
     try state.core.db.freeze();
 }
 
-pub const COMMIT_ID_TO_PATCH_STATS_KEY = "commit-id->patch-stats";
+pub const COMMIT_ID_TO_STATS_KEY = "commit-id->stats";
 
 pub const CommitStats = struct {
     lines_added: u64 = 0,
+    lines_changed: u64 = 0,
     lines_removed: u64 = 0,
+    bytes_added: u64 = 0,
+    bytes_removed: u64 = 0,
+    files_added: u64 = 0,
+    files_changed: u64 = 0,
+    files_removed: u64 = 0,
 };
 
 pub fn applyPatches(

@@ -148,7 +148,7 @@ pub fn prune(
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
     try pruneOidMap(repo_opts, state, &live_oids, "commit-id->snapshot");
-    try pruneOidMap(repo_opts, state, &live_oids, patch.COMMIT_ID_TO_PATCH_STATS_KEY);
+    try pruneOidMap(repo_opts, state, &live_oids, patch.COMMIT_ID_TO_STATS_KEY);
     try pruneOidMap(repo_opts, state, &live_oids, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
     try prunePatchData(repo_opts, state, allocator);
 

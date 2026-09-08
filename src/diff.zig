@@ -15,6 +15,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         oid: [hash.byteLen(repo_opts.hash)]u8,
         oid_hex: [hash.hexLen(repo_opts.hash)]u8,
         mode: ?fs.Mode,
+        size: u64,
         line_offsets: []usize,
         current_line: usize,
         source: Source,
@@ -68,6 +69,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .oid = entry.oid,
                 .oid_hex = oid_hex,
                 .mode = entry.mode,
+                .size = object_reader.header().size,
                 .line_offsets = undefined,
                 .current_line = 0,
                 .source = .{
@@ -118,6 +120,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         .oid = oid,
                         .oid_hex = std.fmt.bytesToHex(&oid, .lower),
                         .mode = mode,
+                        .size = file_size,
                         .line_offsets = undefined,
                         .current_line = 0,
                         .source = .{
@@ -166,6 +169,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .oid = [_]u8{0} ** hash.byteLen(repo_opts.hash),
                 .oid_hex = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
                 .mode = null,
+                .size = 0,
                 .line_offsets = undefined,
                 .current_line = 0,
                 .source = .nothing,
@@ -206,6 +210,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         .oid = oid.*,
                         .oid_hex = oid_hex,
                         .mode = mode_maybe,
+                        .size = 0,
                         .line_offsets = try offsets.toOwnedSlice(allocator),
                         .current_line = 0,
                         .source = .binary,
@@ -222,6 +227,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .oid = oid.*,
                 .oid_hex = oid_hex,
                 .mode = mode_maybe,
+                .size = object_reader.header().size,
                 .line_offsets = undefined,
                 .current_line = 0,
                 .source = .{
@@ -273,6 +279,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .oid = oid.*,
                 .oid_hex = std.fmt.bytesToHex(oid, .lower),
                 .mode = mode_maybe,
+                .size = buffer.len,
                 .line_offsets = undefined,
                 .current_line = 0,
                 .source = .{

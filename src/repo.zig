@@ -969,9 +969,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return try depth_cursor.readUint();
         }
 
-        /// returns added/removed line totals against the target's first parent,
-        /// excluding binary changes. null means no patch summary is stored.
-        /// reads only the summary, without generating patches or inspecting files.
+        /// returns stored stats against the target's first parent, or null if absent.
+        /// line counts are mutually exclusive and exclude binary changes.
         pub fn commitStats(
             self: *Repo(.xit, repo_opts),
             io: std.Io,
@@ -985,7 +984,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 else => return error.UnsupportedRefKind,
             };
             const oid = (try rf.readRecurExisting(.xit, repo_opts, state, io, target)) orelse return null;
-            const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_PATCH_STATS_KEY))) orelse return null;
+            const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_STATS_KEY))) orelse return null;
             const summaries = try DB.HashMap(.read_only).init(summaries_cursor);
             const cursor = (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse blk: {
                 // annotated tags use their target commit's summary.
@@ -993,11 +992,17 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 defer commit_object.deinit();
                 break :blk (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return null;
             };
-            var bytes: [16]u8 = undefined;
+            var bytes: [64]u8 = undefined;
             if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
             return .{
                 .lines_added = std.mem.readInt(u64, bytes[0..8], .big),
-                .lines_removed = std.mem.readInt(u64, bytes[8..16], .big),
+                .lines_changed = std.mem.readInt(u64, bytes[8..16], .big),
+                .lines_removed = std.mem.readInt(u64, bytes[16..24], .big),
+                .bytes_added = std.mem.readInt(u64, bytes[24..32], .big),
+                .bytes_removed = std.mem.readInt(u64, bytes[32..40], .big),
+                .files_added = std.mem.readInt(u64, bytes[40..48], .big),
+                .files_changed = std.mem.readInt(u64, bytes[48..56], .big),
+                .files_removed = std.mem.readInt(u64, bytes[56..64], .big),
             };
         }
 
