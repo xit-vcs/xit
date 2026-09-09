@@ -3,8 +3,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .xitdb = .{
-            .url = "git+https://github.com/xit-vcs/xitdb#c373104b264181f577d1d0f36220685d60ecca52",
-            .hash = "xitdb-0.0.0-EEFkxvkxBgCnoQ6gs7GXDgPrTAwgrIoWWl_ixSfndS82",
+            .url = "git+https://github.com/xit-vcs/xitdb#578e505f9a39f24efc580135b96627ad70deffb5",
+            .hash = "xitdb-0.0.0-EEFkxvlFBgBtckStgQArxZrvy6fkbftwf8eB1IDTsV7G",
         },
         .xitui = .{
             .url = "git+https://github.com/xit-vcs/xitui#a42801609c060450b764e6a74db0569bbc832052",
