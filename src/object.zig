@@ -130,7 +130,7 @@ pub const Tree = struct {
 
     pub fn addBlobEntry(self: *Tree, mode: fs.Mode, name: []const u8, oid: []const u8) !void {
         const entry = try std.fmt.allocPrint(self.arena.allocator(), "{s} {s}\x00{s}", .{ mode.toStr(), name, oid });
-        try self.entries.put(self.arena.allocator(), name, entry);
+        try self.entries.put(self.arena.allocator(), try self.arena.allocator().dupe(u8, name), entry);
     }
 
     pub fn addTreeEntry(self: *Tree, name: []const u8, oid: []const u8) !void {
