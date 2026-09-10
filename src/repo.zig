@@ -458,12 +458,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
                                 errdefer buffer_ptr.deinit();
 
-                                // hold the lock while initing the db, because it
-                                // truncates junk data left by an interrupted write,
-                                // which must not race with a concurrent writer
-                                try db_file.lock(io, .exclusive);
-                                defer db_file.unlock(io);
-
                                 const hash_id = hash.hashId(repo_opts.hash);
                                 const db = try DB.init(.{
                                     .io = io,
