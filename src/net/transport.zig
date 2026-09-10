@@ -3,7 +3,6 @@ const net = @import("../net.zig");
 const net_wire = @import("./wire.zig");
 const net_file = @import("./file.zig");
 const net_push = @import("./push.zig");
-const net_fetch = @import("./fetch.zig");
 const net_ssh = @import("./ssh.zig");
 const rp = @import("../repo.zig");
 const hash = @import("../hash.zig");
@@ -73,7 +72,7 @@ pub fn Transport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpt
             };
         }
 
-        pub fn getHeads(self: *const Transport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_kind, repo_opts) {
+        pub fn getHeads(self: *const Transport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_opts.hash) {
             return switch (self.*) {
                 .file => |*file| try file.getHeads(),
                 .wire => |*wire| try wire.getHeads(),
@@ -98,11 +97,11 @@ pub fn Transport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpt
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
-            fetch_data: *const net_fetch.FetchNegotiation(repo_kind, repo_opts),
+            heads: []const net.RemoteHead(repo_opts.hash),
         ) !void {
             switch (self.*) {
                 .file => |*file| try file.negotiateFetch(state, io, allocator),
-                .wire => |*wire| try wire.negotiateFetch(state, io, allocator, fetch_data),
+                .wire => |*wire| try wire.negotiateFetch(state, io, allocator, heads),
             }
         }
 

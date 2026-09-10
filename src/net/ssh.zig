@@ -1,5 +1,4 @@
 const std = @import("std");
-const rp = @import("../repo.zig");
 const cfg = @import("../config.zig");
 const net_wire = @import("./wire.zig");
 
@@ -9,18 +8,20 @@ pub const Opts = struct {
     receive_pack_command: []const u8 = "git-receive-pack",
 };
 
+pub fn commandFromConfig(sections: cfg.Sections) ?[]const u8 {
+    const core = sections.get("core") orelse return null;
+    const command = core.get("sshcommand") orelse return null;
+    return if (command.len > 0) command else null;
+}
+
 pub const SshState = struct {
     io: std.Io,
     opts: Opts,
     process: ?std.process.Child,
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
-    command: ?[]const u8,
 
     pub fn init(
-        comptime repo_kind: rp.RepoKind,
-        comptime repo_opts: rp.RepoOpts(repo_kind),
-        state: rp.Repo(repo_kind, repo_opts).State(.read_only),
         io: std.Io,
         allocator: std.mem.Allocator,
         opts: Opts,
@@ -29,26 +30,16 @@ pub const SshState = struct {
         errdefer allocator.destroy(arena_ptr);
         arena_ptr.* = std.heap.ArenaAllocator.init(allocator);
 
-        const command = if (opts.command) |cmd|
-            try arena_ptr.allocator().dupe(u8, cmd)
-        else blk: {
-            var config = try cfg.Config(repo_kind, repo_opts).init(state, io, allocator);
-            defer config.deinit();
-            const core_section = config.sections.get("core") orelse break :blk null;
-            const ssh_cmd = core_section.get("sshcommand") orelse break :blk null;
-            if (ssh_cmd.len > 0) {
-                break :blk try arena_ptr.allocator().dupe(u8, ssh_cmd);
-            }
-            break :blk null;
-        };
+        errdefer arena_ptr.deinit();
+        var owned_opts = opts;
+        if (opts.command) |command| owned_opts.command = try arena_ptr.allocator().dupe(u8, command);
 
         return .{
             .io = io,
-            .opts = opts,
+            .opts = owned_opts,
             .process = null,
             .allocator = allocator,
             .arena = arena_ptr,
-            .command = command,
         };
     }
 
@@ -75,7 +66,7 @@ pub const SshStream = struct {
     ) !?SshStream {
         switch (wire_action) {
             .list_upload_pack, .list_receive_pack => {
-                try spawnSsh(wire_state, wire_action, sshpath, wire_state.command);
+                try spawnSsh(wire_state, wire_action, sshpath);
                 return .{ .wire_state = wire_state };
             },
             .upload_pack, .receive_pack => return null,
@@ -130,11 +121,10 @@ fn spawnSsh(
     wire_state: *SshState,
     wire_action: net_wire.WireAction,
     url: []const u8,
-    command_maybe: ?[]const u8,
 ) !void {
     var args: std.ArrayList([]const u8) = .empty;
 
-    const command = if (command_maybe) |cmd| cmd else "ssh";
+    const command = wire_state.opts.command orelse "ssh";
 
     // TODO: fix paths that have spaces
     var arg_iter = try std.process.Args.IteratorGeneral(.{ .single_quotes = true }).init(wire_state.allocator, command);

@@ -1867,7 +1867,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
     };
 }
 
-/// auto-detects the hash used by an existing repo
+/// auto-detects the hash when opening or cloning a repo
 pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts(repo_kind)) type {
     return union(hash.HashKind) {
         sha1: Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(.sha1)),
@@ -1912,6 +1912,22 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
             return switch (hash_kind) {
                 inline else => |hk| @unionInit(AnyRepo(repo_kind, any_repo_opts), @tagName(hk), try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hk)).open(io, allocator, init_opts)),
             };
+        }
+
+        pub fn clone(
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            url: []const u8,
+            cwd_path: []const u8,
+            work_path: []const u8,
+            global_config_path: ?[]const u8,
+            opts: net.CloneOpts(any_repo_opts.ProgressCtx),
+        ) !AnyRepo(repo_kind, any_repo_opts) {
+            if (repo_kind != .xit) @compileError("automatic cloning is only supported by the xit backend");
+            if (comptime any_repo_opts.hash) |kind| {
+                return @unionInit(@This(), @tagName(kind), try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(kind)).clone(io, allocator, url, cwd_path, work_path, global_config_path, opts));
+            }
+            return net.cloneAuto(any_repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts);
         }
 
         pub fn deinit(self: *AnyRepo(repo_kind, any_repo_opts), io: std.Io, allocator: std.mem.Allocator) void {

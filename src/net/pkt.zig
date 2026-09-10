@@ -1,29 +1,47 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const net = @import("../net.zig");
-const net_fetch = @import("./fetch.zig");
 const net_wire = @import("./wire.zig");
-const rp = @import("../repo.zig");
 const hash = @import("../hash.zig");
 
-pub fn Ref(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+pub const Frame = struct {
+    content: []const u8,
+    len: usize,
+
+    pub fn initMaybe(buffer: []const u8) !?Frame {
+        if (buffer.len < PKT_LEN_SIZE) return null;
+        const len = try std.fmt.parseInt(u16, buffer[0..PKT_LEN_SIZE], 16);
+        if (len == 0) return .{ .content = &.{}, .len = PKT_LEN_SIZE };
+        if (len < PKT_LEN_SIZE) return error.InvalidPacket;
+        if (len == PKT_LEN_SIZE) return error.InvalidEmptyPacket;
+        if (buffer.len < len) return null;
+        return .{ .content = buffer[PKT_LEN_SIZE..len], .len = len };
+    }
+};
+
+pub fn refObjectFormat(content: []const u8) !hash.HashKind {
+    const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else null;
+    return parseObjectFormat(caps);
+}
+
+pub fn Ref(comptime hash_kind: hash.HashKind) type {
     return struct {
-        head: net.RemoteHead(repo_kind, repo_opts),
+        head: net.RemoteHead(hash_kind),
         capabilities: ?[]const u8,
 
-        pub fn deinit(self: *Ref(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *Ref(hash_kind), allocator: std.mem.Allocator) void {
             self.head.deinit(allocator);
             if (self.capabilities) |caps| allocator.free(caps);
         }
     };
 }
 
-pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+pub fn Pkt(comptime hash_kind: hash.HashKind) type {
     return union(enum) {
         flush: void,
-        ref: Ref(repo_kind, repo_opts),
+        ref: Ref(hash_kind),
         ack: struct {
-            oid: [hash.hexLen(repo_opts.hash)]u8,
+            oid: [hash.hexLen(hash_kind)]u8,
             status: ?enum {
                 cont,
                 common,
@@ -41,10 +59,10 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             unpack_ok: bool,
         },
         unshallow: struct {
-            oid: [hash.hexLen(repo_opts.hash)]u8,
+            oid: [hash.hexLen(hash_kind)]u8,
         },
         shallow: struct {
-            oid: [hash.hexLen(repo_opts.hash)]u8,
+            oid: [hash.hexLen(hash_kind)]u8,
         },
 
         /// parses the next packet from `buffer`, or returns null if the buffer
@@ -55,36 +73,13 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             buffer: []const u8,
             found_capabilities: *bool,
             consumed: *usize,
-        ) !?Pkt(repo_kind, repo_opts) {
-            var line = buffer;
+        ) !?Pkt(hash_kind) {
+            const frame = try Frame.initMaybe(buffer) orelse return null;
+            consumed.* = frame.len;
+            if (frame.content.len == 0) return .{ .flush = {} };
+            const content = frame.content;
 
-            if (line.len < PKT_LEN_SIZE) {
-                return null;
-            }
-
-            var len = try std.fmt.parseInt(u16, line[0..PKT_LEN_SIZE], 16);
-
-            if (line.len < len or (len != 0 and len < PKT_LEN_SIZE)) {
-                return null;
-            }
-
-            line = line[PKT_LEN_SIZE..];
-
-            if (len == PKT_LEN_SIZE) {
-                return error.InvalidEmptyPacket;
-            }
-
-            if (len == 0) {
-                consumed.* = PKT_LEN_SIZE;
-                return .{ .flush = {} };
-            }
-
-            len -= PKT_LEN_SIZE;
-            consumed.* = PKT_LEN_SIZE + len;
-
-            const content = line[0..len];
-
-            return switch (line[0]) {
+            return switch (content[0]) {
                 1 => .{ .data = try allocator.dupe(u8, content[1..]) },
                 2 => .{ .progress = try allocator.dupe(u8, content[1..]) },
                 3 => .{ .err = try allocator.dupe(u8, content[1..]) },
@@ -92,7 +87,7 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
                     try ackPkt(content)
                 else if (std.mem.startsWith(u8, content, "NAK"))
                     .{ .nak = {} }
-                else if (line[0] == '#')
+                else if (content[0] == '#')
                     .{ .comment = try allocator.dupe(u8, content) }
                 else if (std.mem.startsWith(u8, content, "ERR"))
                     try errPkt(allocator, content)
@@ -111,7 +106,7 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             };
         }
 
-        pub fn deinit(self: *Pkt(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *Pkt(hash_kind), allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .flush => {},
                 .ref => |*p| p.deinit(allocator),
@@ -129,14 +124,14 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             }
         }
 
-        fn ackPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
+        fn ackPkt(content: []const u8) !Pkt(hash_kind) {
             // the content looks like "ACK <oid>[ <status>]"
-            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            const oid_len = comptime hash.hexLen(hash_kind);
             if (content.len < "ACK ".len + oid_len) {
                 return error.InvalidPacket;
             }
 
-            var pkt = Pkt(repo_kind, repo_opts){ .ack = .{ .oid = content["ACK ".len..][0..oid_len].*, .status = null } };
+            var pkt = Pkt(hash_kind){ .ack = .{ .oid = content["ACK ".len..][0..oid_len].*, .status = null } };
 
             const rest = content["ACK ".len + oid_len ..];
             if (rest.len > 0 and rest[0] == ' ') {
@@ -155,51 +150,50 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             return pkt;
         }
 
-        fn errPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+        fn errPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(hash_kind) {
             if (content.len < "ERR ".len) {
                 return error.InvalidPacket;
             }
             return .{ .err = try allocator.dupe(u8, content["ERR ".len..]) };
         }
 
-        fn okPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+        fn okPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(hash_kind) {
             if (content.len < "ok ".len) {
                 return error.InvalidPacket;
             }
             return .{ .ok = try dupeChomped(allocator, content["ok ".len..]) };
         }
 
-        fn ngPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(repo_kind, repo_opts) {
+        fn ngPkt(allocator: std.mem.Allocator, content: []const u8) !Pkt(hash_kind) {
             if (content.len < "ng ".len) {
                 return error.InvalidPacket;
             }
             return .{ .ng = try dupeChomped(allocator, content["ng ".len..]) };
         }
 
-        fn shallowPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
-            const oid_len = comptime hash.hexLen(repo_opts.hash);
+        fn shallowPkt(content: []const u8) !Pkt(hash_kind) {
+            const oid_len = comptime hash.hexLen(hash_kind);
             if (content.len < "shallow ".len + oid_len) {
                 return error.InvalidPacket;
             }
             return .{ .shallow = .{ .oid = content["shallow ".len..][0..oid_len].* } };
         }
 
-        fn unshallowPkt(content: []const u8) !Pkt(repo_kind, repo_opts) {
-            const oid_len = comptime hash.hexLen(repo_opts.hash);
+        fn unshallowPkt(content: []const u8) !Pkt(hash_kind) {
+            const oid_len = comptime hash.hexLen(hash_kind);
             if (content.len < "unshallow ".len + oid_len) {
                 return error.InvalidPacket;
             }
             return .{ .unshallow = .{ .oid = content["unshallow ".len..][0..oid_len].* } };
         }
 
-        fn refPkt(allocator: std.mem.Allocator, content: []const u8, found_capabilities: *bool) !Pkt(repo_kind, repo_opts) {
+        fn refPkt(allocator: std.mem.Allocator, content: []const u8, found_capabilities: *bool) !Pkt(hash_kind) {
             // the content looks like "<oid> <name>[\x00<capabilities>]"
             if (!found_capabilities.*) {
-                const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else null;
-                const remote_hash = try parseObjectFormat(caps);
-                if (remote_hash != repo_opts.hash) return error.ObjectFormatMismatch;
+                const remote_hash = try refObjectFormat(content);
+                if (remote_hash != hash_kind) return error.ObjectFormatMismatch;
             }
-            const oid_len = comptime hash.hexLen(repo_opts.hash);
+            const oid_len = comptime hash.hexLen(hash_kind);
             if (content.len < oid_len) {
                 return error.InvalidPacket;
             }
@@ -221,7 +215,7 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             const head_name = try allocator.dupe(u8, std.mem.sliceTo(line, 0));
             errdefer allocator.free(head_name);
 
-            var head = net.RemoteHead(repo_kind, repo_opts).init(head_name);
+            var head = net.RemoteHead(hash_kind).init(head_name);
             head.oid = oid_hex.*;
 
             var caps_maybe: ?[]const u8 = null;
@@ -292,20 +286,18 @@ pub fn appendPktLine(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comp
 }
 
 pub fn bufferHave(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime hash_kind: hash.HashKind,
     allocator: std.mem.Allocator,
-    oid_hex: *const [hash.hexLen(repo_opts.hash)]u8,
+    oid_hex: *const [hash.hexLen(hash_kind)]u8,
     buf: *std.ArrayList(u8),
 ) !void {
     try appendPktLine(allocator, buf, "{s}{s}\n", .{ PKT_HAVE_PREFIX, oid_hex });
 }
 
 fn bufferWantWithCaps(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime hash_kind: hash.HashKind,
     allocator: std.mem.Allocator,
-    head: *const net.RemoteHead(repo_kind, repo_opts),
+    head: *const net.RemoteHead(hash_kind),
     caps: *const net_wire.Capabilities,
     buf: *std.ArrayList(u8),
 ) !void {
@@ -313,7 +305,7 @@ fn bufferWantWithCaps(
     defer caps_str.deinit();
 
     if (caps.object_format) {
-        try caps_str.writer.writeAll("object-format=" ++ @tagName(repo_opts.hash) ++ " ");
+        try caps_str.writer.writeAll("object-format=" ++ @tagName(hash_kind) ++ " ");
     }
 
     if (caps.multi_ack_detailed) {
@@ -348,29 +340,28 @@ fn bufferWantWithCaps(
 }
 
 pub fn bufferWants(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime hash_kind: hash.HashKind,
     allocator: std.mem.Allocator,
-    wants: *const net_fetch.FetchNegotiation(repo_kind, repo_opts),
+    wants: []const net.RemoteHead(hash_kind),
     caps: *const net_wire.Capabilities,
     buf: *std.ArrayList(u8),
 ) !void {
     var idx: usize = 0;
     if (caps.common) {
-        for (wants.refs, 0..) |*head, i| {
+        for (wants, 0..) |*head, i| {
             if (!head.is_local) {
                 idx = i;
                 break;
             }
         }
 
-        try bufferWantWithCaps(repo_kind, repo_opts, allocator, &wants.refs[idx], caps, buf);
+        try bufferWantWithCaps(hash_kind, allocator, &wants[idx], caps, buf);
 
         idx += 1;
     }
 
-    for (idx..wants.refs.len) |i| {
-        const head = &wants.refs[i];
+    for (idx..wants.len) |i| {
+        const head = &wants[i];
 
         if (head.is_local) {
             continue;
@@ -416,7 +407,7 @@ test "xit advertised object formats" {
         try appendPktLine(allocator, &buffer, "{s} refs/heads/main{s}", .{ &oid, caps });
         var found = false;
         var consumed: usize = 0;
-        const parsed = Pkt(.xit, .{ .hash = case.local_hash }).initMaybe(allocator, buffer.items, &found, &consumed);
+        const parsed = Pkt(case.local_hash).initMaybe(allocator, buffer.items, &found, &consumed);
         if (case.expected_error) |expected| {
             try std.testing.expectError(expected, parsed);
         } else {
@@ -426,4 +417,23 @@ test "xit advertised object formats" {
             try std.testing.expectEqual(buffer.items.len, consumed);
         }
     }
+}
+
+test "fragmented advertisement frames" {
+    const allocator = std.testing.allocator;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+    const oid = [_]u8{'0'} ** 64;
+    try appendPktLine(allocator, &buffer, "{s} capabilities^{{}}\x00object-format=sha256\n", .{&oid});
+    const ref_len = buffer.items.len;
+    try buffer.appendSlice(allocator, "0000");
+    for (0..ref_len) |len| {
+        try std.testing.expectEqual(null, try Frame.initMaybe(buffer.items[0..len]));
+    }
+    const frame = (try Frame.initMaybe(buffer.items)).?;
+    try std.testing.expectEqual(ref_len, frame.len);
+    try std.testing.expectEqual(.sha256, try refObjectFormat(frame.content));
+    const flush = (try Frame.initMaybe(buffer.items[frame.len..])).?;
+    try std.testing.expectEqual(@as(usize, 4), flush.len);
+    try std.testing.expectEqual(@as(usize, 0), flush.content.len);
 }

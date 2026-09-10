@@ -63,6 +63,7 @@ pub const RawStream = struct {
     }
 
     pub fn deinit(self: *RawStream, allocator: std.mem.Allocator) void {
+        self.socket.close() catch {};
         self.socket.deinit(allocator);
         allocator.free(self.url);
     }

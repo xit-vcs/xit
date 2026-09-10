@@ -797,7 +797,7 @@ fn testFetch(
         defer allocator.free(clone_path);
         // file urls here are relative to the parent of client/, not client/ itself.
         const clone_url = if (transport_def == .file) server_path else remote_url;
-        try std.testing.expectError(mismatch_error, Other.clone(io, allocator, clone_url, temp_path, clone_path, null, .{ .transport = opts }));
+        try std.testing.expectError(mismatch_error, rp.AnyRepo(.xit, .{ .hash = other_hash, .is_test = true }).clone(io, allocator, clone_url, temp_path, clone_path, null, .{ .transport = opts }));
     }
 }
 
@@ -1274,11 +1274,26 @@ fn testClone(
         const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
 
-        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o \"BatchMode=yes\" -o \"UserKnownHostsFile={s}\" -o \"LogLevel=ERROR\" -i \"{s}\"", .{ known_hosts_path, priv_key_path });
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-    const Client = rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
+    const global_path = try std.fs.path.join(allocator, &.{ temp_path, "global-config" });
+    defer allocator.free(global_path);
+    if (repo_kind == .xit and is_ssh) {
+        const command = ssh_cmd_maybe orelse return error.MissingSshCommand;
+        const contents = try std.fmt.allocPrint(allocator, "[core]\nsshCommand = {s}\n", .{command});
+        defer allocator.free(contents);
+        const file = try temp.dir.createFile(io, "global-config", .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, contents);
+        var config_arena = std.heap.ArenaAllocator.init(allocator);
+        defer config_arena.deinit();
+        const sections = try xit.config.readGlobal(.xit, .{}, io, allocator, config_arena.allocator(), global_path);
+        try std.testing.expectEqualStrings(command, sections.get("core").?.get("sshcommand").?);
+    }
+
+    const Client = if (repo_kind == .xit) rp.AnyRepo(.xit, .{ .is_test = true }) else rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
     const clone_opts: net.CloneOpts(void) = .{ .transport = .{ .wire = .{ .ssh = .{
         .command = ssh_cmd_maybe,
         .upload_pack_command = upload_pack_command,
@@ -1288,8 +1303,12 @@ fn testClone(
         defer allocator.free(empty_path);
         var empty_opts = clone_opts;
         empty_opts.bare = true;
-        var empty = try Client.clone(io, allocator, remote_url, temp_path, empty_path, null, empty_opts);
-        defer empty.deinit(io, allocator);
+        var empty_result = try Client.clone(io, allocator, remote_url, temp_path, empty_path, null, empty_opts);
+        defer empty_result.deinit(io, allocator);
+        const empty = if (repo_kind == .xit) blk: {
+            try std.testing.expectEqual(hash_kind, std.meta.activeTag(empty_result));
+            break :blk &@field(empty_result, @tagName(hash_kind));
+        } else &empty_result;
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         try std.testing.expectEqualStrings("main", (try empty.head(io, &head_buffer)).ref.name);
         try std.testing.expectEqual(null, try empty.readRef(io, .{ .kind = .head, .name = "main" }));
@@ -1467,12 +1486,26 @@ fn testClone(
             goodbye_txt.close(io);
         }
     } else {
-        inline for (.{ false, true }) |bare| {
+        for ([_]bool{ false, true }) |bare| {
             var opts = clone_opts;
             opts.bare = bare;
-            var client_repo = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, opts);
+            const config_path: ?[]const u8 = if (repo_kind == .xit and is_ssh) global_path else null;
+            if (repo_kind == .xit and is_ssh and bare) opts.transport.wire.ssh.command = null;
+            const file_url = if (repo_kind == .xit and transport_def == .file and bare)
+                try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ if (server_path[0] == '/') "" else "/", server_path })
+            else
+                null;
+            defer if (file_url) |url| allocator.free(url);
+            var clone_result = try Client.clone(io, allocator, file_url orelse remote_url, temp_path, client_path, config_path, opts);
             defer cwd.deleteTree(io, client_path) catch {};
-            defer client_repo.deinit(io, allocator);
+            defer clone_result.deinit(io, allocator);
+            const client_repo = if (repo_kind == .xit) blk: {
+                try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
+                var reopened = try Client.open(io, allocator, .{ .path = client_path });
+                defer reopened.deinit(io, allocator);
+                try std.testing.expectEqual(hash_kind, std.meta.activeTag(reopened));
+                break :blk &@field(clone_result, @tagName(hash_kind));
+            } else &clone_result;
 
             var current_branch_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             try std.testing.expectEqualStrings("main", (try client_repo.head(io, &current_branch_buffer)).ref.name);
@@ -1516,8 +1549,12 @@ fn testClone(
                     try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
                 },
             }
-            var client_repo = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, .{ .bare = true });
-            defer client_repo.deinit(io, allocator);
+            var clone_result = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, .{ .bare = true });
+            defer clone_result.deinit(io, allocator);
+            const client_repo = if (repo_kind == .xit) blk: {
+                try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
+                break :blk &@field(clone_result, @tagName(hash_kind));
+            } else &clone_result;
             var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             try std.testing.expectEqualStrings(&detached, (try client_repo.head(io, &head_buffer)).oid);
             var log = try client_repo.log(io, allocator, .{});

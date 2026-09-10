@@ -7,12 +7,13 @@ const net_ssh = @import("./ssh.zig");
 const net_push = @import("./push.zig");
 const net_refspec = @import("./refspec.zig");
 const net_pkt = @import("./pkt.zig");
-const net_fetch = @import("./fetch.zig");
 const net_transport = @import("./transport.zig");
 const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
 const pack = @import("../pack.zig");
 const rf = @import("../ref.zig");
+const hash = @import("../hash.zig");
+const cfg = @import("../config.zig");
 const fs = @import("../fs.zig");
 
 pub const Opts = struct {
@@ -108,12 +109,12 @@ pub const WireStream = union(WireKind) {
     }
 };
 
-pub fn Buffer(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+fn Buffer(comptime size: usize) type {
     return struct {
         len: usize,
-        data: [repo_opts.net_buffer_size]u8,
+        data: [size]u8,
 
-        fn consume(self: *Buffer(repo_kind, repo_opts), consumed: usize) void {
+        fn consume(self: *Buffer(size), consumed: usize) void {
             if (consumed > 0 and consumed <= self.len) {
                 const new_len = self.len - consumed;
                 std.mem.copyForwards(u8, self.data[0..new_len], self.data[consumed..self.len]);
@@ -121,35 +122,115 @@ pub fn Buffer(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 self.len = new_len;
             }
         }
+    };
+}
 
-        fn remain(self: *const Buffer(repo_kind, repo_opts)) usize {
-            return if (self.len > self.data.len) 0 else self.data.len - self.len;
+pub fn Connection(comptime buffer_size: usize) type {
+    return struct {
+        wire_state: *WireState,
+        wire_stream: ?WireStream = null,
+        url: ?[]u8 = null,
+        buffer: *Buffer(buffer_size),
+        flushes: c_int = 0,
+
+        pub fn init(io: std.Io, allocator: std.mem.Allocator, kind: WireKind, opts: Opts) !@This() {
+            const state = try allocator.create(WireState);
+            errdefer allocator.destroy(state);
+            state.* = switch (kind) {
+                .http => .{ .http = try net_http.HttpState.init(io, allocator) },
+                .raw => .{ .raw = net_raw.RawState.init() },
+                .ssh => .{ .ssh = try net_ssh.SshState.init(io, allocator, opts.ssh) },
+            };
+            errdefer state.deinit();
+            const buffer = try allocator.create(Buffer(buffer_size));
+            buffer.len = 0;
+            return .{ .wire_state = state, .buffer = buffer };
         }
 
-        fn offset(self: *const Buffer(repo_kind, repo_opts)) [*]u8 {
-            return @ptrFromInt(@intFromPtr(&self.data) + self.len);
+        pub fn deinit(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
+            self.close(io, allocator);
+            self.wire_state.deinit();
+            allocator.destroy(self.wire_state);
+            allocator.destroy(self.buffer);
         }
 
-        fn increase(self: *Buffer(repo_kind, repo_opts), len: usize) void {
-            self.len += len;
+        fn close(self: *@This(), io: std.Io, allocator: std.mem.Allocator) void {
+            self.clearStream(allocator);
+            self.wire_state.close(io) catch {};
+            if (self.url) |url| allocator.free(url);
+            self.url = null;
+            self.buffer.len = 0;
+        }
+
+        fn clearStream(self: *@This(), allocator: std.mem.Allocator) void {
+            if (self.wire_stream) |*stream| stream.deinit(allocator);
+            self.wire_stream = null;
+        }
+
+        pub fn start(self: *@This(), io: std.Io, allocator: std.mem.Allocator, url: []const u8, action: WireAction) !void {
+            self.close(io, allocator);
+            const owned_url = try allocator.dupe(u8, url);
+            self.url = owned_url;
+            self.wire_stream = try WireStream.initMaybe(io, allocator, self.wire_state, owned_url, action);
+            self.flushes = if (self.wire_state.* == .http) 2 else 1;
+        }
+
+        fn openStream(self: *@This(), io: std.Io, allocator: std.mem.Allocator, action: WireAction) !void {
+            if (self.wire_state.* == .http) {
+                self.clearStream(allocator);
+                try self.wire_state.close(io);
+            }
+            if (try WireStream.initMaybe(io, allocator, self.wire_state, self.url orelse return error.NotConnected, action)) |stream| {
+                self.clearStream(allocator);
+                self.wire_stream = stream;
+            }
+        }
+
+        fn recv(self: *@This(), allocator: std.mem.Allocator) !usize {
+            if (self.buffer.len >= self.buffer.data.len) return error.OutOfBufferSpace;
+            const available = self.buffer.data[self.buffer.len..];
+            const stream = &(self.wire_stream orelse return error.StreamNotFound);
+            const size = try stream.read(allocator, available.ptr, available.len);
+            std.debug.assert(size <= available.len);
+            self.buffer.len += size;
+            return size;
+        }
+
+        pub fn discoverHash(self: *@This(), io: std.Io, allocator: std.mem.Allocator, comptime ProgressCtx: type, progress_ctx: ?ProgressCtx) !hash.HashKind {
+            while (true) {
+                if (try net_pkt.Frame.initMaybe(self.buffer.data[0..self.buffer.len])) |frame| {
+                    if (frame.content.len == 0) {
+                        self.flushes -= 1;
+                        if (self.flushes == 0) return error.InvalidRefs;
+                    } else if (std.mem.startsWith(u8, frame.content, "ERR ")) {
+                        if (ProgressCtx != void) {
+                            if (progress_ctx) |ctx| try ctx.run(io, .{ .text = frame.content[4..] });
+                        }
+                        return error.ServerReportedError;
+                    } else if (frame.content[0] != '#') {
+                        // leave the first ref and all read-ahead bytes for the typed parser.
+                        return net_pkt.refObjectFormat(frame.content);
+                    }
+                    self.buffer.consume(frame.len);
+                } else if (try self.recv(allocator) == 0) {
+                    return error.CouldNotReadRefsFromRemoteRepo;
+                }
+            }
         }
     };
 }
 
 pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        wire_state: *WireState,
-        wire_stream: ?WireStream,
-        url: ?[]u8,
+        connection: Connection(repo_opts.net_buffer_size),
         direction: net.Direction,
         caps: Capabilities,
-        refs: std.ArrayList(net_pkt.Ref(repo_kind, repo_opts)),
-        heads: std.ArrayList(net.RemoteHead(repo_kind, repo_opts)),
-        common: std.ArrayList(net_pkt.Pkt(repo_kind, repo_opts)),
+        refs: std.ArrayList(net_pkt.Ref(repo_opts.hash)),
+        heads: std.ArrayList(net.RemoteHead(repo_opts.hash)),
+        common: std.ArrayList(net_pkt.Pkt(repo_opts.hash)),
         is_stateless: bool,
         have_refs: bool,
         connected: bool,
-        buffer: *Buffer(repo_kind, repo_opts),
         opts: net_transport.Opts(repo_opts.ProgressCtx),
 
         pub fn init(
@@ -159,36 +240,27 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             wire_kind: WireKind,
             opts: net_transport.Opts(repo_opts.ProgressCtx),
         ) !WireTransport(repo_kind, repo_opts) {
-            const wire_state = try allocator.create(WireState);
-            errdefer allocator.destroy(wire_state);
-            wire_state.* = switch (wire_kind) {
-                .http => .{ .http = try net_http.HttpState.init(io, allocator) },
-                .raw => .{ .raw = net_raw.RawState.init() },
-                .ssh => .{ .ssh = try net_ssh.SshState.init(repo_kind, repo_opts, state, io, allocator, opts.wire.ssh) },
-            };
-            errdefer wire_state.deinit();
+            var wire_opts = opts.wire;
+            if (wire_kind == .ssh and wire_opts.ssh.command == null) {
+                var config = try cfg.Config(repo_kind, repo_opts).init(state, io, allocator);
+                defer config.deinit();
+                wire_opts.ssh.command = net_ssh.commandFromConfig(config.sections);
+                return initConnection(try Connection(repo_opts.net_buffer_size).init(io, allocator, wire_kind, wire_opts), opts);
+            }
+            return initConnection(try Connection(repo_opts.net_buffer_size).init(io, allocator, wire_kind, wire_opts), opts);
+        }
 
-            var buffer = try allocator.create(Buffer(repo_kind, repo_opts));
-            errdefer allocator.destroy(buffer);
-            buffer.len = 0;
-
+        pub fn initConnection(connection: Connection(repo_opts.net_buffer_size), opts: net_transport.Opts(repo_opts.ProgressCtx)) @This() {
             return .{
-                .wire_state = wire_state,
-                .wire_stream = null,
-                .url = null,
+                .connection = connection,
                 .direction = .fetch,
                 .caps = .{},
                 .refs = .empty,
                 .heads = .empty,
                 .common = .empty,
-                .is_stateless = switch (wire_kind) {
-                    .http => true,
-                    .raw => false,
-                    .ssh => false,
-                },
+                .is_stateless = connection.wire_state.* == .http,
                 .have_refs = false,
                 .connected = false,
-                .buffer = buffer,
                 .opts = opts,
             };
         }
@@ -196,8 +268,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         pub fn deinit(self: *WireTransport(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
             self.close(io, allocator);
 
-            self.wire_state.deinit();
-            allocator.destroy(self.wire_state);
+            self.connection.deinit(io, allocator);
 
             self.heads.deinit(allocator);
 
@@ -207,8 +278,6 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             self.refs.deinit(allocator);
 
             self.common.deinit(allocator);
-
-            allocator.destroy(self.buffer);
         }
 
         pub fn connect(
@@ -218,28 +287,16 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             url: []const u8,
             direction: net.Direction,
         ) !void {
-            if (self.url) |current_url| {
-                allocator.free(current_url);
-                self.url = null;
-            }
-            try self.wire_state.close(io);
-
-            const url_dupe = try allocator.dupe(u8, url);
-            self.url = url_dupe;
-
             self.direction = direction;
-
-            const action: WireAction = switch (direction) {
+            try self.connection.start(io, allocator, url, switch (direction) {
                 .fetch => .list_upload_pack,
                 .push => .list_receive_pack,
-            };
+            });
+            try self.finishConnect(io, allocator);
+        }
 
-            if (try WireStream.initMaybe(io, allocator, self.wire_state, url_dupe, action)) |stream| {
-                self.clearStream(allocator);
-                self.wire_stream = stream;
-            }
-
-            try self.addRefs(io, allocator, if (self.is_stateless) 2 else 1);
+        pub fn finishConnect(self: *@This(), io: std.Io, allocator: std.mem.Allocator) !void {
+            try self.addRefs(io, allocator, self.connection.flushes);
 
             self.have_refs = true;
 
@@ -272,7 +329,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             try self.updateHeads(allocator, symrefs.items);
 
             if (self.is_stateless) {
-                self.clearStream(allocator);
+                self.connection.clearStream(allocator);
             }
 
             self.connected = true;
@@ -285,7 +342,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             };
         }
 
-        pub fn getHeads(self: *const WireTransport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_kind, repo_opts) {
+        pub fn getHeads(self: *const WireTransport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_opts.hash) {
             if (!self.have_refs) {
                 return error.RefsNotLoaded;
             }
@@ -307,21 +364,13 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 }
             }
 
-            if (self.is_stateless) {
-                self.clearStream(allocator);
-                try self.wire_state.close(io);
-            }
-
             if (.push != self.direction) {
                 return error.InvalidDirection;
             }
 
-            if (try WireStream.initMaybe(io, allocator, self.wire_state, self.url orelse return error.NotConnected, .receive_pack)) |stream| {
-                self.clearStream(allocator);
-                self.wire_stream = stream;
-            }
+            try self.connection.openStream(io, allocator, .receive_pack);
 
-            const stream = &(self.wire_stream orelse return error.StreamNotFound);
+            const stream = &(self.connection.wire_stream orelse return error.StreamNotFound);
 
             var buffer: std.ArrayList(u8) = .empty;
             defer buffer.deinit(allocator);
@@ -379,14 +428,14 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
-            fetch_data: *const net_fetch.FetchNegotiation(repo_kind, repo_opts),
+            heads: []const net.RemoteHead(repo_opts.hash),
         ) !void {
             self.caps.shallow = false;
 
             var buffer: std.ArrayList(u8) = .empty;
             defer buffer.deinit(allocator);
 
-            try net_pkt.bufferWants(repo_kind, repo_opts, allocator, fetch_data, &self.caps, &buffer);
+            try net_pkt.bufferWants(repo_opts.hash, allocator, heads, &self.caps, &buffer);
 
             var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
             defer obj_iter.deinit();
@@ -406,7 +455,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             while (i < 256) {
                 const object = try obj_iter.next(allocator) orelse break;
                 defer object.deinit();
-                try net_pkt.bufferHave(repo_kind, repo_opts, allocator, &object.oid, &buffer);
+                try net_pkt.bufferHave(repo_opts.hash, allocator, &object.oid, &buffer);
 
                 i += 1;
                 if (i % 20 == 0) {
@@ -444,19 +493,19 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 }
 
                 if (i % 20 == 0 and self.is_stateless) {
-                    try net_pkt.bufferWants(repo_kind, repo_opts, allocator, fetch_data, &self.caps, &buffer);
+                    try net_pkt.bufferWants(repo_opts.hash, allocator, heads, &self.caps, &buffer);
 
                     for (self.common.items) |*pkt| {
-                        try net_pkt.bufferHave(repo_kind, repo_opts, allocator, &pkt.ack.oid, &buffer);
+                        try net_pkt.bufferHave(repo_opts.hash, allocator, &pkt.ack.oid, &buffer);
                     }
                 }
             }
 
             if (self.is_stateless and self.common.items.len > 0) {
-                try net_pkt.bufferWants(repo_kind, repo_opts, allocator, fetch_data, &self.caps, &buffer);
+                try net_pkt.bufferWants(repo_opts.hash, allocator, heads, &self.caps, &buffer);
 
                 for (self.common.items) |*pkt| {
-                    try net_pkt.bufferHave(repo_kind, repo_opts, allocator, &pkt.ack.oid, &buffer);
+                    try net_pkt.bufferHave(repo_opts.hash, allocator, &pkt.ack.oid, &buffer);
                 }
             }
 
@@ -495,21 +544,13 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             allocator: std.mem.Allocator,
             buffer: []const u8,
         ) !void {
-            if (self.is_stateless) {
-                self.clearStream(allocator);
-                try self.wire_state.close(io);
-            }
-
             if (.fetch != self.direction) {
                 return error.InvalidDirection;
             }
 
-            if (try WireStream.initMaybe(io, allocator, self.wire_state, self.url orelse return error.NotConnected, .upload_pack)) |stream| {
-                self.clearStream(allocator);
-                self.wire_stream = stream;
-            }
+            try self.connection.openStream(io, allocator, .upload_pack);
 
-            if (self.wire_stream) |*stream| {
+            if (self.connection.wire_stream) |*stream| {
                 try stream.write(allocator, buffer.ptr, buffer.len);
             }
         }
@@ -561,25 +602,6 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             }
         }
 
-        fn recv(
-            self: *WireTransport(repo_kind, repo_opts),
-            allocator: std.mem.Allocator,
-        ) !usize {
-            if (self.buffer.remain() == 0) {
-                return error.OutOfBufferSpace;
-            }
-
-            const wire_stream = &(self.wire_stream orelse return error.StreamNotFound);
-
-            const bytes_read = try wire_stream.read(allocator, self.buffer.offset(), self.buffer.remain());
-
-            std.debug.assert(bytes_read <= self.buffer.remain());
-
-            self.buffer.increase(bytes_read);
-
-            return bytes_read;
-        }
-
         fn addRefs(
             self: *WireTransport(repo_kind, repo_opts),
             io: std.Io,
@@ -595,13 +617,10 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             var found_capabilities = false;
             var consumed: usize = 0;
             while (true) {
-                var pkt_maybe: ?net_pkt.Pkt(repo_kind, repo_opts) = null;
-                if (self.buffer.len > 0) {
-                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed);
-                }
+                var pkt_maybe = try net_pkt.Pkt(repo_opts.hash).initMaybe(allocator, self.connection.buffer.data[0..self.connection.buffer.len], &found_capabilities, &consumed);
 
                 if (pkt_maybe) |*pkt| {
-                    self.buffer.consume(consumed);
+                    self.connection.buffer.consume(consumed);
 
                     switch (pkt.*) {
                         .err => |msg| {
@@ -630,7 +649,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         break;
                     }
                 } else {
-                    const recvd = try self.recv(allocator);
+                    const recvd = try self.connection.recv(allocator);
 
                     if (recvd == 0) {
                         return error.CouldNotReadRefsFromRemoteRepo;
@@ -642,19 +661,17 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         fn recvPkt(
             self: *WireTransport(repo_kind, repo_opts),
             allocator: std.mem.Allocator,
-        ) !net_pkt.Pkt(repo_kind, repo_opts) {
+        ) !net_pkt.Pkt(repo_opts.hash) {
             var found_capabilities = true;
             var consumed: usize = 0;
 
             while (true) {
-                if (self.buffer.len > 0) {
-                    if (try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed)) |pkt| {
-                        self.buffer.consume(consumed);
-                        return pkt;
-                    }
+                if (try net_pkt.Pkt(repo_opts.hash).initMaybe(allocator, self.connection.buffer.data[0..self.connection.buffer.len], &found_capabilities, &consumed)) |pkt| {
+                    self.connection.buffer.consume(consumed);
+                    return pkt;
                 }
 
-                const bytes_read = try self.recv(allocator);
+                const bytes_read = try self.connection.recv(allocator);
                 if (bytes_read == 0) {
                     return error.CouldNotReadFromRemoteRepo;
                 }
@@ -688,32 +705,14 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             io: std.Io,
             allocator: std.mem.Allocator,
         ) void {
-            const action: WireAction = switch (self.direction) {
-                .fetch => .upload_pack,
-                .push => .receive_pack,
-            };
-
             const flush = "0000";
             if (self.connected and !self.is_stateless) {
-                if (self.url) |url| {
-                    if (WireStream.initMaybe(io, allocator, self.wire_state, url, action)) |stream_maybe| {
-                        if (stream_maybe) |stream| {
-                            self.wire_stream = stream;
-                        }
-                        if (self.wire_stream) |*stream| {
-                            stream.write(allocator, flush, flush.len) catch {};
-                        }
-                    } else |_| {}
+                if (self.connection.wire_stream) |*stream| {
+                    stream.write(allocator, flush, flush.len) catch {};
                 }
             }
 
-            self.clearStream(allocator);
-
-            if (self.url) |url| {
-                allocator.free(url);
-                self.url = null;
-            }
-            self.wire_state.close(io) catch {};
+            self.connection.close(io, allocator);
 
             for (self.common.items) |*pkt| {
                 pkt.deinit(allocator);
@@ -721,13 +720,6 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             self.common.clearAndFree(allocator);
 
             self.connected = false;
-        }
-
-        fn clearStream(self: *WireTransport(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
-            if (self.wire_stream) |*wire_stream| {
-                wire_stream.deinit(allocator);
-                self.wire_stream = null;
-            }
         }
 
         fn updateHeads(self: *WireTransport(repo_kind, repo_opts), allocator: std.mem.Allocator, symrefs: []net_refspec.RefSpec) !void {
@@ -755,7 +747,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                     if (std.mem.eql(u8, head.name, "HEAD")) break true;
                 } else false;
                 if (has_head) continue;
-                var head = net.RemoteHead(repo_kind, repo_opts).init(try allocator.dupe(u8, "HEAD"));
+                var head = net.RemoteHead(repo_opts.hash).init(try allocator.dupe(u8, "HEAD"));
                 errdefer allocator.free(head.name);
                 const symref = try allocator.dupe(u8, spec.dst);
                 errdefer allocator.free(symref);
@@ -777,16 +769,12 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             var consumed: usize = 0;
 
             while (true) {
-                var pkt_maybe: ?net_pkt.Pkt(repo_kind, repo_opts) = null;
-
-                if (self.buffer.len > 0) {
-                    pkt_maybe = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, self.buffer.data[0..self.buffer.len], &found_capabilities, &consumed);
-                }
+                var pkt_maybe = try net_pkt.Pkt(repo_opts.hash).initMaybe(allocator, self.connection.buffer.data[0..self.connection.buffer.len], &found_capabilities, &consumed);
 
                 if (pkt_maybe) |*pkt| {
                     defer pkt.deinit(allocator);
 
-                    self.buffer.consume(consumed);
+                    self.connection.buffer.consume(consumed);
 
                     var iter_over = false;
 
@@ -812,7 +800,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         return;
                     }
                 } else {
-                    const recvd = try self.recv(allocator);
+                    const recvd = try self.connection.recv(allocator);
 
                     if (recvd == 0) {
                         return error.CouldNotReadFromRemoteRepo;
@@ -825,7 +813,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             self: *WireTransport(repo_kind, repo_opts),
             io: std.Io,
             git_push: *net_push.Push(repo_kind, repo_opts),
-            pkt: *net_pkt.Pkt(repo_kind, repo_opts),
+            pkt: *net_pkt.Pkt(repo_opts.hash),
         ) !bool {
             switch (pkt.*) {
                 .ok => {},
@@ -856,7 +844,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             var consumed: usize = 0;
 
             while (line.len > 0) {
-                var pkt = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, line, &found_capabilities, &consumed) orelse return;
+                var pkt = try net_pkt.Pkt(repo_opts.hash).initMaybe(allocator, line, &found_capabilities, &consumed) orelse return;
                 defer pkt.deinit(allocator);
 
                 line = line[consumed..];

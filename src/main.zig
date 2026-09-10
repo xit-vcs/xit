@@ -149,7 +149,8 @@ pub fn run(
                 defer allocator.free(work_path);
                 var clear_line = false;
                 var progress_node: ?std.Progress.Node = null;
-                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).clone(
+                const CloneRepo = if (repo_kind == .xit) rp.AnyRepo(repo_kind, any_repo_opts) else rp.Repo(repo_kind, any_repo_opts.toRepoOpts());
+                var repo = try CloneRepo.clone(
                     io,
                     allocator,
                     clone_cmd.url,

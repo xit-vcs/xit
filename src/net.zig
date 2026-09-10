@@ -3,6 +3,9 @@ const net_fetch = @import("./net/fetch.zig");
 const net_transport = @import("./net/transport.zig");
 const net_push = @import("./net/push.zig");
 const net_refspec = @import("./net/refspec.zig");
+const net_wire = @import("./net/wire.zig");
+const net_file = @import("./net/file.zig");
+const net_ssh = @import("./net/ssh.zig");
 const net_clone = @import("./net/clone.zig");
 const rp = @import("./repo.zig");
 const rf = @import("./ref.zig");
@@ -19,23 +22,23 @@ pub const Direction = enum {
 pub const Opts = net_transport.Opts;
 pub const TransportDefinition = net_transport.TransportDefinition;
 
-pub fn RemoteHead(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+pub fn RemoteHead(comptime hash_kind: hash.HashKind) type {
     return struct {
-        oid: [hash.hexLen(repo_opts.hash)]u8,
+        oid: [hash.hexLen(hash_kind)]u8,
         is_local: bool,
         name: []u8,
         symref: ?[]u8,
 
-        pub fn init(name: []u8) RemoteHead(repo_kind, repo_opts) {
+        pub fn init(name: []u8) RemoteHead(hash_kind) {
             return .{
-                .oid = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
+                .oid = [_]u8{'0'} ** hash.hexLen(hash_kind),
                 .is_local = false,
                 .name = name,
                 .symref = null,
             };
         }
 
-        pub fn deinit(self: *RemoteHead(repo_kind, repo_opts), allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *RemoteHead(hash_kind), allocator: std.mem.Allocator) void {
             allocator.free(self.name);
             if (self.symref) |target| allocator.free(target);
         }
@@ -47,12 +50,11 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         name: ?[]const u8,
         url: ?[]const u8,
         push_url: ?[]const u8,
-        heads: std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)),
+        heads: std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)),
         refspecs: std.ArrayList(net_refspec.RefSpec),
         active_refspecs: std.ArrayList(net_refspec.RefSpec),
         transport: ?net_transport.Transport(repo_kind, repo_opts),
         requires_fetch: bool,
-        nego: net_fetch.FetchNegotiation(repo_kind, repo_opts),
 
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_write),
@@ -99,7 +101,6 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 .active_refspecs = .empty,
                 .transport = null,
                 .requires_fetch = false,
-                .nego = undefined,
             };
             errdefer {
                 clearRefSpecs(allocator, &self.refspecs);
@@ -113,7 +114,7 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             errdefer allocator.free(name_copy);
             self.name = name_copy;
 
-            self.heads = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)).init(allocator, &.{}, &.{});
+            self.heads = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
             errdefer self.heads.deinit(allocator);
 
             const remote_section_name = try std.fmt.allocPrint(allocator, "remote.{s}", .{name});
@@ -234,34 +235,6 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             }
         }
 
-        pub fn dupe(self: *const Remote(repo_kind, repo_opts), allocator: std.mem.Allocator) !Remote(repo_kind, repo_opts) {
-            var remote = std.mem.zeroInit(Remote(repo_kind, repo_opts), .{});
-
-            if (self.name) |name| {
-                remote.name = try allocator.dupe(u8, name);
-            }
-
-            if (self.url) |url| {
-                remote.url = try allocator.dupe(u8, url);
-            }
-
-            if (self.push_url) |push_url| {
-                remote.push_url = try allocator.dupe(u8, push_url);
-            }
-
-            remote.heads = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)).init(allocator, &.{}, &.{});
-            remote.refspecs = .empty;
-            remote.active_refspecs = .empty;
-
-            for (self.refspecs.items) |*spec| {
-                var spec_dupe = try spec.dupe(allocator);
-                errdefer spec_dupe.deinit(allocator);
-                try remote.refspecs.append(allocator, spec_dupe);
-            }
-
-            return remote;
-        }
-
         pub fn connected(self: *const Remote(repo_kind, repo_opts)) bool {
             if (self.transport) |*transport| {
                 return transport.isConnected();
@@ -343,8 +316,8 @@ fn getHeads(
     comptime repo_opts: rp.RepoOpts(repo_kind),
     remote: *Remote(repo_kind, repo_opts),
     allocator: std.mem.Allocator,
-) !std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)) {
-    var refs = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)).init(allocator, &.{}, &.{});
+) !std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)) {
+    var refs = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
     errdefer refs.deinit(allocator);
 
     const heads = if (remote.transport) |*transport| try transport.getHeads() else return error.RemoteNotConnected;
@@ -441,7 +414,7 @@ fn updateHead(
     io: std.Io,
     allocator: std.mem.Allocator,
     spec: *net_refspec.RefSpec,
-    head: *RemoteHead(repo_kind, repo_opts),
+    head: *RemoteHead(repo_opts.hash),
     tagspec: *net_refspec.RefSpec,
 ) !void {
     var ref_path: std.ArrayList(u8) = .empty;
@@ -486,7 +459,7 @@ fn updateRefs(
     io: std.Io,
     allocator: std.mem.Allocator,
     spec: *net_refspec.RefSpec,
-    refs: *std.StringArrayHashMapUnmanaged(RemoteHead(repo_kind, repo_opts)),
+    refs: *std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)),
 ) !void {
     var tagspec = try net_refspec.RefSpec.init(allocator, net_refspec.git_refspec_tags, .fetch);
     defer tagspec.deinit(allocator);
@@ -639,6 +612,22 @@ pub fn clone(
     global_config_path: ?[]const u8,
     clone_opts: CloneOpts(repo_opts.ProgressCtx),
 ) !rp.Repo(repo_kind, repo_opts) {
+    var prepared: ?net_transport.Transport(repo_kind, repo_opts) = null;
+    return cloneWithTransport(repo_kind, repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, clone_opts, &prepared);
+}
+
+fn cloneWithTransport(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    cwd_path: []const u8,
+    work_path: []const u8,
+    global_config_path: ?[]const u8,
+    clone_opts: CloneOpts(repo_opts.ProgressCtx),
+    prepared: *?net_transport.Transport(repo_kind, repo_opts),
+) !rp.Repo(repo_kind, repo_opts) {
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{
         .bare = clone_opts.bare,
         .cwd_path = cwd_path,
@@ -648,27 +637,22 @@ pub fn clone(
     });
     errdefer repo.deinit(io, allocator);
 
-    var cwd = try std.Io.Dir.openDirAbsolute(io, cwd_path, .{});
-    defer cwd.close(io);
-
-    const transport_def = net_transport.TransportDefinition.init(io, cwd, url) orelse return error.UnsupportedUrl;
-
     switch (repo_kind) {
-        .git => try net_clone.cloneRemote(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, url, transport_def, clone_opts.transport),
+        .git => try net_clone.cloneRemote(repo_kind, repo_opts, .{ .core = &repo.core, .extra = .{} }, io, allocator, url, clone_opts.transport, prepared),
         .xit => {
             const Ctx = struct {
                 core: *rp.Repo(repo_kind, repo_opts).Core,
-                transport_def: net_transport.TransportDefinition,
                 io: std.Io,
                 allocator: std.mem.Allocator,
                 url: []const u8,
                 transport_opts: Opts(repo_opts.ProgressCtx),
+                prepared: *?net_transport.Transport(repo_kind, repo_opts),
 
                 pub fn run(ctx: @This(), cursor: *rp.Repo(repo_kind, repo_opts).DB.Cursor(.read_write)) !void {
                     var moment = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_write).init(cursor.*);
                     const state = rp.Repo(repo_kind, repo_opts).State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
-                    try net_clone.cloneRemote(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.url, ctx.transport_def, ctx.transport_opts);
+                    try net_clone.cloneRemote(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.url, ctx.transport_opts, ctx.prepared);
 
                     const un = @import("./undo.zig");
                     try un.writeMessage(repo_opts, state, .{ .clone = .{ .url = ctx.url } });
@@ -680,15 +664,60 @@ pub fn clone(
                 .{ .slot = try history.getSlot(-1) },
                 Ctx{
                     .core = &repo.core,
-                    .transport_def = transport_def,
                     .io = io,
                     .allocator = allocator,
                     .url = url,
                     .transport_opts = clone_opts.transport,
+                    .prepared = prepared,
                 },
             );
         },
     }
 
     return repo;
+}
+
+pub fn cloneAuto(
+    comptime any_repo_opts: rp.AnyRepoOpts(.xit),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    cwd_path: []const u8,
+    work_path: []const u8,
+    global_config_path: ?[]const u8,
+    opts: CloneOpts(any_repo_opts.ProgressCtx),
+) !rp.AnyRepo(.xit, any_repo_opts) {
+    var cwd = try std.Io.Dir.openDirAbsolute(io, cwd_path, .{});
+    defer cwd.close(io);
+    const transport_def = TransportDefinition.init(io, cwd, url) orelse return error.UnsupportedUrl;
+    switch (transport_def) {
+        .file => switch (try net_file.sourceHash(io, allocator, cwd_path, url)) {
+            inline else => |kind| return @unionInit(rp.AnyRepo(.xit, any_repo_opts), @tagName(kind), try clone(.xit, any_repo_opts.toRepoOptsWithHash(kind), io, allocator, url, cwd_path, work_path, global_config_path, opts)),
+        },
+        .wire => |wire_kind| {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            var wire_opts = opts.transport.wire;
+            if (wire_kind == .ssh and wire_opts.ssh.command == null) {
+                const sections = try cfg.readGlobal(.xit, any_repo_opts.toRepoOpts(), io, allocator, arena.allocator(), global_config_path);
+                wire_opts.ssh.command = net_ssh.commandFromConfig(sections);
+            }
+            var connection = try net_wire.Connection(any_repo_opts.net_buffer_size).init(io, allocator, wire_kind, wire_opts);
+            var owns_connection = true;
+            defer if (owns_connection) connection.deinit(io, allocator);
+            try connection.start(io, allocator, url, .list_upload_pack);
+            switch (try connection.discoverHash(io, allocator, any_repo_opts.ProgressCtx, opts.transport.progress_ctx)) {
+                inline else => |kind| {
+                    const repo_opts = comptime any_repo_opts.toRepoOptsWithHash(kind);
+                    var prepared: ?net_transport.Transport(.xit, repo_opts) = .{
+                        .wire = net_wire.WireTransport(.xit, repo_opts).initConnection(connection, opts.transport),
+                    };
+                    owns_connection = false;
+                    defer if (prepared) |*transport| transport.deinit(io, allocator);
+                    if (prepared) |*transport| try transport.wire.finishConnect(io, allocator);
+                    return @unionInit(rp.AnyRepo(.xit, any_repo_opts), @tagName(kind), try cloneWithTransport(.xit, repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts, &prepared));
+                },
+            }
+        },
+    }
 }

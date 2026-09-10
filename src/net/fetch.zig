@@ -6,12 +6,6 @@ const rp = @import("../repo.zig");
 const rf = @import("../ref.zig");
 const hash = @import("../hash.zig");
 
-pub fn FetchNegotiation(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
-    return struct {
-        refs: []net.RemoteHead(repo_kind, repo_opts),
-    };
-}
-
 pub fn negotiate(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -62,7 +56,7 @@ pub fn negotiate(
                 return error.CannotFetchSpecificObjectFromRemote;
             }
 
-            var oid_head = net.RemoteHead(repo_kind, repo_opts).init(spec.dst);
+            var oid_head = net.RemoteHead(repo_opts.hash).init(spec.dst);
             oid_head.oid = spec.src[0..comptime hash.hexLen(repo_opts.hash)].*;
             try remote.heads.put(allocator, oid_head.name, oid_head);
         }
@@ -74,10 +68,8 @@ pub fn negotiate(
         return;
     }
 
-    remote.nego.refs = remote.heads.values();
-
     const t = if (remote.transport) |*transport| transport else return error.NotConnected;
-    try t.negotiateFetch(state, io, allocator, &remote.nego);
+    try t.negotiateFetch(state, io, allocator, remote.heads.values());
 }
 
 pub fn downloadPack(

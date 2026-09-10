@@ -60,8 +60,8 @@ pub fn cloneRemote(
     io: std.Io,
     allocator: std.mem.Allocator,
     url: []const u8,
-    transport_def: net_transport.TransportDefinition,
     transport_opts: net_transport.Opts(repo_opts.ProgressCtx),
+    prepared: *?net_transport.Transport(repo_kind, repo_opts),
 ) !void {
     if (try net.resolveRefPath(repo_kind, repo_opts, state.readOnly(), io, allocator, "HEAD")) |_| {
         return error.RepoIsNotEmpty;
@@ -71,6 +71,8 @@ pub fn cloneRemote(
     const fetch_refspec = if (is_bare) "+refs/heads/*:refs/heads/*" else "+refs/heads/*:refs/remotes/origin/*";
     var remote = try net.Remote(repo_kind, repo_opts).init(state, io, allocator, "origin", url, fetch_refspec);
     defer remote.deinit(io, allocator);
+    remote.transport = prepared.*;
+    prepared.* = null;
 
     var fetch_opts = transport_opts;
     var specs: std.ArrayList([]const u8) = .empty;
@@ -83,29 +85,11 @@ pub fn cloneRemote(
     try specs.append(allocator, "HEAD");
     fetch_opts.refspecs = specs.items;
 
-    switch (transport_def) {
-        .file => {
-            try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote, fetch_opts);
+    try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote, fetch_opts);
 
-            if (is_bare) {
-                try setHead(repo_kind, repo_opts, state, io, &remote);
-            } else {
-                try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote);
-            }
-        },
-        .wire => {
-            var remote_copy = try remote.dupe(allocator);
-            defer remote_copy.deinit(io, allocator);
-
-            try net.connect(repo_kind, repo_opts, state.readOnly(), io, allocator, &remote_copy, .fetch, fetch_opts);
-
-            try net.fetch(repo_kind, repo_opts, state, io, allocator, &remote_copy, fetch_opts);
-
-            if (is_bare) {
-                try setHead(repo_kind, repo_opts, state, io, &remote_copy);
-            } else {
-                try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote_copy);
-            }
-        },
+    if (is_bare) {
+        try setHead(repo_kind, repo_opts, state, io, &remote);
+    } else {
+        try checkoutBranch(repo_kind, repo_opts, state, io, allocator, &remote);
     }
 }

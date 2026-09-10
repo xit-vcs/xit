@@ -12,11 +12,52 @@ const net_pkt = @import("./pkt.zig");
 const hash = @import("../hash.zig");
 const rf = @import("../ref.zig");
 
+fn sourceKind(io: std.Io, path: []const u8) !rp.RepoKind {
+    const dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+    defer dir.close(io);
+    if (std.mem.eql(u8, std.fs.path.basename(path), ".git")) return .git;
+    if (std.mem.eql(u8, std.fs.path.basename(path), ".xit")) return .xit;
+    if (dir.openDir(io, ".xit", .{})) |xit_dir| {
+        xit_dir.close(io);
+        return .xit;
+    } else |err| if (err != error.FileNotFound) return err;
+    return .git;
+}
+
+fn parsePath(url: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, url, "file://")) {
+        const uri = try std.Uri.parse(url);
+        const path = switch (uri.path) {
+            .raw => |s| s,
+            .percent_encoded => |s| s,
+        };
+        if (.windows == builtin.os.tag and path[0] == '/') {
+            return path[1..];
+        } else {
+            return path;
+        }
+    } else {
+        return url;
+    }
+}
+
+pub fn sourceHash(io: std.Io, allocator: std.mem.Allocator, cwd_path: []const u8, url: []const u8) !hash.HashKind {
+    const path = try std.fs.path.resolve(allocator, &.{ cwd_path, try parsePath(url) });
+    defer allocator.free(path);
+    switch (try sourceKind(io, path)) {
+        inline else => |kind| {
+            var repo = try rp.AnyRepo(kind, .{}).open(io, allocator, .{ .path = path, .require_repo_root = true });
+            defer repo.deinit(io, allocator);
+            return std.meta.activeTag(repo);
+        },
+    }
+}
+
 pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         url: ?[]u8,
         direction: net.Direction,
-        heads: std.ArrayList(net.RemoteHead(repo_kind, repo_opts)),
+        heads: std.ArrayList(net.RemoteHead(repo_opts.hash)),
         connected: bool,
         remote_repo: ?LocalRepo,
         opts: net_transport.Opts(repo_opts.ProgressCtx),
@@ -32,17 +73,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             }
 
             fn open(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !@This() {
-                const kind: rp.RepoKind = blk: {
-                    const dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
-                    defer dir.close(io);
-                    if (std.mem.eql(u8, std.fs.path.basename(path), ".git")) break :blk .git;
-                    if (std.mem.eql(u8, std.fs.path.basename(path), ".xit")) break :blk .xit;
-                    if (dir.openDir(io, ".xit", .{})) |xit_dir| {
-                        xit_dir.close(io);
-                        break :blk .xit;
-                    } else |err| if (err != error.FileNotFound) return err;
-                    break :blk .git;
-                };
+                const kind = try sourceKind(io, path);
                 switch (kind) {
                     inline else => |rk| {
                         var any_repo = try rp.AnyRepo(rk, .{}).open(io, allocator, .{ .path = path, .require_repo_root = true });
@@ -79,23 +110,6 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             if (self.remote_repo) |*remote_repo| {
                 remote_repo.deinit(io, allocator);
                 self.remote_repo = null;
-            }
-        }
-
-        fn parsePath(url: []const u8) ![]const u8 {
-            if (std.mem.startsWith(u8, url, "file://")) {
-                const uri = try std.Uri.parse(url);
-                const path = switch (uri.path) {
-                    .raw => |s| s,
-                    .percent_encoded => |s| s,
-                };
-                if (.windows == builtin.os.tag and path[0] == '/') {
-                    return path[1..];
-                } else {
-                    return path;
-                }
-            } else {
-                return url;
             }
         }
 
@@ -145,7 +159,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             };
         }
 
-        pub fn getHeads(self: *const FileTransport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_kind, repo_opts) {
+        pub fn getHeads(self: *const FileTransport(repo_kind, repo_opts)) ![]net.RemoteHead(repo_opts.hash) {
             return self.heads.items;
         }
 
@@ -225,7 +239,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             // status packets may span multiple sideband packets; preserve every byte.
             while (remaining.len > 0) {
                 var consumed: usize = 0;
-                var packet = try net_pkt.Pkt(repo_kind, repo_opts).initMaybe(allocator, remaining, &found_capabilities, &consumed) orelse return error.ProtocolError;
+                var packet = try net_pkt.Pkt(repo_opts.hash).initMaybe(allocator, remaining, &found_capabilities, &consumed) orelse return error.ProtocolError;
                 defer packet.deinit(allocator);
                 remaining = remaining[consumed..];
                 switch (packet) {
@@ -321,12 +335,12 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const oid_maybe = try net.resolveRef(remote_kind, remote_opts, state, io, allocator, ref);
             const oid = oid_maybe orelse (if (std.mem.eql(u8, ref_path, "HEAD")) [_]u8{'0'} ** hash.hexLen(repo_opts.hash) else return);
 
-            var head: net.RemoteHead(repo_kind, repo_opts) = undefined;
+            var head: net.RemoteHead(repo_opts.hash) = undefined;
             {
                 const head_name = try allocator.dupe(u8, ref_path);
                 errdefer allocator.free(head_name);
 
-                head = net.RemoteHead(repo_kind, repo_opts).init(head_name);
+                head = net.RemoteHead(repo_opts.hash).init(head_name);
                 head.oid = oid;
 
                 // if it's a symbolic ref, store the target ref path
@@ -361,7 +375,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 try head_name.appendSlice(allocator, ref_path);
                 try head_name.appendSlice(allocator, "^{}");
 
-                head = net.RemoteHead(repo_kind, repo_opts).init(try head_name.toOwnedSlice(allocator));
+                head = net.RemoteHead(repo_opts.hash).init(try head_name.toOwnedSlice(allocator));
                 head.oid = object.content.tag.target;
 
                 try self.heads.append(allocator, head);

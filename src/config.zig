@@ -39,19 +39,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 allocator.destroy(arena);
             }
 
-            var global_sections: Sections = .empty;
-
-            // the global config is written by other tools, so unparsable lines
-            // are skipped rather than making the repo unusable
-            if (state.core.global_config_path) |global_config_path| open: {
-                var global_file = std.Io.Dir.cwd().openFile(io, global_config_path, .{}) catch |err| switch (err) {
-                    error.FileNotFound => break :open,
-                    else => |e| return e,
-                };
-                defer global_file.close(io);
-
-                try parseFile(repo_kind, repo_opts, true, global_file, io, allocator, arena.allocator(), &global_sections);
-            }
+            const global_sections = try readGlobal(repo_kind, repo_opts, io, allocator, arena.allocator(), state.core.global_config_path);
 
             var local_sections: Sections = .empty;
 
@@ -373,6 +361,27 @@ const ParsedLine = union(enum) {
         }
     }
 };
+
+/// reads global configuration without requiring a repository.
+pub fn readGlobal(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    arena_allocator: std.mem.Allocator,
+    path: ?[]const u8,
+) !Sections {
+    var sections: Sections = .empty;
+    const global_path = path orelse return sections;
+    var file = std.Io.Dir.cwd().openFile(io, global_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return sections,
+        else => return err,
+    };
+    defer file.close(io);
+    // the global config is written by other tools, so skip invalid lines.
+    try parseFile(repo_kind, repo_opts, true, file, io, allocator, arena_allocator, &sections);
+    return sections;
+}
 
 /// reads a config file in git's format into `sections`. section and variable
 /// names are lower-cased, because that is how they are looked up. subsection
