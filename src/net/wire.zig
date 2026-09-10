@@ -13,7 +13,6 @@ const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
 const pack = @import("../pack.zig");
 const rf = @import("../ref.zig");
-const hash = @import("../hash.zig");
 const fs = @import("../fs.zig");
 
 pub const Opts = struct {
@@ -327,7 +326,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             var buffer: std.ArrayList(u8) = .empty;
             defer buffer.deinit(allocator);
 
-            try pktline(allocator, &buffer, git_push.specs.items);
+            try pktline(allocator, &buffer, git_push.specs.items, self.caps.object_format);
             try stream.write(allocator, buffer.items.ptr, buffer.items.len);
 
             if (need_pack) {
@@ -478,10 +477,10 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             }
         }
 
-        fn pktline(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), specs: []net_push.PushSpec(repo_kind, repo_opts)) !void {
+        fn pktline(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), specs: []net_push.PushSpec(repo_kind, repo_opts), object_format: bool) !void {
             for (specs, 0..) |*spec, i| {
                 if (i == 0) {
-                    try net_pkt.appendPktLine(allocator, buffer, "{s} {s} {s}\x00 report-status side-band-64k\n", .{ &spec.roid, &spec.loid, spec.refspec.dst });
+                    try net_pkt.appendPktLine(allocator, buffer, "{s} {s} {s}\x00 report-status side-band-64k{s}\n", .{ &spec.roid, &spec.loid, spec.refspec.dst, if (object_format) " object-format=" ++ @tagName(repo_opts.hash) else "" });
                 } else {
                     try net_pkt.appendPktLine(allocator, buffer, "{s} {s} {s}\n", .{ &spec.roid, &spec.loid, spec.refspec.dst });
                 }
@@ -869,6 +868,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 }
 
 pub const Capabilities = struct {
+    object_format: bool = false,
     allow_tip_sha1_in_want: bool = false,
     allow_reachable_sha1_in_want: bool = false,
     ofs_delta: bool = false,
@@ -883,7 +883,7 @@ pub const Capabilities = struct {
 
     fn init(allocator: std.mem.Allocator, caps_maybe: ?[]const u8, symrefs: *std.ArrayList(net_refspec.RefSpec)) !Capabilities {
         var self = Capabilities{};
-        var iter = std.mem.splitScalar(u8, caps_maybe orelse return self, ' ');
+        var iter = std.mem.tokenizeAny(u8, caps_maybe orelse return self, " \t\r\n");
 
         while (iter.next()) |cap| {
             if (std.mem.startsWith(u8, cap, "ofs-delta")) {
@@ -925,7 +925,8 @@ pub const Capabilities = struct {
                 self.allow_reachable_sha1_in_want = true;
                 self.common = true;
             } else if (std.mem.startsWith(u8, cap, "object-format=")) {
-                // currently ignored
+                self.object_format = true;
+                self.common = true;
             } else if (std.mem.startsWith(u8, cap, "agent=")) {
                 // currently ignored
             } else if (std.mem.startsWith(u8, cap, "shallow")) {

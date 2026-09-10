@@ -4,138 +4,192 @@ const xit = @import("xit");
 const rp = xit.repo;
 const rf = xit.ref;
 const net = xit.net;
+const hash = xit.hash;
+const pkt = xit.net_pkt;
 
 test "git fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetch(.git, .git, .{ .wire = .http }, 3001, io, allocator);
+    try testFetch(.git, .git, .{ .wire = .http }, 3001, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetch(.git, .git, .{ .wire = .raw }, 3002, io, allocator);
-        try testFetch(.git, .git, .{ .wire = .ssh }, 3003, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .raw }, 3002, .sha1, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .ssh }, 3003, .sha1, io, allocator);
     }
-    try testFetch(.git, .git, .file, 0, io, allocator);
+    try testFetch(.git, .git, .file, 0, .sha1, io, allocator);
 }
 
 test "xit fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetch(.xit, .xit, .{ .wire = .http }, 3004, io, allocator);
+    try testFetch(.xit, .xit, .{ .wire = .http }, 3101, .sha1, io, allocator);
+    try testFetch(.xit, .xit, .{ .wire = .http }, 3102, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetch(.xit, .git, .{ .wire = .raw }, 3005, io, allocator);
-        try testFetch(.xit, .xit, .{ .wire = .ssh }, 3006, io, allocator);
+        try testFetch(.xit, .git, .{ .wire = .raw }, 3103, .sha1, io, allocator);
+        try testFetch(.xit, .git, .{ .wire = .raw }, 3104, .sha256, io, allocator);
+        try testFetch(.xit, .xit, .{ .wire = .ssh }, 3105, .sha1, io, allocator);
+        try testFetch(.xit, .xit, .{ .wire = .ssh }, 3106, .sha256, io, allocator);
     }
-    try testFetch(.xit, .xit, .file, 0, io, allocator);
+    try testFetch(.xit, .xit, .file, 0, .sha1, io, allocator);
+    try testFetch(.xit, .xit, .file, 0, .sha256, io, allocator);
 }
 
 test "git push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPush(.git, .git, .{ .wire = .http }, 3007, .sha1, io, allocator);
+    try testPush(.git, .git, .{ .wire = .http }, 3201, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPush(.git, .git, .{ .wire = .raw }, 3008, .sha1, io, allocator);
-        try testPush(.git, .git, .{ .wire = .ssh }, 3009, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .raw }, 3202, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .ssh }, 3203, .sha1, io, allocator);
     }
-    inline for (.{ .git, .xit }) |server_kind| {
-        inline for (.{ .sha1, .sha256 }) |hash_kind| {
-            try testPush(.git, server_kind, .file, 0, hash_kind, io, allocator);
-        }
-    }
+    try testPush(.git, .git, .file, 0, .sha1, io, allocator);
+    try testPush(.git, .git, .file, 0, .sha256, io, allocator);
+    try testPush(.git, .xit, .file, 0, .sha1, io, allocator);
+    try testPush(.git, .xit, .file, 0, .sha256, io, allocator);
 }
 
 test "xit push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPush(.xit, .xit, .{ .wire = .http }, 3010, .sha1, io, allocator);
+    try testPush(.xit, .xit, .{ .wire = .http }, 3301, .sha1, io, allocator);
+    try testPush(.xit, .xit, .{ .wire = .http }, 3302, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPush(.xit, .git, .{ .wire = .raw }, 3011, .sha1, io, allocator);
-        try testPush(.xit, .xit, .{ .wire = .ssh }, 3012, .sha1, io, allocator);
+        try testPush(.xit, .git, .{ .wire = .raw }, 3303, .sha1, io, allocator);
+        try testPush(.xit, .git, .{ .wire = .raw }, 3304, .sha256, io, allocator);
+        try testPush(.xit, .xit, .{ .wire = .ssh }, 3305, .sha1, io, allocator);
+        try testPush(.xit, .xit, .{ .wire = .ssh }, 3306, .sha256, io, allocator);
     }
-    inline for (.{ .git, .xit }) |server_kind| {
-        inline for (.{ .sha1, .sha256 }) |hash_kind| {
-            try testPush(.xit, server_kind, .file, 0, hash_kind, io, allocator);
-        }
-    }
+    try testPush(.xit, .git, .file, 0, .sha1, io, allocator);
+    try testPush(.xit, .git, .file, 0, .sha256, io, allocator);
+    try testPush(.xit, .xit, .file, 0, .sha1, io, allocator);
+    try testPush(.xit, .xit, .file, 0, .sha256, io, allocator);
 }
 
 test "git clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .git, .{ .wire = .http }, 3013, false, .sha1, io, allocator);
+    try testClone(.git, .git, .{ .wire = .http }, 3401, false, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .git, .{ .wire = .raw }, 3014, false, .sha1, io, allocator);
-        try testClone(.git, .git, .{ .wire = .ssh }, 3015, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3402, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .ssh }, 3403, false, .sha1, io, allocator);
     }
-    inline for (.{ .git, .xit }) |server_kind| {
-        inline for (.{ .sha1, .sha256 }) |hash_kind| {
-            try testClone(.git, server_kind, .file, 0, false, hash_kind, io, allocator);
-        }
-    }
+    try testClone(.git, .git, .file, 0, false, .sha1, io, allocator);
+    try testClone(.git, .git, .file, 0, false, .sha256, io, allocator);
+    try testClone(.git, .xit, .file, 0, false, .sha1, io, allocator);
+    try testClone(.git, .xit, .file, 0, false, .sha256, io, allocator);
 }
 
 test "xit clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.xit, .xit, .{ .wire = .http }, 3016, false, .sha1, io, allocator);
+    try testClone(.xit, .xit, .{ .wire = .http }, 3501, false, .sha1, io, allocator);
+    try testClone(.xit, .xit, .{ .wire = .http }, 3502, false, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.xit, .git, .{ .wire = .raw }, 3017, false, .sha1, io, allocator);
-        try testClone(.xit, .xit, .{ .wire = .ssh }, 3018, false, .sha1, io, allocator);
+        try testClone(.xit, .git, .{ .wire = .raw }, 3503, false, .sha1, io, allocator);
+        try testClone(.xit, .git, .{ .wire = .raw }, 3504, false, .sha256, io, allocator);
+        try testClone(.xit, .xit, .{ .wire = .ssh }, 3505, false, .sha1, io, allocator);
+        try testClone(.xit, .xit, .{ .wire = .ssh }, 3506, false, .sha256, io, allocator);
     }
-    inline for (.{ .git, .xit }) |server_kind| {
-        inline for (.{ .sha1, .sha256 }) |hash_kind| {
-            try testClone(.xit, server_kind, .file, 0, false, hash_kind, io, allocator);
-        }
-    }
+    try testClone(.xit, .git, .file, 0, false, .sha1, io, allocator);
+    try testClone(.xit, .git, .file, 0, false, .sha256, io, allocator);
+    try testClone(.xit, .xit, .file, 0, false, .sha1, io, allocator);
+    try testClone(.xit, .xit, .file, 0, false, .sha256, io, allocator);
 }
 
 test "git clone small subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testClone(.git, .xit, .{ .wire = .http }, 3031, true, .sha1, io, allocator);
+    try testClone(.git, .xit, .{ .wire = .http }, 3601, true, .sha1, io, allocator);
+    try testClone(.git, .xit, .{ .wire = .http }, 3602, true, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .git, .{ .wire = .raw }, 3032, true, .sha1, io, allocator);
-        try testClone(.git, .xit, .{ .wire = .ssh }, 3033, true, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3603, true, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3604, true, .sha256, io, allocator);
+        try testClone(.git, .xit, .{ .wire = .ssh }, 3605, true, .sha1, io, allocator);
+        try testClone(.git, .xit, .{ .wire = .ssh }, 3606, true, .sha256, io, allocator);
     }
 }
 
 test "git fetch large" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetchLarge(.git, .git, .{ .wire = .http }, 3019, false, io, allocator);
+    try testFetchLarge(.git, .git, .{ .wire = .http }, 3701, false, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3020, false, io, allocator);
-        try testFetchLarge(.git, .git, .{ .wire = .ssh }, 3021, false, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3702, false, .sha1, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .ssh }, 3703, false, .sha1, io, allocator);
     }
-    try testFetchLarge(.git, .git, .file, 0, false, io, allocator);
+    try testFetchLarge(.git, .git, .file, 0, false, .sha1, io, allocator);
 }
 
 test "git fetch large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testFetchLarge(.git, .xit, .{ .wire = .http }, 3022, true, io, allocator);
+    try testFetchLarge(.git, .xit, .{ .wire = .http }, 3801, true, .sha1, io, allocator);
+    try testFetchLarge(.git, .xit, .{ .wire = .http }, 3802, true, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3023, true, io, allocator);
-        try testFetchLarge(.git, .xit, .{ .wire = .ssh }, 3024, true, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3803, true, .sha1, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3804, true, .sha256, io, allocator);
+        try testFetchLarge(.git, .xit, .{ .wire = .ssh }, 3805, true, .sha1, io, allocator);
+        try testFetchLarge(.git, .xit, .{ .wire = .ssh }, 3806, true, .sha256, io, allocator);
     }
 }
 
 test "git push large" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPushLarge(.git, .git, .{ .wire = .http }, 3025, false, io, allocator);
+    try testPushLarge(.git, .git, .{ .wire = .http }, 3901, false, .sha1, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .git, .{ .wire = .raw }, 3026, false, io, allocator);
-        try testPushLarge(.git, .git, .{ .wire = .ssh }, 3027, false, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .raw }, 3902, false, .sha1, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .ssh }, 3903, false, .sha1, io, allocator);
     }
-    try testPushLarge(.git, .git, .file, 0, false, io, allocator);
+    try testPushLarge(.git, .git, .file, 0, false, .sha1, io, allocator);
 }
 
 test "git push large subprocess" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    try testPushLarge(.git, .xit, .{ .wire = .http }, 3028, true, io, allocator);
+    try testPushLarge(.git, .xit, .{ .wire = .http }, 4001, true, .sha1, io, allocator);
+    try testPushLarge(.git, .xit, .{ .wire = .http }, 4002, true, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .git, .{ .wire = .raw }, 3029, true, io, allocator);
-        try testPushLarge(.git, .xit, .{ .wire = .ssh }, 3030, true, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .raw }, 4003, true, .sha1, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .raw }, 4004, true, .sha256, io, allocator);
+        try testPushLarge(.git, .xit, .{ .wire = .ssh }, 4005, true, .sha1, io, allocator);
+        try testPushLarge(.git, .xit, .{ .wire = .ssh }, 4006, true, .sha256, io, allocator);
+    }
+}
+
+test "xit server rejects incompatible object formats" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    inline for (.{ .sha1, .sha256 }) |hash_kind| {
+        var temp = std.testing.tmpDir(.{});
+        defer temp.cleanup();
+        const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+        defer allocator.free(path);
+        var repo = try rp.Repo(.xit, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = path, .bare = true });
+        defer repo.deinit(io, allocator);
+        const zero = [_]u8{'0'} ** hash.hexLen(hash_kind);
+        inline for ([_]?[]const u8{ null, "sha1", "sha256", "sha512" }) |format| {
+            const selected: ?hash.HashKind = if (format) |name| std.meta.stringToEnum(hash.HashKind, name) else .sha1;
+            if (selected != hash_kind) {
+                var request: std.ArrayList(u8) = .empty;
+                defer request.deinit(allocator);
+                const caps = if (format) |name| "\x00side-band-64k object-format=" ++ name else "";
+                try pkt.appendPktLine(allocator, &request, "{s} {s} refs/heads/master{s}\n", .{ &zero, &zero, caps });
+                try request.appendSlice(allocator, "0000");
+                var reader = std.Io.Reader.fixed(request.items);
+                var output = std.Io.Writer.Discarding.init(&.{});
+                try std.testing.expectError(error.ObjectFormatMismatch, repo.receivePack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }));
+                try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .head, .name = "master" }));
+
+                // legacy fetch may omit the format, but explicit conflicts are rejected.
+                if (format) |name| {
+                    request.clearRetainingCapacity();
+                    try pkt.appendPktLine(allocator, &request, "want {s} object-format={s}\n", .{ &zero, name });
+                    try request.appendSlice(allocator, "0000");
+                    reader = .fixed(request.items);
+                    try std.testing.expectError(error.ObjectFormatMismatch, repo.uploadPack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }));
+                }
+            }
+        }
     }
 }
 
@@ -568,6 +622,7 @@ fn testFetch(
     comptime server_repo_kind: rp.RepoKind,
     comptime transport_def: net.TransportDefinition,
     comptime port: u16,
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -588,7 +643,7 @@ fn testFetch(
     const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
     // make a commit
@@ -610,30 +665,28 @@ fn testFetch(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // add remote
-    {
-        if (.windows == builtin.os.tag) {
-            std.mem.replaceScalar(u8, server_path, '\\', '/');
-        }
-        const separator = if (server_path[0] == '/') "" else "/";
-
-        const remote_url = switch (transport_def) {
-            //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
-            .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
-            .wire => |wire_kind| switch (wire_kind) {
-                .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
-                .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
-                .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
-            },
-        };
-        defer allocator.free(remote_url);
-
-        try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
-        try client_repo.addConfig(io, allocator, .{ .name = "branch.master.remote", .value = "origin" });
+    if (.windows == builtin.os.tag) {
+        std.mem.replaceScalar(u8, server_path, '\\', '/');
     }
+    const separator = if (server_path[0] == '/') "" else "/";
+
+    const remote_url = switch (transport_def) {
+        //.file => try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ separator, server_path }),
+        .file => try std.fmt.allocPrint(allocator, "../server", .{}), // relative file paths work too
+        .wire => |wire_kind| switch (wire_kind) {
+            .http => try std.fmt.allocPrint(allocator, "http://localhost:{}/server", .{port}),
+            .raw => try std.fmt.allocPrint(allocator, "git://localhost:{}/server", .{port}),
+            .ssh => try std.fmt.allocPrint(allocator, "ssh://localhost:{}{s}{s}", .{ port, separator, server_path }),
+        },
+    };
+    defer allocator.free(remote_url);
+
+    try client_repo.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
+    try client_repo.addConfig(io, allocator, .{ .name = "branch.master.remote", .value = "origin" });
 
     // create refspec with oid as a test
     const oid_refspec = try std.fmt.allocPrint(allocator, "+{s}:refs/heads/foo", .{&commit1});
@@ -715,6 +768,36 @@ fn testFetch(
 
         const oid_master = (try client_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit2, &oid_master);
+    }
+
+    // hash-mismatch checks currently cover only the xit backend.
+    if (repo_kind == .xit) {
+        try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
+        const other_hash: xit.hash.HashKind = if (hash_kind == .sha1) .sha256 else .sha1;
+        const Other = rp.Repo(.xit, .{ .hash = other_hash, .is_test = true });
+        const other_path = try std.fs.path.join(allocator, &.{ temp_path, "mismatched" });
+        defer allocator.free(other_path);
+        var other = try Other.init(io, allocator, .{ .path = other_path });
+        defer other.deinit(io, allocator);
+        try other.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
+        const receive_pack_command = try std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path});
+        defer allocator.free(receive_pack_command);
+        const opts: net.Opts(void) = .{ .wire = .{ .ssh = .{
+            .command = ssh_cmd_maybe,
+            .upload_pack_command = upload_pack_command,
+            .receive_pack_command = receive_pack_command,
+        } } };
+        const mismatch_error = if (transport_def == .file) error.UnexpectedHashKind else error.ObjectFormatMismatch;
+        try std.testing.expectError(mismatch_error, other.fetch(io, allocator, "origin", opts));
+        const local_oid = try commitServer(&other, io, allocator, .{ .files = &.{.{ .path = "other.txt", .content = "different hash" }} }, .{ .message = "local" });
+        try std.testing.expectError(mismatch_error, other.push(io, allocator, "origin", "refs/heads/master:refs/heads/master", false, opts));
+        try std.testing.expectEqualStrings(&local_oid, &(try other.readRef(io, .{ .kind = .head, .name = "master" })).?);
+        try std.testing.expectEqualStrings(&commit2, &(try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?);
+        const clone_path = try std.fs.path.join(allocator, &.{ temp_path, "mismatched-clone" });
+        defer allocator.free(clone_path);
+        // file urls here are relative to the parent of client/, not client/ itself.
+        const clone_url = if (transport_def == .file) server_path else remote_url;
+        try std.testing.expectError(mismatch_error, Other.clone(io, allocator, clone_url, temp_path, clone_path, null, .{ .transport = opts }));
     }
 }
 
@@ -1145,28 +1228,6 @@ fn testClone(
         try server_repo.addConfig(io, allocator, .{ .name = "uploadpack.allowfilter", .value = "true" });
     }
 
-    if (!shell_out_to_git and transport_def == .file) {
-        const empty_path = try std.fs.path.join(allocator, &.{ temp_path, "empty" });
-        defer allocator.free(empty_path);
-        var empty = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).clone(io, allocator, server_path, temp_path, empty_path, null, .{ .bare = true });
-        defer empty.deinit(io, allocator);
-        var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
-        try std.testing.expectEqualStrings("main", (try empty.head(io, &head_buffer)).ref.name);
-        try std.testing.expectEqual(null, try empty.readRef(io, .{ .kind = .head, .name = "main" }));
-        try std.testing.expectError(error.FileNotFound, empty.core.repo_dir.access(io, "index", .{}));
-    }
-
-    const first = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
-    if (!shell_out_to_git) try server_repo.addBranch(io, .{ .name = "other" });
-
-    // tag first commit
-    _ = try server_repo.addTag(io, allocator, .{ .name = "v1", .message = "first" });
-
-    // make a commit
-    {
-        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "add goodbye file" });
-    }
-
     // export server repo
     {
         const export_file = try server_repo.core.repo_dir.createFile(io, "git-daemon-export-ok", .{});
@@ -1206,10 +1267,48 @@ fn testClone(
     };
     defer allocator.free(upload_pack_command);
 
-    if (shell_out_to_git) {
+    const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
+        const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
+        defer allocator.free(known_hosts_path);
+
         const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
         defer allocator.free(priv_key_path);
-        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand=ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -o IdentityFile={s}", .{priv_key_path});
+
+        break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
+    } else null;
+    defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
+
+    const Client = rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
+    const clone_opts: net.CloneOpts(void) = .{ .transport = .{ .wire = .{ .ssh = .{
+        .command = ssh_cmd_maybe,
+        .upload_pack_command = upload_pack_command,
+    } } } };
+    if (!shell_out_to_git and (transport_def == .file or server_repo_kind == .xit)) {
+        const empty_path = try std.fs.path.join(allocator, &.{ temp_path, "empty" });
+        defer allocator.free(empty_path);
+        var empty_opts = clone_opts;
+        empty_opts.bare = true;
+        var empty = try Client.clone(io, allocator, remote_url, temp_path, empty_path, null, empty_opts);
+        defer empty.deinit(io, allocator);
+        var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+        try std.testing.expectEqualStrings("main", (try empty.head(io, &head_buffer)).ref.name);
+        try std.testing.expectEqual(null, try empty.readRef(io, .{ .kind = .head, .name = "main" }));
+        try std.testing.expectError(error.FileNotFound, empty.core.repo_dir.access(io, "index", .{}));
+    }
+
+    const first = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "hello.txt", .content = "hello, world!" }} }, .{ .message = "let there be light" });
+    if (!shell_out_to_git) try server_repo.addBranch(io, .{ .name = "other" });
+
+    // tag first commit
+    _ = try server_repo.addTag(io, allocator, .{ .name = "v1", .message = "first" });
+
+    // make a commit
+    {
+        _ = try commitServer(&server_repo, io, allocator, .{ .files = &.{.{ .path = "goodbye.txt", .content = "goodbye, world!" }} }, .{ .message = "add goodbye file" });
+    }
+
+    if (shell_out_to_git) {
+        const ssh_config_arg = try std.fmt.allocPrint(allocator, "core.sshCommand={s}", .{ssh_cmd_maybe orelse "ssh"});
         defer allocator.free(ssh_config_arg);
 
         {
@@ -1368,22 +1467,6 @@ fn testClone(
             goodbye_txt.close(io);
         }
     } else {
-        const ssh_cmd_maybe: ?[]const u8 = if (is_ssh) blk: {
-            const known_hosts_path = try std.fs.path.join(allocator, &.{ temp_path, "known_hosts" });
-            defer allocator.free(known_hosts_path);
-
-            const priv_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key" });
-            defer allocator.free(priv_key_path);
-
-            break :blk try std.fmt.allocPrint(allocator, "ssh -o UserKnownHostsFile=\"{s}\" -o LogLevel=ERROR -o IdentityFile=\"{s}\"", .{ known_hosts_path, priv_key_path });
-        } else null;
-        defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
-
-        const Client = rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
-        const clone_opts: net.CloneOpts(void) = .{ .transport = .{ .wire = .{ .ssh = .{
-            .command = ssh_cmd_maybe,
-            .upload_pack_command = upload_pack_command,
-        } } } };
         inline for (.{ false, true }) |bare| {
             var opts = clone_opts;
             opts.bare = bare;
@@ -1452,6 +1535,7 @@ fn testFetchLarge(
     comptime transport_def: net.TransportDefinition,
     comptime port: u16,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -1472,7 +1556,7 @@ fn testFetchLarge(
     const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
     // build the server tree directly from this project's source files.
@@ -1491,7 +1575,7 @@ fn testFetchLarge(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     // add remote
@@ -1627,6 +1711,7 @@ fn testPushLarge(
     comptime transport_def: net.TransportDefinition,
     comptime port: u16,
     comptime shell_out_to_git: bool,
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -1648,7 +1733,7 @@ fn testPushLarge(
     const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
     defer allocator.free(server_path);
 
-    var server_repo = try rp.Repo(server_repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
+    var server_repo = try rp.Repo(server_repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = server_path, .bare = true });
     defer server_repo.deinit(io, allocator);
 
     try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
@@ -1662,7 +1747,7 @@ fn testPushLarge(
     const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
-    var client_repo = try rp.Repo(repo_kind, .{ .is_test = true }).init(io, allocator, .{ .path = client_path });
+    var client_repo = try rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true }).init(io, allocator, .{ .path = client_path });
     defer client_repo.deinit(io, allocator);
 
     var client_dir = try cwd.openDir(io, client_path, .{});

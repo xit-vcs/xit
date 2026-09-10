@@ -931,8 +931,17 @@ const UploadPack = struct {
             // v1 want line: "want <hex_oid>[ <features>]"
             const after_want = line["want ".len..];
             if (after_want.len < hex_len) return error.ProtocolErrorExpectedOid;
+            const oid_end = std.mem.indexOfAny(u8, after_want, " \r\n") orelse after_want.len;
+            const features = std.mem.trim(u8, after_want[oid_end..], " \r\n");
+            if (wanted_oids.count() == 0) {
+                // git's v0 fetch client omits object-format even for sha-256.
+                // validate an explicit selection; otherwise the oid width must match.
+                if (common.getFeatureValue(features, "object-format")) |format| {
+                    if (!std.mem.eql(u8, format, common.hashName(repo_opts.hash))) return error.ObjectFormatMismatch;
+                }
+            }
+            if (oid_end != hex_len) return error.ProtocolErrorExpectedOid;
             const oid_bytes = after_want[0..hex_len].*;
-            const features = after_want[hex_len..];
 
             if (common.hasFeature(features, "deepen-relative")) {
                 self.deepen_relative = true;

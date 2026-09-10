@@ -21,6 +21,7 @@ pub const tag = @import("./tag.zig");
 pub const undo = @import("./undo.zig");
 pub const ui = @import("./ui.zig");
 pub const net = @import("./net.zig");
+pub const net_pkt = @import("./net/pkt.zig");
 pub const net_server_upload_pack = @import("./net/server/upload_pack.zig");
 pub const net_server_receive_pack = @import("./net/server/receive_pack.zig");
 pub const net_server_http_backend = @import("./net/server/http_backend.zig");

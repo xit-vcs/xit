@@ -194,6 +194,11 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
 
         fn refPkt(allocator: std.mem.Allocator, content: []const u8, found_capabilities: *bool) !Pkt(repo_kind, repo_opts) {
             // the content looks like "<oid> <name>[\x00<capabilities>]"
+            if (!found_capabilities.*) {
+                const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else null;
+                const remote_hash = try parseObjectFormat(caps);
+                if (remote_hash != repo_opts.hash) return error.ObjectFormatMismatch;
+            }
             const oid_len = comptime hash.hexLen(repo_opts.hash);
             if (content.len < oid_len) {
                 return error.InvalidPacket;
@@ -238,6 +243,21 @@ pub fn Pkt(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
             } };
         }
     };
+}
+
+fn parseObjectFormat(caps: ?[]const u8) !hash.HashKind {
+    var iter = std.mem.tokenizeAny(u8, caps orelse return .sha1, " \t\r\n");
+    var result: ?hash.HashKind = null;
+    while (iter.next()) |cap| {
+        if (std.mem.startsWith(u8, cap, "object-format=")) {
+            const kind = std.meta.stringToEnum(hash.HashKind, cap["object-format=".len..]) orelse return error.UnsupportedObjectFormat;
+            if (result) |previous| {
+                if (previous != kind) return error.UnsupportedObjectFormat;
+            }
+            result = kind;
+        }
+    }
+    return result orelse .sha1;
 }
 
 /// dupe the line with its trailing newline (if any) removed
@@ -291,6 +311,10 @@ fn bufferWantWithCaps(
 ) !void {
     var caps_str = std.Io.Writer.Allocating.init(allocator);
     defer caps_str.deinit();
+
+    if (caps.object_format) {
+        try caps_str.writer.writeAll("object-format=" ++ @tagName(repo_opts.hash) ++ " ");
+    }
 
     if (caps.multi_ack_detailed) {
         try caps_str.writer.writeAll("multi_ack_detailed ");
@@ -356,4 +380,50 @@ pub fn bufferWants(
     }
 
     try buf.appendSlice(allocator, "0000");
+}
+
+test "xit advertised object formats" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        local_hash: hash.HashKind,
+        remote_hash: hash.HashKind,
+        format: ?[]const u8,
+        expected_error: ?anyerror,
+    };
+    const cases = [_]Case{
+        .{ .local_hash = .sha1, .remote_hash = .sha1, .format = null, .expected_error = null },
+        .{ .local_hash = .sha1, .remote_hash = .sha1, .format = "sha1", .expected_error = null },
+        .{ .local_hash = .sha1, .remote_hash = .sha1, .format = "sha256", .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha1, .remote_hash = .sha1, .format = "sha512", .expected_error = error.UnsupportedObjectFormat },
+        .{ .local_hash = .sha1, .remote_hash = .sha256, .format = null, .expected_error = error.InvalidPacket },
+        .{ .local_hash = .sha1, .remote_hash = .sha256, .format = "sha1", .expected_error = error.InvalidPacket },
+        .{ .local_hash = .sha1, .remote_hash = .sha256, .format = "sha256", .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha1, .remote_hash = .sha256, .format = "sha512", .expected_error = error.UnsupportedObjectFormat },
+        .{ .local_hash = .sha256, .remote_hash = .sha1, .format = null, .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha256, .remote_hash = .sha1, .format = "sha1", .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha256, .remote_hash = .sha1, .format = "sha256", .expected_error = error.InvalidPacket },
+        .{ .local_hash = .sha256, .remote_hash = .sha1, .format = "sha512", .expected_error = error.UnsupportedObjectFormat },
+        .{ .local_hash = .sha256, .remote_hash = .sha256, .format = null, .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha256, .remote_hash = .sha256, .format = "sha1", .expected_error = error.ObjectFormatMismatch },
+        .{ .local_hash = .sha256, .remote_hash = .sha256, .format = "sha256", .expected_error = null },
+        .{ .local_hash = .sha256, .remote_hash = .sha256, .format = "sha512", .expected_error = error.UnsupportedObjectFormat },
+    };
+    inline for (cases) |case| {
+        var buffer: std.ArrayList(u8) = .empty;
+        defer buffer.deinit(allocator);
+        const oid = [_]u8{'1'} ** hash.hexLen(case.remote_hash);
+        const caps = if (case.format) |name| "\x00object-format=" ++ name ++ "\n" else "\n";
+        try appendPktLine(allocator, &buffer, "{s} refs/heads/main{s}", .{ &oid, caps });
+        var found = false;
+        var consumed: usize = 0;
+        const parsed = Pkt(.xit, .{ .hash = case.local_hash }).initMaybe(allocator, buffer.items, &found, &consumed);
+        if (case.expected_error) |expected| {
+            try std.testing.expectError(expected, parsed);
+        } else {
+            var result = (try parsed).?;
+            defer result.deinit(allocator);
+            try std.testing.expectEqualStrings(&oid, &result.ref.head.oid);
+            try std.testing.expectEqual(buffer.items.len, consumed);
+        }
+    }
 }

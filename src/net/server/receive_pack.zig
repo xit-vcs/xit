@@ -350,26 +350,25 @@ const ReceivePack = struct {
             const null_pos = std.mem.indexOfScalar(u8, line, 0);
             const line_data = if (null_pos) |pos| line[0..pos] else line;
 
-            if (null_pos) |pos| {
-                if (pos < line.len) {
-                    const features = line[pos + 1 ..];
-                    if (common.hasFeature(features, "report-status")) {
-                        self.report_status = true;
-                    }
-                    if (common.hasFeature(features, "report-status-v2")) {
-                        self.report_status_v2 = true;
-                    }
-                    if (common.hasFeature(features, "side-band-64k")) {
-                        self.use_sideband = true;
-                    }
-                    if (common.hasFeature(features, "quiet")) self.quiet = true;
-                    if (common.hasFeature(features, "atomic")) {
-                        self.atomic = true;
-                    }
-                    const obj_hash = common.getFeatureValue(features, "object-format") orelse "sha1";
-                    const repo_hash_name = common.hashName(hash_kind);
-                    if (!std.mem.eql(u8, repo_hash_name, obj_hash)) return error.UnsupportedObjectFormat;
-                }
+            const features = if (null_pos) |pos| std.mem.trim(u8, line[pos + 1 ..], " \r\n") else "";
+
+            if (common.hasFeature(features, "report-status")) {
+                self.report_status = true;
+            }
+            if (common.hasFeature(features, "report-status-v2")) {
+                self.report_status_v2 = true;
+            }
+            if (common.hasFeature(features, "side-band-64k")) {
+                self.use_sideband = true;
+            }
+            if (common.hasFeature(features, "quiet")) self.quiet = true;
+            if (common.hasFeature(features, "atomic")) {
+                self.atomic = true;
+            }
+
+            if (ref_updates.items.len == 0) {
+                const format = common.getFeatureValue(features, "object-format") orelse "sha1";
+                if (!std.mem.eql(u8, format, common.hashName(hash_kind))) return error.ObjectFormatMismatch;
             }
 
             // parse "<old_oid> <new_oid> <refname>" and append
