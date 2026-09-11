@@ -678,7 +678,8 @@ fn cloneWithTransport(
 }
 
 pub fn cloneAuto(
-    comptime any_repo_opts: rp.AnyRepoOpts(.xit),
+    comptime repo_kind: rp.RepoKind,
+    comptime any_repo_opts: rp.AnyRepoOpts(repo_kind),
     io: std.Io,
     allocator: std.mem.Allocator,
     url: []const u8,
@@ -686,20 +687,20 @@ pub fn cloneAuto(
     work_path: []const u8,
     global_config_path: ?[]const u8,
     opts: CloneOpts(any_repo_opts.ProgressCtx),
-) !rp.AnyRepo(.xit, any_repo_opts) {
+) !rp.AnyRepo(repo_kind, any_repo_opts) {
     var cwd = try std.Io.Dir.openDirAbsolute(io, cwd_path, .{});
     defer cwd.close(io);
     const transport_def = TransportDefinition.init(io, cwd, url) orelse return error.UnsupportedUrl;
     switch (transport_def) {
         .file => switch (try net_file.sourceHash(io, allocator, cwd_path, url)) {
-            inline else => |kind| return @unionInit(rp.AnyRepo(.xit, any_repo_opts), @tagName(kind), try clone(.xit, any_repo_opts.toRepoOptsWithHash(kind), io, allocator, url, cwd_path, work_path, global_config_path, opts)),
+            inline else => |kind| return @unionInit(rp.AnyRepo(repo_kind, any_repo_opts), @tagName(kind), try clone(repo_kind, any_repo_opts.toRepoOptsWithHash(kind), io, allocator, url, cwd_path, work_path, global_config_path, opts)),
         },
         .wire => |wire_kind| {
             var arena = std.heap.ArenaAllocator.init(allocator);
             defer arena.deinit();
             var wire_opts = opts.transport.wire;
             if (wire_kind == .ssh and wire_opts.ssh.command == null) {
-                const sections = try cfg.readGlobal(.xit, any_repo_opts.toRepoOpts(), io, allocator, arena.allocator(), global_config_path);
+                const sections = try cfg.readGlobal(repo_kind, any_repo_opts.toRepoOpts(), io, allocator, arena.allocator(), global_config_path);
                 wire_opts.ssh.command = net_ssh.commandFromConfig(sections);
             }
             var connection = try net_wire.Connection(any_repo_opts.net_buffer_size).init(io, allocator, wire_kind, wire_opts);
@@ -709,13 +710,13 @@ pub fn cloneAuto(
             switch (try connection.discoverHash(io, allocator, any_repo_opts.ProgressCtx, opts.transport.progress_ctx)) {
                 inline else => |kind| {
                     const repo_opts = comptime any_repo_opts.toRepoOptsWithHash(kind);
-                    var prepared: ?net_transport.Transport(.xit, repo_opts) = .{
-                        .wire = net_wire.WireTransport(.xit, repo_opts).initConnection(connection, opts.transport),
+                    var prepared: ?net_transport.Transport(repo_kind, repo_opts) = .{
+                        .wire = net_wire.WireTransport(repo_kind, repo_opts).initConnection(connection, opts.transport),
                     };
                     owns_connection = false;
                     defer if (prepared) |*transport| transport.deinit(io, allocator);
                     if (prepared) |*transport| try transport.wire.finishConnect(io, allocator);
-                    return @unionInit(rp.AnyRepo(.xit, any_repo_opts), @tagName(kind), try cloneWithTransport(.xit, repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts, &prepared));
+                    return @unionInit(rp.AnyRepo(repo_kind, any_repo_opts), @tagName(kind), try cloneWithTransport(repo_kind, repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts, &prepared));
                 },
             }
         },

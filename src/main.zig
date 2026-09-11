@@ -149,8 +149,7 @@ pub fn run(
                 defer allocator.free(work_path);
                 var clear_line = false;
                 var progress_node: ?std.Progress.Node = null;
-                const CloneRepo = if (repo_kind == .xit) rp.AnyRepo(repo_kind, any_repo_opts) else rp.Repo(repo_kind, any_repo_opts.toRepoOpts());
-                var repo = try CloneRepo.clone(
+                var repo = try rp.AnyRepo(repo_kind, any_repo_opts).clone(
                     io,
                     allocator,
                     clone_cmd.url,
@@ -230,6 +229,9 @@ pub fn runPrint(
             error.BrokenPipe => return,
             error.BareRepository => "this operation requires a worktree and cannot run on a bare repository\n",
             error.UnsupportedRepoLayout => "this repository layout is not supported\n",
+            error.UnsupportedOperationForSha256 => "the requested operation is not supported for this sha256 git repository\n",
+            error.UnexpectedHashKind, error.ObjectFormatMismatch => "the repository object format does not match the selected hash\n",
+            error.UnsupportedObjectFormat => "this repository object format is not supported\n",
             error.UnexpectedFilesInTargetDirectory => "the destination directory must be empty\n",
             error.RepoFormatTooOld =>
             \\this repo was made by an older version of xit,

@@ -11,11 +11,15 @@ test "git fetch small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     try testFetch(.git, .git, .{ .wire = .http }, 3001, .sha1, io, allocator);
+    try testFetch(.git, .git, .{ .wire = .http }, 3002, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetch(.git, .git, .{ .wire = .raw }, 3002, .sha1, io, allocator);
-        try testFetch(.git, .git, .{ .wire = .ssh }, 3003, .sha1, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .raw }, 3003, .sha1, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .raw }, 3004, .sha256, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .ssh }, 3005, .sha1, io, allocator);
+        try testFetch(.git, .git, .{ .wire = .ssh }, 3006, .sha256, io, allocator);
     }
     try testFetch(.git, .git, .file, 0, .sha1, io, allocator);
+    try testFetch(.git, .git, .file, 0, .sha256, io, allocator);
 }
 
 test "xit fetch small" {
@@ -37,9 +41,12 @@ test "git push small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     try testPush(.git, .git, .{ .wire = .http }, 3201, .sha1, io, allocator);
+    try testPush(.git, .git, .{ .wire = .http }, 3202, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPush(.git, .git, .{ .wire = .raw }, 3202, .sha1, io, allocator);
-        try testPush(.git, .git, .{ .wire = .ssh }, 3203, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .raw }, 3203, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .raw }, 3204, .sha256, io, allocator);
+        try testPush(.git, .git, .{ .wire = .ssh }, 3205, .sha1, io, allocator);
+        try testPush(.git, .git, .{ .wire = .ssh }, 3206, .sha256, io, allocator);
     }
     try testPush(.git, .git, .file, 0, .sha1, io, allocator);
     try testPush(.git, .git, .file, 0, .sha256, io, allocator);
@@ -68,9 +75,12 @@ test "git clone small" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     try testClone(.git, .git, .{ .wire = .http }, 3401, false, .sha1, io, allocator);
+    try testClone(.git, .git, .{ .wire = .http }, 3402, false, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testClone(.git, .git, .{ .wire = .raw }, 3402, false, .sha1, io, allocator);
-        try testClone(.git, .git, .{ .wire = .ssh }, 3403, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3403, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .raw }, 3404, false, .sha256, io, allocator);
+        try testClone(.git, .git, .{ .wire = .ssh }, 3405, false, .sha1, io, allocator);
+        try testClone(.git, .git, .{ .wire = .ssh }, 3406, false, .sha256, io, allocator);
     }
     try testClone(.git, .git, .file, 0, false, .sha1, io, allocator);
     try testClone(.git, .git, .file, 0, false, .sha256, io, allocator);
@@ -112,11 +122,15 @@ test "git fetch large" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     try testFetchLarge(.git, .git, .{ .wire = .http }, 3701, false, .sha1, io, allocator);
+    try testFetchLarge(.git, .git, .{ .wire = .http }, 3702, false, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3702, false, .sha1, io, allocator);
-        try testFetchLarge(.git, .git, .{ .wire = .ssh }, 3703, false, .sha1, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3703, false, .sha1, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .raw }, 3704, false, .sha256, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .ssh }, 3705, false, .sha1, io, allocator);
+        try testFetchLarge(.git, .git, .{ .wire = .ssh }, 3706, false, .sha256, io, allocator);
     }
     try testFetchLarge(.git, .git, .file, 0, false, .sha1, io, allocator);
+    try testFetchLarge(.git, .git, .file, 0, false, .sha256, io, allocator);
 }
 
 test "git fetch large subprocess" {
@@ -136,11 +150,15 @@ test "git push large" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     try testPushLarge(.git, .git, .{ .wire = .http }, 3901, false, .sha1, io, allocator);
+    try testPushLarge(.git, .git, .{ .wire = .http }, 3902, false, .sha256, io, allocator);
     if (.windows != builtin.os.tag) {
-        try testPushLarge(.git, .git, .{ .wire = .raw }, 3902, false, .sha1, io, allocator);
-        try testPushLarge(.git, .git, .{ .wire = .ssh }, 3903, false, .sha1, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .raw }, 3903, false, .sha1, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .raw }, 3904, false, .sha256, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .ssh }, 3905, false, .sha1, io, allocator);
+        try testPushLarge(.git, .git, .{ .wire = .ssh }, 3906, false, .sha256, io, allocator);
     }
     try testPushLarge(.git, .git, .file, 0, false, .sha1, io, allocator);
+    try testPushLarge(.git, .git, .file, 0, false, .sha256, io, allocator);
 }
 
 test "git push large subprocess" {
@@ -770,17 +788,20 @@ fn testFetch(
         try std.testing.expectEqualStrings(&commit2, &oid_master);
     }
 
-    // hash-mismatch checks currently cover only the xit backend.
-    if (repo_kind == .xit) {
+    // reject incompatible object formats before changing refs
+    {
         try server_repo.addConfig(io, allocator, .{ .name = "http.receivepack", .value = "true" });
         const other_hash: xit.hash.HashKind = if (hash_kind == .sha1) .sha256 else .sha1;
-        const Other = rp.Repo(.xit, .{ .hash = other_hash, .is_test = true });
+        const Other = rp.Repo(repo_kind, .{ .hash = other_hash, .is_test = true });
         const other_path = try std.fs.path.join(allocator, &.{ temp_path, "mismatched" });
         defer allocator.free(other_path);
         var other = try Other.init(io, allocator, .{ .path = other_path });
         defer other.deinit(io, allocator);
         try other.addRemote(io, allocator, .{ .name = "origin", .value = remote_url });
-        const receive_pack_command = try std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path});
+        const receive_pack_command = try switch (server_repo_kind) {
+            .xit => std.fmt.allocPrint(allocator, "{s}/zig-out/bin/xit receive-pack", .{cwd_path}),
+            .git => allocator.dupe(u8, "git-receive-pack"),
+        };
         defer allocator.free(receive_pack_command);
         const opts: net.Opts(void) = .{ .wire = .{ .ssh = .{
             .command = ssh_cmd_maybe,
@@ -797,7 +818,7 @@ fn testFetch(
         defer allocator.free(clone_path);
         // file urls here are relative to the parent of client/, not client/ itself.
         const clone_url = if (transport_def == .file) server_path else remote_url;
-        try std.testing.expectError(mismatch_error, rp.AnyRepo(.xit, .{ .hash = other_hash, .is_test = true }).clone(io, allocator, clone_url, temp_path, clone_path, null, .{ .transport = opts }));
+        try std.testing.expectError(mismatch_error, rp.AnyRepo(repo_kind, .{ .hash = other_hash, .is_test = true }).clone(io, allocator, clone_url, temp_path, clone_path, null, .{ .transport = opts }));
     }
 }
 
@@ -1278,22 +1299,6 @@ fn testClone(
     } else null;
     defer if (ssh_cmd_maybe) |ssh_cmd| allocator.free(ssh_cmd);
 
-    const global_path = try std.fs.path.join(allocator, &.{ temp_path, "global-config" });
-    defer allocator.free(global_path);
-    if (repo_kind == .xit and is_ssh) {
-        const command = ssh_cmd_maybe orelse return error.MissingSshCommand;
-        const contents = try std.fmt.allocPrint(allocator, "[core]\nsshCommand = {s}\n", .{command});
-        defer allocator.free(contents);
-        const file = try temp.dir.createFile(io, "global-config", .{});
-        defer file.close(io);
-        try file.writeStreamingAll(io, contents);
-        var config_arena = std.heap.ArenaAllocator.init(allocator);
-        defer config_arena.deinit();
-        const sections = try xit.config.readGlobal(.xit, .{}, io, allocator, config_arena.allocator(), global_path);
-        try std.testing.expectEqualStrings(command, sections.get("core").?.get("sshcommand").?);
-    }
-
-    const Client = if (repo_kind == .xit) rp.AnyRepo(.xit, .{ .is_test = true }) else rp.Repo(repo_kind, .{ .hash = hash_kind, .is_test = true });
     const clone_opts: net.CloneOpts(void) = .{ .transport = .{ .wire = .{ .ssh = .{
         .command = ssh_cmd_maybe,
         .upload_pack_command = upload_pack_command,
@@ -1303,12 +1308,10 @@ fn testClone(
         defer allocator.free(empty_path);
         var empty_opts = clone_opts;
         empty_opts.bare = true;
-        var empty_result = try Client.clone(io, allocator, remote_url, temp_path, empty_path, null, empty_opts);
+        var empty_result = try rp.AnyRepo(repo_kind, .{ .is_test = true }).clone(io, allocator, remote_url, temp_path, empty_path, null, empty_opts);
         defer empty_result.deinit(io, allocator);
-        const empty = if (repo_kind == .xit) blk: {
-            try std.testing.expectEqual(hash_kind, std.meta.activeTag(empty_result));
-            break :blk &@field(empty_result, @tagName(hash_kind));
-        } else &empty_result;
+        try std.testing.expectEqual(hash_kind, std.meta.activeTag(empty_result));
+        const empty = &@field(empty_result, @tagName(hash_kind));
         var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         try std.testing.expectEqualStrings("main", (try empty.head(io, &head_buffer)).ref.name);
         try std.testing.expectEqual(null, try empty.readRef(io, .{ .kind = .head, .name = "main" }));
@@ -1486,26 +1489,33 @@ fn testClone(
             goodbye_txt.close(io);
         }
     } else {
+        const global_path = try std.fs.path.join(allocator, &.{ temp_path, "global-config" });
+        defer allocator.free(global_path);
+        if (is_ssh) {
+            const command = ssh_cmd_maybe orelse return error.MissingSshCommand;
+            const contents = try std.fmt.allocPrint(allocator, "[core]\nsshCommand = {s}\n", .{command});
+            defer allocator.free(contents);
+            try temp.dir.writeFile(io, .{ .sub_path = "global-config", .data = contents });
+        }
+
         for ([_]bool{ false, true }) |bare| {
             var opts = clone_opts;
             opts.bare = bare;
-            const config_path: ?[]const u8 = if (repo_kind == .xit and is_ssh) global_path else null;
-            if (repo_kind == .xit and is_ssh and bare) opts.transport.wire.ssh.command = null;
-            const file_url = if (repo_kind == .xit and transport_def == .file and bare)
+            const config_path: ?[]const u8 = if (is_ssh) global_path else null;
+            if (is_ssh and bare) opts.transport.wire.ssh.command = null;
+            const file_url = if (transport_def == .file and bare)
                 try std.fmt.allocPrint(allocator, "file://{s}{s}", .{ if (server_path[0] == '/') "" else "/", server_path })
             else
                 null;
             defer if (file_url) |url| allocator.free(url);
-            var clone_result = try Client.clone(io, allocator, file_url orelse remote_url, temp_path, client_path, config_path, opts);
+            var clone_result = try rp.AnyRepo(repo_kind, .{ .is_test = true }).clone(io, allocator, file_url orelse remote_url, temp_path, client_path, config_path, opts);
             defer cwd.deleteTree(io, client_path) catch {};
             defer clone_result.deinit(io, allocator);
-            const client_repo = if (repo_kind == .xit) blk: {
-                try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
-                var reopened = try Client.open(io, allocator, .{ .path = client_path });
-                defer reopened.deinit(io, allocator);
-                try std.testing.expectEqual(hash_kind, std.meta.activeTag(reopened));
-                break :blk &@field(clone_result, @tagName(hash_kind));
-            } else &clone_result;
+            try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
+            var reopened = try rp.AnyRepo(repo_kind, .{ .is_test = true }).open(io, allocator, .{ .path = client_path });
+            defer reopened.deinit(io, allocator);
+            try std.testing.expectEqual(hash_kind, std.meta.activeTag(reopened));
+            const client_repo = &@field(clone_result, @tagName(hash_kind));
 
             var current_branch_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             try std.testing.expectEqualStrings("main", (try client_repo.head(io, &current_branch_buffer)).ref.name);
@@ -1549,12 +1559,10 @@ fn testClone(
                     try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
                 },
             }
-            var clone_result = try Client.clone(io, allocator, remote_url, temp_path, client_path, null, .{ .bare = true });
+            var clone_result = try rp.AnyRepo(repo_kind, .{ .is_test = true }).clone(io, allocator, remote_url, temp_path, client_path, null, .{ .bare = true });
             defer clone_result.deinit(io, allocator);
-            const client_repo = if (repo_kind == .xit) blk: {
-                try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
-                break :blk &@field(clone_result, @tagName(hash_kind));
-            } else &clone_result;
+            try std.testing.expectEqual(hash_kind, std.meta.activeTag(clone_result));
+            const client_repo = &@field(clone_result, @tagName(hash_kind));
             var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
             try std.testing.expectEqualStrings(&detached, (try client_repo.head(io, &head_buffer)).oid);
             var log = try client_repo.log(io, allocator, .{});

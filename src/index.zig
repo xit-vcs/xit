@@ -129,6 +129,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // ignoring version 3 and 4 for now
                     self.version = try reader.interface.takeInt(u32, .big);
                     if (self.version != 2) {
+                        if (repo_opts.hash == .sha256) return error.UnsupportedOperationForSha256;
                         return error.InvalidVersion;
                     }
 
@@ -160,6 +161,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                                 break :blk writer.written();
                             },
                         };
+                        if (repo_opts.hash == .sha256 and
+                            (entry.flags.extended or entry.mode.content.object_type == .gitlink or entry.mode.content.object_type == .tree))
+                            return error.UnsupportedOperationForSha256;
                         if (entry.mode.content.unix_permission != 0o755) { // ensure mode is valid
                             entry.mode.content.unix_permission = 0o644;
                         }
@@ -176,11 +180,27 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         try self.addEntry(entry);
                     }
 
+                    if (repo_opts.hash == .sha256) {
+                        const length = try index_file.length(io);
+                        if (length < hash.byteLen(repo_opts.hash)) return error.InvalidIndex;
+                        const checksum_offset = length - hash.byteLen(repo_opts.hash);
+                        while (reader.logicalPos() < checksum_offset) {
+                            if (checksum_offset - reader.logicalPos() < 8) return error.InvalidIndex;
+                            const extension = try reader.interface.takeArray(4);
+                            // lowercase extensions change how entries are interpreted
+                            if (!std.ascii.isUpper(extension[0])) return error.UnsupportedOperationForSha256;
+                            const size = try reader.interface.takeInt(u32, .big);
+                            if (size > checksum_offset - reader.logicalPos()) return error.InvalidIndex;
+                            try reader.seekTo(reader.logicalPos() + size);
+                        }
+                        if (reader.logicalPos() != checksum_offset) return error.InvalidIndex;
+                    }
+
                     // TODO: check the checksum
                     // skipping for now because it will probably require changing
                     // how i read the data above. i need access to the raw bytes
                     // (before the big endian and type conversions) to do the hashing.
-                    _ = try reader.interface.takeArray(hash.byteLen(.sha1));
+                    _ = try reader.interface.takeArray(hash.byteLen(repo_opts.hash));
                 },
                 .xit => {
                     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "index"))) |index_cursor| {
@@ -609,7 +629,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     self.entries.sort(SortCtx{ .keys = self.entries.keys() });
 
                     // start the checksum
-                    var hasher = hash.Hasher(.sha1).init(.{});
+                    var hasher = hash.Hasher(repo_opts.hash).init(.{});
 
                     // calculate entry count
                     var entry_count: u32 = 0;
@@ -667,9 +687,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // write the checksum
-                    var overall_sha1_buffer = [_]u8{0} ** hash.byteLen(.sha1);
-                    hasher.final(&overall_sha1_buffer);
-                    try lock_file.writeStreamingAll(io, &overall_sha1_buffer);
+                    try lock_file.writeStreamingAll(io, &hasher.finalResult());
                 },
                 .xit => {
                     const DB = rp.Repo(repo_kind, repo_opts).DB;

@@ -7,13 +7,13 @@ test "sign commit and tag" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     if (.windows != builtin.os.tag) {
-        try testSign(.git, .{ .is_test = true }, io, allocator);
+        try testSign(.sha1, io, allocator);
+        try testSign(.sha256, io, allocator);
     }
 }
 
 fn testSign(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
+    comptime hash_kind: xit.hash.HashKind,
     io: std.Io,
     allocator: std.mem.Allocator,
 ) !void {
@@ -24,7 +24,7 @@ fn testSign(
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = temp_path });
+    var repo = try rp.Repo(.git, .{ .is_test = true, .hash = hash_kind }).init(io, allocator, .{ .path = temp_path });
     defer repo.deinit(io, allocator);
 
     // create priv key
@@ -49,10 +49,11 @@ fn testSign(
     defer allocator.free(pub_key_path);
     const pub_key_file = try temp.dir.createFile(io, "key.pub", .{});
     defer pub_key_file.close(io);
-    try pub_key_file.writeStreamingAll(io,
+    const pub_key =
         \\ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKeIs8mJqigBZ5y84J4COgnAJJ5bHPKy+lM2SliMXbYm radar@roark
         \\
-    );
+    ;
+    try pub_key_file.writeStreamingAll(io, pub_key);
     if (.windows != builtin.os.tag) {
         try pub_key_file.setPermissions(io, @enumFromInt(0o600));
     }
@@ -73,7 +74,18 @@ fn testSign(
     // add a tag
     const tag_oid = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
 
-    // TODO: verify the objects contain signatures
-    _ = commit_oid;
-    _ = tag_oid;
+    // verify the signatures with git
+    try temp.dir.writeFile(io, .{ .sub_path = "allowed_signers", .data = "radar@roark " ++ pub_key });
+    for ([_][]const u8{ "verify-commit", "verify-tag" }, [_][]const u8{ &commit_oid, &tag_oid }) |command, oid| {
+        const result = try std.process.run(allocator, io, .{
+            .argv = &.{ "git", "-c", "gpg.ssh.allowedSignersFile=allowed_signers", command, oid },
+            .cwd = .{ .path = temp_path },
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        if (result.term != .exited or result.term.exited != 0) {
+            std.debug.print("git {s}: {s}", .{ command, result.stderr });
+            return error.GitCommandFailed;
+        }
+    }
 }

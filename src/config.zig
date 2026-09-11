@@ -129,6 +129,19 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             const var_name = try lowerAlloc(self.arena.allocator(), var_name_orig);
             const var_value = try self.arena.allocator().dupe(u8, input.value);
 
+            // changing the config cannot convert the repository's objects or index
+            if (repo_kind == .git) {
+                if (std.mem.eql(u8, section_name, "extensions")) {
+                    if (std.mem.eql(u8, var_name, "objectformat")) {
+                        const kind = std.meta.stringToEnum(hash.HashKind, var_value) orelse return error.UnsupportedObjectFormat;
+                        if (kind != repo_opts.hash) return error.UnexpectedHashKind;
+                    } else if (repo_opts.hash == .sha256) return error.UnsupportedOperationForSha256;
+                }
+                if (repo_opts.hash == .sha256 and std.mem.eql(u8, section_name, "core") and
+                    std.mem.eql(u8, var_name, "repositoryformatversion") and !std.mem.eql(u8, var_value, "1"))
+                    return error.UnsupportedOperationForSha256;
+            }
+
             for ([_]*Sections{ &self.local_sections, &self.sections }) |sections| {
                 const variables = try sections.getOrPut(self.arena.allocator(), section_name);
                 if (!variables.found_existing) {
@@ -164,6 +177,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
             const section_name = try self.arena.allocator().dupe(u8, input.name[0..last_dot_index]);
             const var_name = try self.arena.allocator().dupe(u8, input.name[last_dot_index + 1 ..]);
+
+            if (repo_kind == .git and repo_opts.hash == .sha256) {
+                if (std.ascii.eqlIgnoreCase(input.name, "extensions.objectformat") or
+                    std.ascii.eqlIgnoreCase(input.name, "core.repositoryformatversion"))
+                    return error.UnsupportedOperationForSha256;
+            }
 
             // only the repo's own config can be removed. a variable that is
             // only in the global config is not considered to exist here.
@@ -495,9 +514,9 @@ fn parseFile(
             .section_header => |section_header| {
                 if (current_section_name_maybe) |current_section_name| {
                     try sections.put(arena_allocator, current_section_name, current_variables);
-                    current_variables = Variables.empty;
                 }
                 current_section_name_maybe = section_header;
+                current_variables = sections.get(section_header) orelse .empty;
             },
             .variable => |variable| {
                 try current_variables.put(arena_allocator, variable.name, variable.value);

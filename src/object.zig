@@ -531,19 +531,20 @@ pub fn writeCommit(
         // sign if the config asks for it
         if (try signingKey(repo_kind, repo_opts, &config, "commit")) |signing_key| {
             const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
-
-            var header_lines: std.ArrayList([]const u8) = .empty;
-            defer header_lines.deinit(allocator);
-            for (sig_lines, 0..) |line, i| {
-                const sig_line = if (i == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "gpgsig {s}", .{line})
-                else
-                    try std.fmt.allocPrint(arena.allocator(), " {s}", .{line});
-                try header_lines.append(allocator, sig_line);
-            }
+            const sig_header = switch (repo_opts.hash) {
+                .sha1 => "gpgsig",
+                .sha256 => "gpgsig-sha256",
+            };
 
             const message = metadata_lines.pop() orelse unreachable; // remove the message
-            try metadata_lines.appendSlice(arena.allocator(), header_lines.items); // add the sig
+            for (sig_lines, 0..) |line, i| {
+                const sig_line = if (i == 0)
+                    try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ sig_header, line })
+                else
+                    try std.fmt.allocPrint(arena.allocator(), " {s}", .{line});
+                try metadata_lines.append(arena.allocator(), sig_line);
+            }
+
             try metadata_lines.append(arena.allocator(), message); // add the message back
         }
 
@@ -634,7 +635,10 @@ pub fn writeTag(
 
         // sign if the config asks for it
         if (try signingKey(repo_kind, repo_opts, &config, "tag")) |signing_key| {
+            // include the newline that separates the content from the signature
+            try metadata_lines.append(arena.allocator(), "");
             const sig_lines = try sign(repo_kind, repo_opts, state.readOnly(), io, allocator, &arena, metadata_lines.items, signing_key);
+            _ = metadata_lines.pop();
             try metadata_lines.appendSlice(arena.allocator(), sig_lines);
         }
 

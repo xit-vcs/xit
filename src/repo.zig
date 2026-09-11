@@ -419,11 +419,21 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     };
                     var config = try self.listConfig(io, allocator);
                     defer config.deinit();
-                    var is_bare = false;
-                    if (config.local_sections.get("core")) |vars| {
-                        if (vars.contains("worktree")) return error.UnsupportedRepoLayout;
-                        if (vars.get("bare")) |value| is_bare = cfg.parseBool(value);
+                    const extensions: cfg.Variables = config.local_sections.get("extensions") orelse .empty;
+                    const core: cfg.Variables = config.local_sections.get("core") orelse .empty;
+                    const format = extensions.get("objectformat") orelse "sha1";
+                    const hash_kind = std.meta.stringToEnum(hash.HashKind, format) orelse return error.UnsupportedObjectFormat;
+                    if (hash_kind != repo_opts.hash) return error.UnexpectedHashKind;
+                    if (repo_opts.hash == .sha256) {
+                        // other repository extensions may require storage we don't maintain
+                        for (extensions.keys()) |name| {
+                            if (!std.mem.eql(u8, name, "objectformat")) return error.UnsupportedOperationForSha256;
+                        }
+                        const version = core.get("repositoryformatversion") orelse return error.UnsupportedOperationForSha256;
+                        if (!std.mem.eql(u8, version, "1")) return error.UnsupportedOperationForSha256;
                     }
+                    if (core.contains("worktree")) return error.UnsupportedRepoLayout;
+                    const is_bare = if (core.get("bare")) |value| cfg.parseBool(value) else false;
                     if (metadata_at_root and !is_bare) return error.UnsupportedRepoLayout;
                     return self;
                 },
@@ -1877,16 +1887,11 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
             const hash_kind: hash.HashKind = if (any_repo_opts.hash) |hash_kind| hash_kind else blk: {
                 switch (repo_kind) {
                     .git => {
-                        var probe = try Repo(.git, .{}).open(io, allocator, init_opts);
-                        defer probe.deinit(io, allocator);
-                        var config = try probe.listConfig(io, allocator);
-                        defer config.deinit();
-                        if (config.local_sections.get("extensions")) |vars| {
-                            if (vars.get("objectformat")) |format| {
-                                break :blk std.meta.stringToEnum(hash.HashKind, format) orelse return error.InvalidHashKind;
-                            }
-                        }
-                        break :blk .sha1;
+                        const repo = Repo(.git, any_repo_opts.toRepoOptsWithHash(.sha1)).open(io, allocator, init_opts) catch |err| switch (err) {
+                            error.UnexpectedHashKind => break :blk .sha256,
+                            else => return err,
+                        };
+                        return .{ .sha1 = repo };
                     },
                     .xit => {
                         const xitdb = @import("xitdb");
@@ -1923,11 +1928,10 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
             global_config_path: ?[]const u8,
             opts: net.CloneOpts(any_repo_opts.ProgressCtx),
         ) !AnyRepo(repo_kind, any_repo_opts) {
-            if (repo_kind != .xit) @compileError("automatic cloning is only supported by the xit backend");
             if (comptime any_repo_opts.hash) |kind| {
                 return @unionInit(@This(), @tagName(kind), try Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(kind)).clone(io, allocator, url, cwd_path, work_path, global_config_path, opts));
             }
-            return net.cloneAuto(any_repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts);
+            return net.cloneAuto(repo_kind, any_repo_opts, io, allocator, url, cwd_path, work_path, global_config_path, opts);
         }
 
         pub fn deinit(self: *AnyRepo(repo_kind, any_repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
