@@ -231,6 +231,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
         is_stateless: bool,
         have_refs: bool,
         connected: bool,
+        request_sent: bool,
         opts: net_transport.Opts(repo_opts.ProgressCtx),
 
         pub fn init(
@@ -261,6 +262,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 .is_stateless = connection.wire_state.* == .http,
                 .have_refs = false,
                 .connected = false,
+                .request_sent = false,
                 .opts = opts,
             };
         }
@@ -333,6 +335,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             }
 
             self.connected = true;
+            self.request_sent = false;
         }
 
         pub fn capabilities(self: *const WireTransport(repo_kind, repo_opts)) net_transport.Capabilities {
@@ -415,6 +418,8 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                     try stream.write(allocator, &empty, empty.len);
                 }
             }
+
+            self.request_sent = true;
 
             if (0 == git_push.specs.items.len) {
                 git_push.unpack_ok = true;
@@ -512,6 +517,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             try buffer.appendSlice(allocator, "0009done\n");
 
             try self.negotiationStep(io, allocator, buffer.items);
+            self.request_sent = true;
 
             if (!self.caps.multi_ack and !self.caps.multi_ack_detailed) {
                 var pkt = try self.recvPkt(allocator);
@@ -706,7 +712,8 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             allocator: std.mem.Allocator,
         ) void {
             const flush = "0000";
-            if (self.connected and !self.is_stateless) {
+            // the server may have closed after the request.
+            if (self.connected and !self.is_stateless and !self.request_sent) {
                 if (self.connection.wire_stream) |*stream| {
                     stream.write(allocator, flush, flush.len) catch {};
                 }
