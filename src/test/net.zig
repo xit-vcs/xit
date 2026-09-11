@@ -1336,13 +1336,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--depth", "1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--upload-pack", upload_pack_command, "--depth", "1", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--depth", "1", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--depth", "1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1365,13 +1365,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "--upload-pack", upload_pack_command, "--unshallow" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "--quiet", "--upload-pack", upload_pack_command, "--unshallow" }
                 else
-                    &.{ "git", "pull", "--unshallow" },
+                    &.{ "git", "pull", "--quiet", "--unshallow" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1391,13 +1391,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--shallow-since=2000-01-01", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--upload-pack", upload_pack_command, "--shallow-since=2000-01-01", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--shallow-since=2000-01-01", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--shallow-since=2000-01-01", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1417,13 +1417,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--shallow-exclude=v1", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--upload-pack", upload_pack_command, "--shallow-exclude=v1", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--shallow-exclude=v1", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--shallow-exclude=v1", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1443,13 +1443,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--filter=blob:none", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--upload-pack", upload_pack_command, "--filter=blob:none", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--filter=blob:none", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--filter=blob:none", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1469,13 +1469,13 @@ fn testClone(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "clone", "--upload-pack", upload_pack_command, "--filter=tree:0", remote_url, "client" }
+                    &.{ "git", "-c", ssh_config_arg, "clone", "--quiet", "--upload-pack", upload_pack_command, "--filter=tree:0", remote_url, "client" }
                 else
-                    &.{ "git", "clone", "--filter=tree:0", remote_url, "client" },
+                    &.{ "git", "clone", "--quiet", "--filter=tree:0", remote_url, "client" },
                 .cwd = .{ .path = temp_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1665,13 +1665,13 @@ fn testFetchLarge(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "pull", "--upload-pack", upload_pack_command, "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "pull", "--quiet", "--upload-pack", upload_pack_command, "origin", "master" }
                 else
-                    &.{ "git", "pull", "origin", "master" },
+                    &.{ "git", "pull", "--quiet", "origin", "master" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1694,13 +1694,13 @@ fn testFetchLarge(
         {
             var process = try std.process.spawn(io, .{
                 .argv = if (is_ssh)
-                    &.{ "git", "-c", ssh_config_arg, "fetch", "--upload-pack", upload_pack_command, "origin", "master" }
+                    &.{ "git", "-c", ssh_config_arg, "fetch", "--quiet", "--upload-pack", upload_pack_command, "origin", "master" }
                 else
-                    &.{ "git", "fetch", "origin", "master" },
+                    &.{ "git", "fetch", "--quiet", "origin", "master" },
                 .cwd = .{ .path = client_path },
                 .stdin = .ignore,
                 .stdout = .ignore,
-                .stderr = .ignore,
+                .stderr = .inherit,
             });
             const term = try process.wait(io);
             if (term != .exited or term.exited != 0) {
@@ -1887,13 +1887,13 @@ fn testPushLarge(
         // shell out to git so it will send delta objects
         var process = try std.process.spawn(io, .{
             .argv = if (is_ssh)
-                &.{ "git", "-c", ssh_config_arg, "push", "--receive-pack", receive_pack_command, "origin", "master" }
+                &.{ "git", "-c", ssh_config_arg, "push", "--quiet", "--receive-pack", receive_pack_command, "origin", "master" }
             else
-                &.{ "git", "push", "origin", "master" },
+                &.{ "git", "push", "--quiet", "origin", "master" },
             .cwd = .{ .path = client_path },
             .stdin = .ignore,
             .stdout = .ignore,
-            .stderr = .ignore,
+            .stderr = .inherit,
         });
         const term = try process.wait(io);
         if (term != .exited or term.exited != 0) {
