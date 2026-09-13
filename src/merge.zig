@@ -942,6 +942,7 @@ fn migrateWorktree(
     allocator: std.mem.Allocator,
     diff: tr.TreeDiff(repo_kind, repo_opts),
     conflicts: std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)),
+    dry_run: bool,
 ) !void {
     // release the index lock before the caller updates refs or writes a commit
     var lock_maybe: ?fs.LockFile = null;
@@ -995,6 +996,7 @@ fn migrateWorktree(
     var check = work.Switch(repo_kind, repo_opts){ .arena = &check_diff.arena, .allocator = allocator, .result = .success };
     try work.migrate(repo_kind, repo_opts, state, io, allocator, check_diff, &index, true, true, &check);
     if (check.result == .conflict) return error.CannotMergeWithLocalChanges;
+    if (dry_run) return;
 
     try work.migrate(repo_kind, repo_opts, state, io, allocator, diff, &index, true, false, null);
     for (conflicts.keys(), conflicts.values()) |path, conflict| {
@@ -1098,6 +1100,10 @@ pub fn MergeInput(comptime hash_kind: hash.HashKind) type {
         kind: MergeKind,
         action: MergeAction(hash_kind),
         commit_metadata: ?obj.CommitMetadata(hash_kind) = null,
+        // check without updating refs, the index, worktree, or merge state.
+        // analysis may write intermediate blobs and patch data; the repo
+        // wrapper rolls back these writes on the xit backend.
+        dry_run: bool = false,
     };
 }
 
@@ -1114,6 +1120,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             success: struct {
                 oid: [hash.hexLen(repo_opts.hash)]u8,
             },
+            clean, // a dry run that would create a commit
             nothing,
             fast_forward,
             conflict: struct {
@@ -1224,11 +1231,11 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         try clean_diff.compare(state.readOnly(), io, null, &source_oid, null);
 
                         if (target_ref_maybe == null) {
-                            try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
+                            try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts, merge_input.dry_run);
                         }
 
                         // update the empty branch only after the work dir checks succeed
-                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
+                        if (!merge_input.dry_run) try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
 
                         return .{
                             .arena = arena,
@@ -1296,6 +1303,17 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         }
                     }
 
+                    var merge_result = Merge(repo_kind, repo_opts){
+                        .arena = arena,
+                        .allocator = allocator,
+                        .changes = clean_diff.changes,
+                        .auto_resolved_conflicts = auto_resolved_conflicts,
+                        .base_oid = base_oid,
+                        .target_name = target_name,
+                        .source_name = source_name,
+                        .result = .clean,
+                    };
+
                     // create commit message
                     var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
                     switch (merge_input.kind) {
@@ -1319,44 +1337,30 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     if (target_ref_maybe == null) {
-                        try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts);
+                        try migrateWorktree(repo_kind, repo_opts, state, io, allocator, clean_diff, conflicts, merge_input.dry_run);
                     }
 
                     // exit early if there were conflicts
                     if (conflicts.count() > 0) {
-                        if (target_ref_maybe == null) {
+                        if (target_ref_maybe == null and !merge_input.dry_run) {
                             try rf.write(repo_kind, repo_opts, state, io, merge_head_name, .{ .oid = &source_oid });
 
                             const merge_msg = try state.core.repo_dir.createFile(io, merge_msg_name, .{ .truncate = true, .lock = .exclusive });
                             defer merge_msg.close(io);
                             try merge_msg.writeStreamingAll(io, commit_metadata.message);
                         }
-                        return .{
-                            .arena = arena,
-                            .allocator = allocator,
-                            .changes = clean_diff.changes,
-                            .auto_resolved_conflicts = auto_resolved_conflicts,
-                            .base_oid = base_oid,
-                            .target_name = target_name,
-                            .source_name = source_name,
-                            .result = .{ .conflict = .{ .conflicts = conflicts } },
-                        };
+                        merge_result.result = .{ .conflict = .{ .conflicts = conflicts } };
+                        return merge_result;
                     }
 
                     if (std.mem.eql(u8, &target_oid, &base_oid)) {
                         // the base ancestor is the target oid, so just update the target
-                        try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
-                        return .{
-                            .arena = arena,
-                            .allocator = allocator,
-                            .changes = clean_diff.changes,
-                            .auto_resolved_conflicts = auto_resolved_conflicts,
-                            .base_oid = base_oid,
-                            .target_name = target_name,
-                            .source_name = source_name,
-                            .result = .fast_forward,
-                        };
+                        if (!merge_input.dry_run) try rf.writeRecur(repo_kind, repo_opts, state, io, target_path, &source_oid);
+                        merge_result.result = .fast_forward;
+                        return merge_result;
                     }
+
+                    if (merge_input.dry_run) return merge_result;
 
                     // commit the change
                     if (merge_input.kind == .pick and commit_metadata.committer == null) {
@@ -1379,16 +1383,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         break :blk try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata, &tree, target_ref);
                     } else try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
-                    return .{
-                        .arena = arena,
-                        .allocator = allocator,
-                        .changes = clean_diff.changes,
-                        .auto_resolved_conflicts = auto_resolved_conflicts,
-                        .base_oid = base_oid,
-                        .target_name = target_name,
-                        .source_name = source_name,
-                        .result = .{ .success = .{ .oid = commit_oid } },
-                    };
+                    merge_result.result = .{ .success = .{ .oid = commit_oid } };
+                    return merge_result;
                 },
                 .cont => {
                     // ensure there are no conflict entries in the index
@@ -1433,6 +1429,18 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         break :blk .{ context.ancestry.tips[1], context.ancestry.tips[0], try context.mergeBase(merge_input.kind) };
                     };
 
+                    var merge_result = Merge(repo_kind, repo_opts){
+                        .arena = arena,
+                        .allocator = allocator,
+                        .changes = clean_diff.changes,
+                        .auto_resolved_conflicts = auto_resolved_conflicts,
+                        .base_oid = base_oid,
+                        .target_name = target_name,
+                        .source_name = source_name,
+                        .result = .clean,
+                    };
+                    if (merge_input.dry_run) return merge_result;
+
                     // commit the change
                     if (merge_input.kind == .pick and commit_metadata.committer == null) {
                         var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
@@ -1450,16 +1458,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // clean up the stored merge state after the commit succeeds
                     try removeMergeState(repo_kind, repo_opts, state, io);
 
-                    return .{
-                        .arena = arena,
-                        .allocator = allocator,
-                        .changes = clean_diff.changes,
-                        .auto_resolved_conflicts = auto_resolved_conflicts,
-                        .base_oid = base_oid,
-                        .target_name = target_name,
-                        .source_name = source_name,
-                        .result = .{ .success = .{ .oid = commit_oid } },
-                    };
+                    merge_result.result = .{ .success = .{ .oid = commit_oid } };
+                    return merge_result;
                 },
             }
         }

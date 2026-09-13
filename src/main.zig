@@ -739,7 +739,7 @@ fn printMergeResult(
         }
     }
     switch (merge_result.result) {
-        .success => {},
+        .success, .clean => {},
         .nothing => {
             try run_opts.out.print("already up to date\n", .{});
         },

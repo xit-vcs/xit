@@ -1261,11 +1261,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
 
                             ctx.merge_result.* = try mrg.Merge(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, ctx.input, ctx.ref_maybe, ctx.progress_ctx_maybe);
+                            if (ctx.input.dry_run) return error.CancelTransaction;
 
                             switch (ctx.merge_result.result) {
                                 .success => {},
                                 // no need to make a new transaction if nothing was done
-                                .nothing => return error.CancelTransaction,
+                                .clean, .nothing => return error.CancelTransaction,
                                 .fast_forward => {},
                                 // mergeAtRef does not store conflict state
                                 .conflict => if (ctx.ref_maybe != null) return error.CancelTransaction,

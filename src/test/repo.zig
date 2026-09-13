@@ -4279,3 +4279,122 @@ test "chunks are stored and deduplicated in the repo db" {
     defer allocator.free(actual);
     try std.testing.expectEqualSlices(u8, content, actual);
 }
+
+test "merge dry run" {
+    // git with diff3 merging
+    try testMergeDryRun(.git, .diff3, .clean, false);
+    try testMergeDryRun(.git, .diff3, .clean, true);
+    try testMergeDryRun(.git, .diff3, .conflict, false);
+    try testMergeDryRun(.git, .diff3, .conflict, true);
+    try testMergeDryRun(.git, .diff3, .fast_forward, false);
+    try testMergeDryRun(.git, .diff3, .fast_forward, true);
+    try testMergeDryRun(.git, .diff3, .nothing, false);
+    try testMergeDryRun(.git, .diff3, .nothing, true);
+    try testMergeDryRun(.git, .diff3, .empty, true);
+    // xit with diff3 merging
+    try testMergeDryRun(.xit, .diff3, .clean, false);
+    try testMergeDryRun(.xit, .diff3, .clean, true);
+    try testMergeDryRun(.xit, .diff3, .conflict, false);
+    try testMergeDryRun(.xit, .diff3, .conflict, true);
+    try testMergeDryRun(.xit, .diff3, .fast_forward, false);
+    try testMergeDryRun(.xit, .diff3, .fast_forward, true);
+    try testMergeDryRun(.xit, .diff3, .nothing, false);
+    try testMergeDryRun(.xit, .diff3, .nothing, true);
+    try testMergeDryRun(.xit, .diff3, .empty, true);
+    // xit with patch merging
+    try testMergeDryRun(.xit, .patch, .clean, false);
+    try testMergeDryRun(.xit, .patch, .clean, true);
+    try testMergeDryRun(.xit, .patch, .conflict, false);
+    try testMergeDryRun(.xit, .patch, .conflict, true);
+    try testMergeDryRun(.xit, .patch, .fast_forward, false);
+    try testMergeDryRun(.xit, .patch, .fast_forward, true);
+    try testMergeDryRun(.xit, .patch, .nothing, false);
+    try testMergeDryRun(.xit, .patch, .nothing, true);
+    try testMergeDryRun(.xit, .patch, .empty, true);
+}
+
+fn testMergeDryRun(
+    comptime kind: rp.RepoKind,
+    algo: mrg.MergeAlgorithm,
+    case: enum { clean, conflict, fast_forward, nothing, empty },
+    at_ref: bool,
+) !void {
+    const opts: rp.RepoOpts(kind) = .{ .is_test = true };
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(path);
+    var repo = try rp.Repo(kind, opts).init(io, allocator, .{ .path = path });
+    defer repo.deinit(io, allocator);
+    try addFile(kind, opts, &repo, io, allocator, "f", "one\ntwo\nthree\n");
+    const base = try repo.commit(io, allocator, .{ .message = "base" });
+    try addFile(kind, opts, &repo, io, allocator, "f", "one\ntwo\nsource\n");
+    const source = try repo.commit(io, allocator, .{ .message = "source" });
+    {
+        var switched = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &base } });
+        defer switched.deinit();
+    }
+    switch (case) {
+        .clean, .conflict => {
+            try addFile(kind, opts, &repo, io, allocator, "f", if (case == .clean) "target\ntwo\nthree\n" else "one\ntwo\ntarget\n");
+            _ = try repo.commit(io, allocator, .{ .message = "target" });
+        },
+        .nothing => {
+            var switched = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &source } });
+            defer switched.deinit();
+        },
+        .empty, .fast_forward => {},
+    }
+    const target: ?rf.Ref = if (at_ref) .{ .kind = .head, .name = if (case == .empty) "empty" else "master" } else null;
+    const head_before = try repo.readRef(io, .{ .kind = .head, .name = "master" });
+    const file_before = try repo.core.work_dir.readFileAlloc(io, "f", allocator, .limited(4096));
+    defer allocator.free(file_before);
+    const index_before = if (kind == .git) try repo.core.repo_dir.readFileAlloc(io, "index", allocator, .limited(65536)) else &.{};
+    defer if (kind == .git) allocator.free(index_before);
+    const moment_before = if (kind == .xit) (try repo.core.latestMoment()).cursor.slot().value else 0;
+    var input: mrg.MergeInput(opts.hash) = .{
+        .kind = .full,
+        .action = .{ .new = .{ .source = &.{.{ .oid = &source }}, .algo = algo } },
+        .dry_run = true,
+    };
+    var preview = if (target) |ref| try repo.mergeAtRef(io, allocator, input, ref, null) else try repo.merge(io, allocator, input, null);
+    defer preview.deinit();
+    try std.testing.expectEqual(head_before, try repo.readRef(io, .{ .kind = .head, .name = "master" }));
+    if (case == .empty) try std.testing.expectEqual(null, try repo.readRef(io, target.?));
+    const file_after = try repo.core.work_dir.readFileAlloc(io, "f", allocator, .limited(4096));
+    defer allocator.free(file_after);
+    try std.testing.expectEqualStrings(file_before, file_after);
+    if (kind == .git) {
+        const index_after = try repo.core.repo_dir.readFileAlloc(io, "index", allocator, .limited(65536));
+        defer allocator.free(index_after);
+        try std.testing.expectEqualSlices(u8, index_before, index_after);
+    } else {
+        try std.testing.expectEqual(moment_before, (try repo.core.latestMoment()).cursor.slot().value);
+    }
+    for ([_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD" }) |name| {
+        try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = name }));
+    }
+    try std.testing.expectError(error.FileNotFound, repo.core.repo_dir.access(io, "MERGE_MSG", .{}));
+    const expected: std.meta.Tag(@TypeOf(preview.result)) = switch (case) {
+        .clean => .clean,
+        .conflict => .conflict,
+        .fast_forward, .empty => .fast_forward,
+        .nothing => .nothing,
+    };
+    try std.testing.expectEqual(expected, std.meta.activeTag(preview.result));
+    input.dry_run = false;
+    var actual = if (target) |ref| try repo.mergeAtRef(io, allocator, input, ref, null) else try repo.merge(io, allocator, input, null);
+    defer actual.deinit();
+    try std.testing.expectEqual(if (expected == .clean) .success else expected, std.meta.activeTag(actual.result));
+    if (case == .conflict and !at_ref) {
+        try addFile(kind, opts, &repo, io, allocator, "f", "resolved\n");
+        var continued = try repo.merge(io, allocator, .{ .kind = .full, .action = .cont, .dry_run = true }, null);
+        defer continued.deinit();
+        try std.testing.expect(continued.result == .clean);
+        try std.testing.expectEqual(head_before, try repo.readRef(io, .{ .kind = .head, .name = "master" }));
+        try std.testing.expectEqual(source, (try repo.readRef(io, .{ .kind = .none, .name = "MERGE_HEAD" })).?);
+        try repo.core.repo_dir.access(io, "MERGE_MSG", .{});
+    }
+}
