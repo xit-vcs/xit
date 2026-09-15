@@ -8,18 +8,13 @@ const tr = @import("./tree.zig");
 
 pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        version: u32,
         // TODO: maybe store pointers to save space,
         // since usually only the first slot is used
         entries: std.StringArrayHashMapUnmanaged([4]?Entry),
-        // paths added/modified and removed since the index was loaded,
-        // so the .xit backend can write only the entries that changed
-        dirty_paths: std.StringArrayHashMapUnmanaged(void),
-        removed_paths: std.StringArrayHashMapUnmanaged(void),
-        dir_to_paths: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
-        dir_to_children: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
-        root_children: std.StringArrayHashMapUnmanaged(void),
-        io: std.Io,
+        // immediate child names by directory; "" is the root
+        children: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
+        // the .xit backend only writes paths changed since loading
+        changed_paths: std.StringArrayHashMapUnmanaged(void),
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
 
@@ -84,18 +79,13 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             }
         };
 
-        fn initEmpty(io: std.Io, allocator: std.mem.Allocator) !Index(repo_kind, repo_opts) {
+        fn initEmpty(allocator: std.mem.Allocator) !Index(repo_kind, repo_opts) {
             const arena = try allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(allocator);
             return .{
-                .version = 2,
                 .entries = .empty,
-                .dirty_paths = .empty,
-                .removed_paths = .empty,
-                .dir_to_paths = .empty,
-                .dir_to_children = .empty,
-                .root_children = .empty,
-                .io = io,
+                .children = .empty,
+                .changed_paths = .empty,
                 .allocator = allocator,
                 .arena = arena,
             };
@@ -106,7 +96,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !Index(repo_kind, repo_opts) {
-            var self = try initEmpty(io, allocator);
+            var self = try initEmpty(allocator);
             errdefer self.deinit();
 
             switch (repo_kind) {
@@ -127,8 +117,8 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // ignoring version 3 and 4 for now
-                    self.version = try reader.interface.takeInt(u32, .big);
-                    if (self.version != 2) {
+                    const version = try reader.interface.takeInt(u32, .big);
+                    if (version != 2) {
                         if (repo_opts.hash == .sha256) return error.UnsupportedOperationForSha256;
                         return error.InvalidVersion;
                     }
@@ -243,7 +233,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             }
 
             // the entries loaded above are not dirty
-            self.dirty_paths.clearRetainingCapacity();
+            self.changed_paths.clearRetainingCapacity();
 
             return self;
         }
@@ -254,7 +244,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             allocator: std.mem.Allocator,
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !Index(repo_kind, repo_opts) {
-            var self = try initEmpty(io, allocator);
+            var self = try initEmpty(allocator);
             errdefer self.deinit();
 
             var tree = try tr.Tree(repo_kind, repo_opts).init(state, io, allocator, oid);
@@ -264,7 +254,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 defer allocator.free(path_parts);
                 try self.addTreeEntryFile(tree_entry, path_parts, 0, 0);
             }
-            self.dirty_paths.clearRetainingCapacity();
+            self.changed_paths.clearRetainingCapacity();
 
             return self;
         }
@@ -273,17 +263,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             self.arena.deinit();
             self.allocator.destroy(self.arena);
             self.entries.deinit(self.allocator);
-            self.dirty_paths.deinit(self.allocator);
-            self.removed_paths.deinit(self.allocator);
-            for (self.dir_to_paths.values()) |*paths| {
-                paths.deinit(self.allocator);
+            self.changed_paths.deinit(self.allocator);
+            for (self.children.values()) |*children| {
+                children.deinit(self.allocator);
             }
-            self.dir_to_paths.deinit(self.allocator);
-            for (self.dir_to_children.values()) |*paths| {
-                paths.deinit(self.allocator);
-            }
-            self.dir_to_children.deinit(self.allocator);
-            self.root_children.deinit(self.allocator);
+            self.children.deinit(self.allocator);
         }
 
         /// if path is a file or symlink, adds it as an entry to the index struct.
@@ -321,11 +305,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // make reader
                     var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
-                    var reader = file.reader(self.io, &reader_buffer);
+                    var reader = file.reader(io, &reader_buffer);
 
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                    try obj.writeObject(repo_kind, repo_opts, state, self.io, self.allocator, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
+                    try obj.writeObject(repo_kind, repo_opts, state, io, self.allocator, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     // get the mode
                     // on windows, if a tree entry was supplied to this fn and its hash
@@ -385,7 +369,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // write object
                     var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
                     var reader = std.Io.Reader.fixed(target_path);
-                    try obj.writeObject(repo_kind, repo_opts, state, self.io, self.allocator, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
+                    try obj.writeObject(repo_kind, repo_opts, state, io, self.allocator, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     try self.addEntry(Entry.init(meta, meta.mode, oid, path));
                 },
@@ -394,8 +378,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         }
 
         fn addEntry(self: *Index(repo_kind, repo_opts), entry: Entry) !void {
-            try self.dirty_paths.put(self.allocator, entry.path, {});
-            _ = self.removed_paths.swapRemove(entry.path);
+            try self.changed_paths.put(self.allocator, entry.path, {});
 
             if (self.entries.getEntry(entry.path)) |map_entry| {
                 // there is an existing slot for the given path,
@@ -409,37 +392,25 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 }
                 // add the new entry
                 map_entry.value_ptr[entry.flags.stage] = entry;
-            } else {
-                // there is no existing slot for the given path,
-                // so create a new one with the entry included
-                var entries_for_path = [4]?Entry{ null, null, null, null };
-                entries_for_path[entry.flags.stage] = entry;
-                try self.entries.put(self.allocator, entry.path, entries_for_path);
+                return;
             }
 
-            var child = std.fs.path.basename(entry.path);
-            var parent_path_maybe = std.fs.path.dirname(entry.path);
+            var entries_for_path = [4]?Entry{ null, null, null, null };
+            entries_for_path[entry.flags.stage] = entry;
+            try self.entries.put(self.allocator, entry.path, entries_for_path);
 
-            while (parent_path_maybe) |parent_path| {
-                // populate dir_to_children
-                const children = try self.dir_to_children.getOrPut(self.allocator, parent_path);
+            var child_path = entry.path;
+            while (true) {
+                const parent_path = std.fs.path.dirname(child_path) orelse "";
+                const children = try self.children.getOrPut(self.allocator, parent_path);
                 if (!children.found_existing) {
                     children.value_ptr.* = .empty;
                 }
-                try children.value_ptr.put(self.allocator, child, {});
+                try children.value_ptr.put(self.allocator, std.fs.path.basename(child_path), {});
 
-                // populate dir_to_paths
-                const child_paths = try self.dir_to_paths.getOrPut(self.allocator, parent_path);
-                if (!child_paths.found_existing) {
-                    child_paths.value_ptr.* = .empty;
-                }
-                try child_paths.value_ptr.put(self.allocator, entry.path, {});
-
-                child = std.fs.path.basename(parent_path);
-                parent_path_maybe = std.fs.path.dirname(parent_path);
+                if (parent_path.len == 0) break;
+                child_path = parent_path;
             }
-
-            try self.root_children.put(self.allocator, child, {});
         }
 
         pub fn addConflictEntries(self: *Index(repo_kind, repo_opts), path: []const u8, tree_entries: [3]?tr.TreeEntry(repo_opts.hash)) !void {
@@ -527,39 +498,25 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
             // dupe the path since the caller may not keep it alive
             const path_dupe = try self.arena.allocator().dupe(u8, path);
-            try self.removed_paths.put(self.allocator, path_dupe, {});
-            _ = self.dirty_paths.swapRemove(path);
+            try self.changed_paths.put(self.allocator, path_dupe, {});
 
             if (removed_paths_maybe) |removed_paths| {
                 try removed_paths.put(self.allocator, path, {});
             }
 
-            // keep directory maps in sync, pruning empty ancestors
-            var parent_path_maybe = std.fs.path.dirname(path);
-            var basename = std.fs.path.basename(path);
-            var remove_child = !self.dir_to_children.contains(path);
-            while (parent_path_maybe) |parent_path| {
-                if (self.dir_to_paths.getPtr(parent_path)) |paths| {
-                    _ = paths.orderedRemove(path);
-                    if (paths.count() == 0) {
-                        paths.deinit(self.allocator);
-                        _ = self.dir_to_paths.orderedRemove(parent_path);
-                    }
-                }
-                if (self.dir_to_children.getPtr(parent_path)) |children| {
-                    if (remove_child) _ = children.orderedRemove(basename);
-                    remove_child = children.count() == 0;
-                    if (remove_child) {
-                        children.deinit(self.allocator);
-                        _ = self.dir_to_children.orderedRemove(parent_path);
-                    }
-                }
-                remove_child = remove_child and !self.entries.contains(parent_path);
+            // prune empty ancestors, preserving file/directory conflicts
+            var child_path = path;
+            while (!self.entries.contains(child_path) and !self.children.contains(child_path)) {
+                const parent_path = std.fs.path.dirname(child_path) orelse "";
+                const children = self.children.getPtr(parent_path) orelse break;
+                _ = children.orderedRemove(std.fs.path.basename(child_path));
+                if (children.count() != 0) break;
+                children.deinit(self.allocator);
+                _ = self.children.orderedRemove(parent_path);
 
-                parent_path_maybe = std.fs.path.dirname(parent_path);
-                basename = std.fs.path.basename(parent_path);
+                if (parent_path.len == 0) break;
+                child_path = parent_path;
             }
-            if (remove_child) _ = self.root_children.orderedRemove(basename);
         }
 
         pub fn removeChildren(
@@ -567,18 +524,23 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             path: []const u8,
             removed_paths_maybe: ?*std.StringArrayHashMapUnmanaged(void),
         ) !void {
-            const child_paths_maybe = self.dir_to_paths.getEntry(path);
-            if (child_paths_maybe) |child_paths| {
-                const child_paths_array = child_paths.value_ptr.*.keys();
-                // make a copy of the paths because removePath will modify it
-                var child_paths_array_copy: std.ArrayList([]const u8) = .empty;
-                defer child_paths_array_copy.deinit(self.allocator);
-                for (child_paths_array) |child_path| {
-                    try child_paths_array_copy.append(self.allocator, child_path);
+            if (!self.children.contains(path)) return;
+
+            // collect descendants before removal changes the child maps
+            var paths: std.ArrayList([]const u8) = .empty;
+            defer paths.deinit(self.allocator);
+            try paths.append(self.allocator, path);
+            var i: usize = 0;
+            while (i < paths.items.len) : (i += 1) {
+                const child_path = paths.items[i];
+                if (self.children.get(child_path)) |children| {
+                    for (children.keys()) |name| {
+                        try paths.append(self.allocator, try fs.joinPath(self.arena.allocator(), &.{ child_path, name }));
+                    }
                 }
-                for (child_paths_array_copy.items) |child_path| {
-                    try self.removePath(child_path, removed_paths_maybe);
-                }
+            }
+            for (paths.items[1..]) |child_path| {
+                try self.removePath(child_path, removed_paths_maybe);
             }
         }
 
@@ -606,7 +568,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                 return self.addPath(state, io, path, null);
             }
 
-            if (!self.entries.contains(path) and !self.dir_to_paths.contains(path)) {
+            if (!self.entries.contains(path) and !self.children.contains(path)) {
                 return switch (action) {
                     .add => error.AddIndexPathNotFound,
                     .rm => error.RemoveIndexPathNotFound,
@@ -699,14 +661,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     const index_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "index"));
                     var index = try DB.SortedMap(.read_write).init(index_cursor);
 
-                    // remove paths that have been removed since the index was loaded
-                    for (self.removed_paths.keys()) |path| {
-                        _ = try index.remove(path);
-                    }
-
-                    // write paths that have been added or modified since the index was loaded
-                    for (self.dirty_paths.keys()) |path| {
-                        const entries_for_path = self.entries.getPtr(path) orelse continue;
+                    // write the final state of every changed path
+                    for (self.changed_paths.keys()) |path| {
+                        const entries_for_path = self.entries.getPtr(path) orelse {
+                            _ = try index.remove(path);
+                            continue;
+                        };
                         var entry_buffer_writer = std.Io.Writer.Allocating.init(allocator);
                         defer entry_buffer_writer.deinit();
 
@@ -745,8 +705,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     }
 
                     // the db now matches the in-memory index
-                    self.removed_paths.clearRetainingCapacity();
-                    self.dirty_paths.clearRetainingCapacity();
+                    self.changed_paths.clearRetainingCapacity();
                 },
             }
         }

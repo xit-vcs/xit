@@ -124,7 +124,7 @@ pub const Tree = struct {
     ) !Tree {
         var tree = try Tree.init(allocator);
         errdefer tree.deinit();
-        try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, index, "", index.root_children.keys());
+        try tree.addIndexEntries(repo_kind, repo_opts, state, io, allocator, index, "");
         return tree;
     }
 
@@ -149,24 +149,18 @@ pub const Tree = struct {
         allocator: std.mem.Allocator,
         index: *const idx.Index(repo_kind, repo_opts),
         prefix: []const u8,
-        entries: [][]const u8,
     ) !void {
-        for (entries) |name| {
+        const children = index.children.get(prefix) orelse return;
+        for (children.keys()) |name| {
             const path = try fs.joinPath(allocator, &.{ prefix, name });
             defer allocator.free(path);
 
             if (index.entries.get(path)) |*entries_for_path| {
                 const entry = entries_for_path[0] orelse return error.NullEntry;
                 try self.addBlobEntry(entry.mode, name, &entry.oid);
-            } else if (index.dir_to_children.get(path)) |children| {
+            } else if (index.children.contains(path)) {
                 var subtree = try Tree.init(allocator);
                 defer subtree.deinit();
-
-                var child_names: std.ArrayList([]const u8) = .empty;
-                defer child_names.deinit(allocator);
-                for (children.keys()) |child| {
-                    try child_names.append(allocator, child);
-                }
 
                 try subtree.addIndexEntries(
                     repo_kind,
@@ -176,7 +170,6 @@ pub const Tree = struct {
                     allocator,
                     index,
                     path,
-                    child_names.items,
                 );
 
                 var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);

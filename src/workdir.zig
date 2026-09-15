@@ -210,7 +210,7 @@ pub fn Status(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     return true;
                 },
                 .directory => {
-                    const is_untracked = !(std.mem.eql(u8, path, ".") or index.dir_to_paths.contains(path) or index.entries.contains(path));
+                    const is_untracked = !(std.mem.eql(u8, path, ".") or index.children.contains(path) or index.entries.contains(path));
 
                     var dir = try work_dir.openDir(io, path, .{ .iterate = true });
                     defer dir.close(io);
@@ -379,7 +379,7 @@ pub fn unaddPaths(
         const path_parts = try fs.splitPath(allocator, path);
         defer allocator.free(path_parts);
 
-        if (!opts.recursive and index.dir_to_paths.contains(path)) {
+        if (!opts.recursive and index.children.contains(path)) {
             return error.RecursiveOptionRequired;
         }
 
@@ -411,7 +411,7 @@ pub fn removePaths(
     defer index.deinit();
 
     for (paths) |path| {
-        if (!opts.recursive and index.dir_to_paths.contains(path)) {
+        if (!opts.recursive and index.children.contains(path)) {
             return error.RecursiveOptionRequired;
         }
 

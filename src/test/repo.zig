@@ -11,6 +11,7 @@ const ui = @import("../ui.zig");
 const patch = @import("../patch.zig");
 const df = @import("../diff.zig");
 const tr = @import("../tree.zig");
+const idx = @import("../index.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -183,6 +184,34 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         var dir = try tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &tag_oid, "");
         defer dir.deinit();
         try std.testing.expectEqual(0, dir.entries.count());
+    }
+
+    // coalesce changes without losing either side of a file/directory conflict
+    {
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        var index = try idx.Index(repo_kind, repo_opts).initFromCommit(state, io, allocator, &commit_a);
+        defer index.deinit();
+        const entry = (index.entries.get("README.md") orelse return error.EntryNotFound)[0] orelse return error.EntryNotFound;
+        const tree_entry = tr.TreeEntry(repo_opts.hash){ .oid = entry.oid, .mode = entry.mode };
+        try index.removePath("README.md", null);
+        try std.testing.expectEqual(0, index.children.count());
+        try index.addTreeEntryFile(&tree_entry, &.{"README.md"}, entry.file_size, 0);
+        try std.testing.expectEqual(1, index.changed_paths.count());
+
+        try index.addTreeEntryFile(&tree_entry, &.{ "README.md", "nested", "file" }, entry.file_size, 3);
+        try index.addConflictEntries("README.md", .{ null, tree_entry, null });
+        try index.removePath("README.md", null);
+        try std.testing.expect(index.children.contains("README.md"));
+        try index.addConflictEntries("README.md", .{ null, tree_entry, null });
+        try index.removeChildren("README.md", null);
+        try std.testing.expect(index.entries.contains("README.md"));
+        try std.testing.expect(!index.children.contains("README.md"));
+        try std.testing.expect((index.children.get("") orelse return error.MissingRoot).contains("README.md"));
+        try index.removePath("README.md", null);
+        try std.testing.expectEqual(0, index.entries.count());
+        try std.testing.expectEqual(0, index.children.count());
+        try std.testing.expectEqual(2, index.changed_paths.count());
     }
 
     // we can enable patches after adding a tag
