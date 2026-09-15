@@ -73,7 +73,7 @@ test "gc" {
     try addFile(.xit, repo_opts, &repo, io, allocator, "staged.bin", staged_content);
 
     // an otherwise unreachable object survives while supplied as an extra root
-    _ = try repo.garbageCollect(io, allocator, &.{side_commit});
+    _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = &.{side_commit} });
     try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &side_commit }));
     {
         var moment = try repo.core.latestMoment();
@@ -82,7 +82,8 @@ test "gc" {
         side_commit_object.deinit();
     }
 
-    const result = try repo.garbageCollect(io, allocator, &.{});
+    const result = try repo.garbageCollect(io, allocator, .{});
+    try std.testing.expectError(error.FileNotFound, repo.core.repo_dir.access(io, "db.gc.offsets", .{}));
 
     // the deleted branch's objects and chunks are gone, so the db shrank
     try std.testing.expect(result.size_after < result.size_before);
@@ -144,7 +145,7 @@ test "gc" {
 
     // a second gc runs fine and everything still reads back
     {
-        _ = try repo.garbageCollect(io, allocator, &.{});
+        _ = try repo.garbageCollect(io, allocator, .{});
 
         var work_dir = try temp.dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
@@ -158,7 +159,7 @@ test "gc" {
     }
 }
 
-test "gc ignores a stale temporary db" {
+test "gc ignores stale temporary files" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
@@ -182,21 +183,20 @@ test "gc ignores a stale temporary db" {
     var xit_dir = try temp.dir.openDir(io, "repo/.xit", .{});
     defer xit_dir.close(io);
 
-    // A crash before the rename can leave db.gc behind. Opening ignores it,
-    // and the next collection truncates and replaces it.
-    {
-        const stale_file = try xit_dir.createFile(io, "db.gc", .{ .truncate = true });
-        try stale_file.writeStreamingAll(io, "junk");
-        stale_file.close(io);
-
-        var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
-        defer repo.deinit(io, allocator);
-        _ = try repo.garbageCollect(io, allocator, &.{});
-
-        const actual = try repo.core.work_dir.readFileAlloc(io, "hello.md", allocator, .limited(1024));
-        defer allocator.free(actual);
-        try std.testing.expectEqualStrings("hello, world!", actual);
+    // a crash can leave temporary files behind. opening ignores them,
+    // and the next collection truncates and replaces them.
+    for ([_][]const u8{ "db.gc", "db.gc.offsets" }) |name| {
+        try xit_dir.writeFile(io, .{ .sub_path = name, .data = "junk" });
     }
+
+    var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+    _ = try repo.garbageCollect(io, allocator, .{});
+    try std.testing.expectError(error.FileNotFound, xit_dir.access(io, "db.gc.offsets", .{}));
+
+    const actual = try repo.core.work_dir.readFileAlloc(io, "hello.md", allocator, .limited(1024));
+    defer allocator.free(actual);
+    try std.testing.expectEqualStrings("hello, world!", actual);
 }
 
 test "gc with patches" {
@@ -257,7 +257,7 @@ test "gc with patches" {
     // keep the discarded branch through an extra root, then collect it.
     // its insertion and replacement records should both be removed.
     for ([_][]const [hash.hexLen(repo_opts.hash)]u8{ &.{trash_oid}, &.{} }, [_]usize{ 5, 3 }) |roots, expected| {
-        const result = try repo.garbageCollect(io, allocator, roots);
+        const result = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
         try std.testing.expect(result.size_after < result.size_before);
         const moment = try repo.core.latestMoment();
         for ([_][]const u8{ "patch-id->edit-list", "edit-id->edit" }) |name| {

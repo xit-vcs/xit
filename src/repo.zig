@@ -123,13 +123,6 @@ pub const InitOpts = struct {
     global_config_path: ?[]const u8 = null,
 };
 
-pub fn LogOptions(comptime hash_kind: hash.HashKind) type {
-    return struct {
-        start_oids: ?[]const [hash.hexLen(hash_kind)]u8 = null,
-        first_parent: bool = false,
-    };
-}
-
 pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind)) type {
     return struct {
         comptime self_repo_kind: RepoKind = repo_kind,
@@ -1204,7 +1197,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             self: *Repo(repo_kind, repo_opts),
             io: std.Io,
             allocator: std.mem.Allocator,
-            options: LogOptions(repo_opts.hash),
+            options: obj.LogOptions(repo_opts.hash),
         ) !obj.ObjectIterator(repo_kind, repo_opts) {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
@@ -1845,12 +1838,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             try writer.flush();
         }
 
-        /// reclaims objects unreachable from repo state or `extra_roots`
+        /// reclaims objects unreachable from repo state or `options.extra_roots`
         pub fn garbageCollect(
             self: *Repo(.xit, repo_opts),
             io: std.Io,
             allocator: std.mem.Allocator,
-            extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+            options: gc.GarbageCollectOptions(repo_opts.hash),
         ) !gc.GcResult {
             const Ctx = struct {
                 core: *Repo(repo_kind, repo_opts).Core,
@@ -1877,7 +1870,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
             try history.appendContext(
                 .{ .slot = try history.getSlot(-1) },
-                Ctx{ .core = &self.core, .io = io, .allocator = allocator, .extra_roots = extra_roots },
+                Ctx{ .core = &self.core, .io = io, .allocator = allocator, .extra_roots = options.extra_roots },
             );
 
             return .{

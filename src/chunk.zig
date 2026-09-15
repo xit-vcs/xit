@@ -268,13 +268,13 @@ pub fn collectRecordPositions(chunk_info: []const u8, positions: *std.AutoHashMa
     }
 }
 
-// Rewrite chunk record positions using a source-to-target compaction map.
-pub fn rewriteRecordPositions(chunk_info: []u8, position_map: *const std.AutoHashMap(u64, u64)) !void {
+// rewrite chunk record positions using a source-to-target compaction map
+pub fn rewriteRecordPositions(chunk_info: []u8, position_map: anytype) !void {
     if (chunk_info.len % chunk_entry_size != 0) return error.WrongChunkInfoSize;
     var position: usize = 0;
     while (position < chunk_info.len) : (position += chunk_entry_size) {
         const record_position = std.mem.readInt(u64, chunk_info[position..][0..@sizeOf(u64)], .big);
-        const new_position = position_map.get(record_position) orelse return error.ChunkNotFound;
+        const new_position = (try position_map.get(record_position)) orelse return error.ChunkNotFound;
         std.mem.writeInt(u64, chunk_info[position..][0..@sizeOf(u64)], new_position, .big);
     }
 }

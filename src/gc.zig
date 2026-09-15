@@ -13,9 +13,40 @@ const mrg = @import("./merge.zig");
 const chunk = @import("./chunk.zig");
 const fs = @import("./fs.zig");
 
+pub fn GarbageCollectOptions(comptime hash_kind: hash.HashKind) type {
+    return struct {
+        extra_roots: []const [hash.hexLen(hash_kind)]u8 = &.{},
+    };
+}
+
 pub const GcResult = struct {
     size_before: u64,
     size_after: u64,
+};
+
+// store offsets as u64 keys in a separate, mutable top-level xitdb hash map
+const DiskOffsets = struct {
+    const DB = @import("xitdb").Database(.file, u64);
+
+    io: std.Io,
+    file: std.Io.File,
+    db: DB = undefined, // initialized by compact's call to reset
+
+    pub fn reset(self: *@This()) !void {
+        try self.file.setLength(self.io, 0);
+        self.db = try DB.init(.{ .io = self.io, .file = self.file, .fsync = false });
+    }
+
+    pub fn get(self: *@This(), source_offset: u64) !?u64 {
+        const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
+        const cursor = (try map.getCursor(source_offset)) orelse return null;
+        return try cursor.readUint();
+    }
+
+    pub fn put(self: *@This(), source_offset: u64, target_offset: u64) !void {
+        const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
+        try map.put(source_offset, .{ .uint = target_offset });
+    }
 };
 
 fn pruneOidMap(
@@ -116,6 +147,7 @@ fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, re
 
 // the new repo db, ready to be renamed over "db"
 const db_new_name = "db.gc";
+const offsets_name = "db.gc.offsets";
 
 // removes dead objects, snapshots, patch data, and chunks from the moment being written.
 // their records still take up space until compactDatabase runs afterwards.
@@ -179,8 +211,12 @@ pub fn compactDatabase(
 ) !u64 {
     const repo_dir = repo.core.repo_dir;
 
-    var offset_map = std.AutoHashMap(u64, u64).init(allocator);
-    defer offset_map.deinit();
+    const offsets_file = try repo_dir.createFile(io, offsets_name, .{ .truncate = true, .read = true });
+    defer {
+        offsets_file.close(io);
+        repo_dir.deleteFile(io, offsets_name) catch {};
+    }
+    var offset_map = DiskOffsets{ .io = io, .file = offsets_file };
 
     var adopted = false;
     const new_db_file = try repo_dir.createFile(io, db_new_name, .{ .truncate = true, .read = true });
@@ -324,7 +360,7 @@ fn patchChunkInfoPositions(
     io: std.Io,
     allocator: std.mem.Allocator,
     target_file: std.Io.File,
-    compaction_map: *const std.AutoHashMap(u64, u64),
+    compaction_map: *DiskOffsets,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const map_cursor = (try source_moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) orelse return;
@@ -337,7 +373,7 @@ fn patchChunkInfoPositions(
     while (try iter.next()) |*entry_cursor| {
         var kv_pair = try entry_cursor.readKeyValuePair();
         const source_position = kv_pair.value_cursor.slot().value;
-        const target_position = compaction_map.get(source_position) orelse return error.ChunkInfoNotFound;
+        const target_position = (try compaction_map.get(source_position)) orelse return error.ChunkInfoNotFound;
 
         const chunk_info = try readChunkInfoAlloc(repo_opts, &kv_pair.value_cursor, allocator);
         defer allocator.free(chunk_info);

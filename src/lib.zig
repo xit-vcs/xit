@@ -19,6 +19,7 @@ pub const pack = @import("./pack.zig");
 pub const tree = @import("./tree.zig");
 pub const tag = @import("./tag.zig");
 pub const undo = @import("./undo.zig");
+pub const gc = @import("./gc.zig");
 pub const ui = @import("./ui.zig");
 pub const net = @import("./net.zig");
 pub const net_pkt = @import("./net/pkt.zig");

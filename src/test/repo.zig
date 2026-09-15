@@ -1001,7 +1001,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
         break :blk try repo.commit(io, allocator, .{ .message = "third", .parent_oids = &.{root_oid}, .timestamp = 4 });
     } else null;
     try repo.patchAll(io, allocator, null);
-    if (case == .history) _ = try repo.garbageCollect(io, allocator, &.{});
+    if (case == .history) _ = try repo.garbageCollect(io, allocator, .{});
 
     if (case == .merge) {
         // missing cache data should allow a merge, but damaged patches must fail.

@@ -1104,6 +1104,13 @@ test "validate tree entry names" {
     try std.testing.expectEqual(.windows != builtin.os.tag, validTreeEntryName("..\\outside"));
 }
 
+pub fn LogOptions(comptime hash_kind: hash.HashKind) type {
+    return struct {
+        start_oids: ?[]const [hash.hexLen(hash_kind)]u8 = null,
+        first_parent: bool = false,
+    };
+}
+
 pub const ObjectIteratorOptions = struct {
     kind: enum {
         all,
