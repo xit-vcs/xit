@@ -1180,7 +1180,8 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
             });
-            try std.testing.expectEqual(ctx.case == .later_edit, gaps != null);
+            // clearing gaps stores an explicit .none value, so the slot still exists
+            try std.testing.expectEqual(ctx.case == .later_edit, gaps != null and gaps.?.tag != .none);
             var file = try patch.File(opts).load(&read_moment, snapshot.cursor.readOnly(), patch_allocator, path_hash);
             defer file.deinit();
             try std.testing.expectEqual(ctx.case == .conflict or ctx.case == .history, file.has_conflict);
