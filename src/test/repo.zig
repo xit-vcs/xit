@@ -10,6 +10,7 @@ const mrg = @import("../merge.zig");
 const ui = @import("../ui.zig");
 const patch = @import("../patch.zig");
 const df = @import("../diff.zig");
+const tr = @import("../tree.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -165,7 +166,24 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         else => |e| return e,
     }
 
-    _ = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
+    const tag_oid = try repo.addTag(io, allocator, .{ .name = "1.0.0", .message = "hi" });
+
+    // browse directories from commits, trees and annotated tags
+    {
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        var commit = try obj.Object(repo_kind, repo_opts).initCommit(state, io, allocator, &commit_a);
+        defer commit.deinit();
+        for ([_][hash.hexLen(repo_opts.hash)]u8{ commit_a, commit.content.commit.tree }) |oid| {
+            var dir = try tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &oid, "README.md");
+            defer dir.deinit();
+            try std.testing.expectEqualStrings("README.md", dir.file_name orelse return error.FileNotFound);
+            try std.testing.expectEqual(1, dir.entries.count());
+        }
+        var dir = try tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &tag_oid, "");
+        defer dir.deinit();
+        try std.testing.expectEqual(0, dir.entries.count());
+    }
 
     // we can enable patches after adding a tag
     if (repo_kind == .xit) {

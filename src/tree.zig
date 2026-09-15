@@ -244,7 +244,7 @@ pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
     };
 }
 
-// the immediate entries of one directory in a commit's tree
+// the immediate entries of one directory in a tree, commit or tag
 pub fn TreeDir(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         // owns the entries' memory
@@ -259,12 +259,19 @@ pub fn TreeDir(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
             path: []const u8,
         ) !TreeDir(repo_kind, repo_opts) {
-            var commit_object = try obj.Object(repo_kind, repo_opts).initCommit(state, io, allocator, oid);
-            defer commit_object.deinit();
-
-            var object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &commit_object.content.commit.tree);
+            var object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, oid);
             errdefer object.deinit();
-            if (object.content != .tree) return error.ObjectInvalid;
+            while (true) {
+                const next_oid = switch (object.content) {
+                    .tree => break,
+                    .commit => |commit| commit.tree,
+                    .tag => |tag| tag.target,
+                    .blob => return error.ObjectInvalid,
+                };
+                const next_object = try obj.Object(repo_kind, repo_opts).init(state, io, allocator, &next_oid);
+                object.deinit();
+                object = next_object;
+            }
 
             var file_name: ?[]const u8 = null;
             var iter = std.mem.splitScalar(u8, path, '/');
