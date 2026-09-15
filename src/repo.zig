@@ -220,6 +220,46 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     return false;
                 }
 
+                /// counts first-parent commits in this state, including uncommitted writes.
+                pub fn commitCount(
+                    self: Repo(.xit, repo_opts).State(write_mode),
+                    io: std.Io,
+                    allocator: std.mem.Allocator,
+                    target: rf.RefOrOid(repo_opts.hash),
+                ) !u64 {
+                    const state = if (write_mode == .read_write) self.readOnly() else self;
+                    const oid = switch (target) {
+                        .oid => |oid| oid.*,
+                        .ref => |ref| blk: {
+                            switch (ref.kind) {
+                                .head, .tag => {},
+                                else => return error.UnsupportedRefKind,
+                            }
+                            break :blk try rf.readRecurExisting(.xit, repo_opts, state, io, .{ .ref = ref }) orelse {
+                                if (ref.kind == .head) return 0;
+                                return error.CommitNotFound;
+                            };
+                        },
+                    };
+
+                    const depths_maybe: ?DB.HashMap(.read_only) = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) |cursor|
+                        try DB.HashMap(.read_only).init(cursor)
+                    else
+                        null;
+                    if (depths_maybe) |depths| {
+                        if (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) |depth_cursor| {
+                            return try depth_cursor.readUint();
+                        }
+                    }
+
+                    var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+                    defer commit_object.deinit();
+
+                    const depths = depths_maybe orelse return error.CommitDepthNotFound;
+                    const depth_cursor = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return error.CommitDepthNotFound;
+                    return try depth_cursor.readUint();
+                }
+
                 pub fn readOnly(self: State(.read_write)) State(.read_only) {
                     return switch (repo_kind) {
                         .git => .{ .core = self.core, .extra = .{} },
@@ -940,37 +980,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         ) !u64 {
             var moment = try self.core.latestMoment();
             const state = Repo(.xit, repo_opts).State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-
-            const oid = switch (target) {
-                .oid => |oid| oid.*,
-                .ref => |ref| blk: {
-                    switch (ref.kind) {
-                        .head, .tag => {},
-                        else => return error.UnsupportedRefKind,
-                    }
-                    break :blk try rf.readRecurExisting(.xit, repo_opts, state, io, .{ .ref = ref }) orelse {
-                        if (ref.kind == .head) return 0;
-                        return error.CommitNotFound;
-                    };
-                },
-            };
-
-            const depths_maybe: ?DB.HashMap(.read_only) = if (try moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) |cursor|
-                try DB.HashMap(.read_only).init(cursor)
-            else
-                null;
-            if (depths_maybe) |depths| {
-                if (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) |depth_cursor| {
-                    return try depth_cursor.readUint();
-                }
-            }
-
-            var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
-            defer commit_object.deinit();
-
-            const depths = depths_maybe orelse return error.CommitDepthNotFound;
-            const depth_cursor = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return error.CommitDepthNotFound;
-            return try depth_cursor.readUint();
+            return state.commitCount(io, allocator, target);
         }
 
         /// returns stored stats against the target's first parent, or null if absent.
