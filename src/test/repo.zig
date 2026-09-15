@@ -1458,13 +1458,15 @@ test "merge conflict edits" {
 }
 
 test "merge at ref" {
-    try testMergeAtRef(.git, .{ .is_test = true }, false);
-    try testMergeAtRef(.xit, .{ .is_test = true }, false);
-    try testMergeAtRef(.git, .{ .is_test = true }, true);
-    try testMergeAtRef(.xit, .{ .is_test = true }, true);
+    try testMergeAtRef(.git, .{ .is_test = true }, false, .diff3);
+    try testMergeAtRef(.xit, .{ .is_test = true }, false, .diff3);
+    try testMergeAtRef(.git, .{ .is_test = true }, true, .diff3);
+    try testMergeAtRef(.xit, .{ .is_test = true }, true, .diff3);
+    try testMergeAtRef(.xit, .{ .is_test = true }, false, .patch);
+    try testMergeAtRef(.xit, .{ .is_test = true }, true, .patch);
 }
 
-fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), bare: bool) !void {
+fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind), bare: bool, algo: mrg.MergeAlgorithm) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
@@ -1480,6 +1482,9 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     defer repo.deinit(io, allocator);
 
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "base.txt", "base");
+    try addFile(repo_kind, repo_opts, &repo, io, allocator, "shared/keep.txt", "keep");
+    const removed_paths = [_][]const u8{ "removed.txt", "shared/removed.txt", "empty/nested/removed.txt" };
+    for (removed_paths) |path| try addFile(repo_kind, repo_opts, &repo, io, allocator, path, "remove");
     const base_oid = try repo.commit(io, allocator, .{ .message = "base" });
     try repo.addBranch(io, .{ .name = "target" });
     try repo.addBranch(io, .{ .name = "source" });
@@ -1495,6 +1500,7 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         var switch_result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "source" } } });
         defer switch_result.deinit();
     }
+    try repo.remove(io, allocator, &removed_paths, .{});
     try addFile(repo_kind, repo_opts, &repo, io, allocator, "source.txt", "source");
     _ = try repo.commit(io, allocator, .{ .message = "source" });
 
@@ -1511,11 +1517,26 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             .kind = .full,
             .action = .{ .new = .{
                 .source = &.{.{ .ref = .{ .kind = .head, .name = "source" } }},
-                .algo = .diff3,
+                .algo = algo,
             } },
         }, .{ .kind = .head, .name = "target" }, null);
         defer merge.deinit();
         try std.testing.expect(.success == merge.result);
+    }
+
+    // deletions remove stale children and empty directories from the merged tree
+    {
+        const target_oid = try repo.readRef(io, .{ .kind = .head, .name = "target" }) orelse return error.RefNotFound;
+        var moment = try repo.core.latestMoment();
+        const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+        var root = try tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &target_oid, "");
+        defer root.deinit();
+        try std.testing.expectEqual(4, root.entries.count());
+        try std.testing.expect(!root.entries.contains("removed.txt") and !root.entries.contains("empty"));
+        var shared = try tr.TreeDir(repo_kind, repo_opts).init(state, io, allocator, &target_oid, "shared");
+        defer shared.deinit();
+        try std.testing.expectEqual(1, shared.entries.count());
+        try std.testing.expect(shared.entries.contains("keep.txt"));
     }
 
     const head_oid = try repo.readRef(io, .{ .kind = .none, .name = "HEAD" }) orelse return error.RefNotFound;

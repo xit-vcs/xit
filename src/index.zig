@@ -523,38 +523,43 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             path: []const u8,
             removed_paths_maybe: ?*std.StringArrayHashMapUnmanaged(void),
         ) !void {
-            const removed = self.entries.orderedRemove(path);
+            if (!self.entries.orderedRemove(path)) return;
 
-            if (removed) {
-                // dupe the path since the caller may not keep it alive
-                const path_dupe = try self.arena.allocator().dupe(u8, path);
-                try self.removed_paths.put(self.allocator, path_dupe, {});
-                _ = self.dirty_paths.swapRemove(path);
+            // dupe the path since the caller may not keep it alive
+            const path_dupe = try self.arena.allocator().dupe(u8, path);
+            try self.removed_paths.put(self.allocator, path_dupe, {});
+            _ = self.dirty_paths.swapRemove(path);
 
-                if (removed_paths_maybe) |removed_paths| {
-                    try removed_paths.put(self.allocator, path, {});
-                }
+            if (removed_paths_maybe) |removed_paths| {
+                try removed_paths.put(self.allocator, path, {});
             }
 
-            // update dir_to_paths and dir_to_children
+            // keep directory maps in sync, pruning empty ancestors
             var parent_path_maybe = std.fs.path.dirname(path);
             var basename = std.fs.path.basename(path);
+            var remove_child = !self.dir_to_children.contains(path);
             while (parent_path_maybe) |parent_path| {
-                if (self.dir_to_paths.getEntry(parent_path)) |paths| {
-                    _ = paths.value_ptr.*.orderedRemove(path);
-
-                    // if there are no other children, remove the entry from
-                    // dir_to_children as well
-                    if (paths.value_ptr.count() == 0) {
-                        if (self.dir_to_children.getEntry(parent_path)) |children| {
-                            _ = children.value_ptr.*.orderedRemove(basename);
-                        }
+                if (self.dir_to_paths.getPtr(parent_path)) |paths| {
+                    _ = paths.orderedRemove(path);
+                    if (paths.count() == 0) {
+                        paths.deinit(self.allocator);
+                        _ = self.dir_to_paths.orderedRemove(parent_path);
                     }
                 }
+                if (self.dir_to_children.getPtr(parent_path)) |children| {
+                    if (remove_child) _ = children.orderedRemove(basename);
+                    remove_child = children.count() == 0;
+                    if (remove_child) {
+                        children.deinit(self.allocator);
+                        _ = self.dir_to_children.orderedRemove(parent_path);
+                    }
+                }
+                remove_child = remove_child and !self.entries.contains(parent_path);
 
                 parent_path_maybe = std.fs.path.dirname(parent_path);
                 basename = std.fs.path.basename(parent_path);
             }
+            if (remove_child) _ = self.root_children.orderedRemove(basename);
         }
 
         pub fn removeChildren(
