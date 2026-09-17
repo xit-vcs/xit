@@ -434,7 +434,7 @@ fn writeBlobWithDiff3(
     var base_iter = if (base_file_oid_maybe) |base_file_oid|
         try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, "", base_file_oid, null)
     else
-        try df.LineIterator(repo_kind, repo_opts).initFromNothing(io, allocator, "");
+        try df.LineIterator(repo_kind, repo_opts).initFromNothing(allocator, "");
     defer base_iter.deinit();
 
     var target_iter = try df.LineIterator(repo_kind, repo_opts).initFromOid(state.readOnly(), io, allocator, "", target_file_oid, null);
@@ -464,7 +464,6 @@ fn writeBlobWithDiff3(
             if (range_maybe) |range| {
                 for (range.begin..range.end) |line_num| {
                     const line = try iter.get(line_num);
-                    defer iter.free(line);
                     {
                         const line_dupe = try inner_allocator.dupe(u8, line);
                         errdefer inner_allocator.free(line_dupe);
@@ -511,7 +510,6 @@ fn writeBlobWithDiff3(
                     .clean => |clean| {
                         for (clean.begin..clean.end) |line_num| {
                             const line = try self.base_iter.get(line_num);
-                            defer self.base_iter.free(line);
                             {
                                 const line_dupe = try self.allocator.dupe(u8, line);
                                 errdefer self.allocator.free(line_dupe);
@@ -561,9 +559,9 @@ fn writeBlobWithDiff3(
         }
 
         pub fn reset(self: *@This()) !void {
-            try self.base_iter.reset();
-            try self.target_iter.reset();
-            try self.source_iter.reset();
+            self.base_iter.reset();
+            self.target_iter.reset();
+            self.source_iter.reset();
             try self.diff3_iter.reset();
             for (self.line_buffer.items[self.line_index..]) |buffer| {
                 self.allocator.free(buffer);

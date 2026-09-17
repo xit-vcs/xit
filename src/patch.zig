@@ -148,9 +148,7 @@ pub fn writeAndApplyPatches(
             for ([_]*df.LineIterator(.xit, repo_opts){ &line_iter_pair.a, &line_iter_pair.b }, &line_counts) |iter, *count| {
                 count.* = iter.count();
                 if (count.* == 0) continue;
-                const last_line = try iter.get(count.* - 1);
-                defer iter.free(last_line);
-                if (last_line.len == 0) count.* -= 1;
+                if ((try iter.get(count.* - 1)).len == 0) count.* -= 1;
             }
         }
 
@@ -176,9 +174,9 @@ pub fn writeAndApplyPatches(
                 const text = try file.readText(allocator);
                 defer allocator.free(text);
                 const text_iter = if (file.lines.items.len == 0)
-                    try df.LineIterator(.xit, repo_opts).initFromNothing(io, allocator, line_iter_pair.path)
+                    try df.LineIterator(.xit, repo_opts).initFromNothing(allocator, line_iter_pair.path)
                 else
-                    try df.LineIterator(.xit, repo_opts).initFromBuffer(io, allocator, line_iter_pair.path, &([_]u8{0} ** hash.byteLen(repo_opts.hash)), null, text);
+                    try df.LineIterator(.xit, repo_opts).initFromBuffer(allocator, line_iter_pair.path, &([_]u8{0} ** hash.byteLen(repo_opts.hash)), null, text);
                 line_iter_pair.a.deinit();
                 line_iter_pair.a = text_iter;
             } else {
@@ -239,7 +237,6 @@ pub fn writeAndApplyPatches(
                         },
                         .ins => |ins| {
                             const line = try line_iter_pair.b.get(ins.new_line.num);
-                            defer line_iter_pair.b.free(line);
                             if (text_count > 0 and text_count % File(repo_opts).text_block_size == 0) try offsets.append(allocator, text_buffer.written().len);
                             try writeLengthPrefixedBytes(&text_buffer.writer, line);
                             text_count += 1;

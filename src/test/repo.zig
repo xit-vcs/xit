@@ -3501,7 +3501,7 @@ fn testMergeConflictBinary(
                 });
                 if (side == 0 and i == 0) root_oid = oid;
                 oids[side] = oid;
-                var iter = try df.LineIterator(repo_kind, repo_opts).initFromTestBuffer(io, allocator, content_maybe orelse "");
+                var iter = try df.LineIterator(repo_kind, repo_opts).initFromTestBuffer(allocator, content_maybe orelse "");
                 defer iter.deinit();
                 const is_binary = !std.unicode.utf8ValidateSlice(content_maybe orelse "");
                 try std.testing.expectEqual(is_binary, iter.source == .binary);
