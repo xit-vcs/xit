@@ -238,6 +238,14 @@ const chunk_record_header_size = @sizeOf(CompressKind) + @sizeOf(u32);
 // location of the chunk record and its end position within the object.
 const chunk_entry_size = @sizeOf(u64) + @sizeOf(u32) + @sizeOf(u64);
 
+// an object that fits in one chunk is stored as its own value: its size, then
+// the chunk record. the value carries a format tag, which xitdb records in the
+// slot, so it can be told apart from chunk info without reading anything.
+// such a chunk is never shared: an object with the same content is the same
+// object, and a chunk ending at the end of a file rarely matches another's.
+const inline_format_tag = "in".*;
+const inline_size_len = @sizeOf(u32);
+
 const ChunkLocation = struct {
     position: u64,
     size: u32,
@@ -331,58 +339,77 @@ pub fn writeChunks(
     var chunk_info = std.Io.Writer.Allocating.init(allocator);
     defer chunk_info.deinit();
 
-    // write chunks and their locations as part of the repo transaction
-    const chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
-    const chunk_map = try DB.HashMap(.read_write).init(chunk_map_cursor);
-
-    // scratch space, left uninitialized because zeroing it costs more than small objects do
+    // scratch space, left uninitialized because zeroing it costs more than small objects do.
+    // the record buffer leaves room for the size that precedes an inline record.
     var chunk_buffer: [repo_opts.extra.chunk_opts.max_size]u8 = undefined;
-    var record_buffer: [chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
+    var value_buffer: [inline_size_len + chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
+    const record_buffer = value_buffer[inline_size_len..];
     var iter = FastCdc(repo_opts.extra.chunk_opts).init(object_len);
-    var end_offset: u64 = 0;
-    while (try iter.next(&hashed.reader, &chunk_buffer)) |chunk| {
-        // hash the chunk
-        var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-        try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
-        const chunk_hash_int = hash.bytesToInt(repo_opts.hash, &chunk_hash_bytes);
+    var chunk_maybe = try iter.next(&hashed.reader, &chunk_buffer);
 
-        // write the chunk record unless it already exists
-        const location = if (try chunk_map.getCursor(chunk_hash_int)) |chunk_cursor|
-            try chunkLocation(chunk_cursor, try chunk_cursor.count())
-        else blk: {
-            const record = makeChunkRecord(repo_opts, chunk, &record_buffer);
-            var chunk_cursor = try chunk_map.putCursor(chunk_hash_int);
-            var record_writer = try chunk_cursor.writer(&.{});
-            try record_writer.interface.writeAll(record);
-            try record_writer.finish();
-            break :blk try chunkLocation(chunk_cursor, record.len);
-        };
+    // when the first chunk is also the last, the object is stored inline. its record
+    // is built after the existence check below, since building it compresses the chunk.
+    const inline_chunk_maybe: ?[]const u8 = if (chunk_maybe) |chunk|
+        (if (iter.remaining == 0) chunk else null)
+    else
+        null;
 
-        // write the chunk's location and end offset.
-        // note: we are storing the offset at the *end* of this chunk.
-        // this is useful so we can find the total size of the object
-        // by looking at the last offset.
-        end_offset += chunk.len;
-        try chunk_info.writer.writeInt(u64, location.position, .big);
-        try chunk_info.writer.writeInt(u32, location.size, .big);
-        try chunk_info.writer.writeInt(u64, end_offset, .big);
+    // otherwise its chunks and their locations are written as part of the repo transaction
+    if (inline_chunk_maybe == null) {
+        const chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
+        const chunk_map = try DB.HashMap(.read_write).init(chunk_map_cursor);
+        var end_offset: u64 = 0;
+        while (chunk_maybe) |chunk| : (chunk_maybe = try iter.next(&hashed.reader, &chunk_buffer)) {
+            // hash the chunk
+            var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
+            const chunk_hash_int = hash.bytesToInt(repo_opts.hash, &chunk_hash_bytes);
+
+            // write the chunk record unless it already exists
+            const location = if (try chunk_map.getCursor(chunk_hash_int)) |chunk_cursor|
+                try chunkLocation(chunk_cursor, try chunk_cursor.count())
+            else blk: {
+                const record = makeChunkRecord(repo_opts, chunk, record_buffer);
+                var chunk_cursor = try chunk_map.putCursor(chunk_hash_int);
+                var record_writer = try chunk_cursor.writer(&.{});
+                try record_writer.interface.writeAll(record);
+                try record_writer.finish();
+                break :blk try chunkLocation(chunk_cursor, record.len);
+            };
+
+            // write the chunk's location and end offset.
+            // note: we are storing the offset at the *end* of this chunk.
+            // this is useful so we can find the total size of the object
+            // by looking at the last offset.
+            end_offset += chunk.len;
+            try chunk_info.writer.writeInt(u64, location.position, .big);
+            try chunk_info.writer.writeInt(u32, location.size, .big);
+            try chunk_info.writer.writeInt(u64, end_offset, .big);
+        }
     }
 
     hashed.hasher.final(object_hash_bytes);
     const object_hash = hash.bytesToInt(repo_opts.hash, object_hash_bytes);
 
-    // an object that already exists has its chunks and chunk info. every commit
+    // an object that already exists has its content stored. every commit
     // writes all of its trees, so rewriting them would grow the database each time.
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) |existing_cursor| {
+    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) |existing_cursor| {
         const existing = try DB.HashMap(.read_only).init(existing_cursor);
         if (try existing.getCursor(object_hash) != null) return;
     }
 
     // Write chunk info directly into the object map after every chunk record is
     // finished. xitdb byte writers must be contiguous and cannot be interleaved.
-    const object_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
+    const object_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->content"));
     const object_map = try DB.HashMap(.read_write).init(object_map_cursor);
     try object_map.putKey(object_hash, .{ .bytes = object_kind_name });
+
+    if (inline_chunk_maybe) |chunk| {
+        const record = makeChunkRecord(repo_opts, chunk, record_buffer);
+        std.mem.writeInt(u32, value_buffer[0..inline_size_len], @intCast(object_len), .big);
+        try object_map.put(object_hash, .{ .bytes_object = .{ .value = value_buffer[0 .. inline_size_len + record.len], .format_tag = inline_format_tag } });
+        return;
+    }
 
     var chunk_info_cursor = try object_map.putCursor(object_hash);
     var write_buffer: [repo_opts.buffer_size]u8 = undefined;
@@ -445,21 +472,31 @@ pub fn loadChunk(
     // offsets come from the database, so a damaged entry must be an error, not a panic
     const chunk_size = std.math.cast(usize, std.math.sub(u64, end_offset, object_offset) catch return error.WrongChunkSize) orelse return error.WrongChunkSize;
 
-    var reader_buffer: [chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
-    if (record_size < chunk_record_header_size or record_size > reader_buffer.len or chunk_size > buf.len) {
-        return error.WrongChunkSize;
-    }
-    var reader = db.core.reader();
-    try reader.seekTo(record_position + @sizeOf(u64));
-    try reader.interface.readSliceAll(reader_buffer[0..record_size]);
-    const record = reader_buffer[0..record_size];
+    try readRecord(repo_opts, db, record_position + @sizeOf(u64), record_size, chunk_size, buf);
+    return .{ .object_offset = object_offset, .len = chunk_size };
+}
 
-    // parse the record header
+// read the chunk record that starts at `position`, decompress it into `buf` if
+// necessary, and check it against the expected size and the checksum
+fn readRecord(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    db: *rp.Repo(.xit, repo_opts).DB,
+    position: u64,
+    record_size: u32,
+    chunk_size: usize,
+    buf: []u8,
+) !void {
+    var record_buffer: [chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
+    if (record_size < chunk_record_header_size or record_size > record_buffer.len or chunk_size > buf.len) return error.WrongChunkSize;
+    var reader = db.core.reader();
+    try reader.seekTo(position);
+    try reader.interface.readSliceAll(record_buffer[0..record_size]);
+    const record = record_buffer[0..record_size];
+
     const compress_kind = std.enums.fromInt(CompressKind, record[0]) orelse return error.InvalidEnumTag;
     const expected_checksum = std.mem.readInt(u32, record[@sizeOf(CompressKind)..chunk_record_header_size], .big);
     const payload = record[chunk_record_header_size..];
 
-    // get the chunk, decompressing if necessary
     const chunk = switch (compress_kind) {
         .none => payload,
         .zlib => zlib: {
@@ -472,20 +509,11 @@ pub fn loadChunk(
         },
     };
 
-    if (chunk.len != chunk_size) {
-        return error.WrongChunkSize;
-    }
-    if (std.hash.Adler32.hash(chunk) != expected_checksum) {
-        return error.WrongChunkChecksum;
-    }
+    if (chunk.len != chunk_size) return error.WrongChunkSize;
+    if (std.hash.Adler32.hash(chunk) != expected_checksum) return error.WrongChunkChecksum;
 
-    // uncompressed payloads still point into the reader buffer,
-    // so they must be copied into `buf`
-    if (compress_kind == .none) {
-        @memcpy(buf[0..chunk.len], chunk);
-    }
-
-    return .{ .object_offset = object_offset, .len = chunk.len };
+    // an uncompressed payload still points into the record, so copy it
+    if (compress_kind == .none) @memcpy(buf[0..chunk.len], chunk);
 }
 
 pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
@@ -497,11 +525,14 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
         // into memory on the first read. It's tiny compared to the object
         // (one entry per chunk, and chunks are thousands of bytes).
         chunk_info: ?[]u8,
+        // where the record of an inline object is, instead of chunk info
+        inline_record: ?ChunkLocation,
         position: u64,
         header: obj.ObjectHeader,
         // the most recently decompressed chunk and the object range it covers,
         // so reads within one chunk (the common case) are plain memcpys instead
-        // of re-opening the chunk file and re-decompressing it each time
+        // of re-reading and re-decompressing it each time. allocated on the
+        // first read, because many objects are only opened for their header.
         chunk_cache: []u8,
         cache_start: u64,
         cache_end: u64,
@@ -513,7 +544,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             oid: *const [hash.hexLen(repo_opts.hash)]u8,
         ) !ChunkObjectReader(repo_opts) {
             // chunk info map
-            const object_id_to_chunk_info_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) orelse return error.ObjectNotFound;
+            const object_id_to_chunk_info_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return error.ObjectNotFound;
             const object_id_to_chunk_info = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(object_id_to_chunk_info_cursor);
             var chunk_info_kv_pair = (try object_id_to_chunk_info.getKeyValuePair(try hash.hexToInt(repo_opts.hash, oid))) orelse return error.ObjectNotFound;
 
@@ -522,7 +553,21 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const object_kind_name = try chunk_info_kv_pair.key_cursor.readBytes(&object_kind_name_buffer);
 
             // object size
-            const object_size = blk: {
+            var inline_record: ?ChunkLocation = null;
+            const value_slot = chunk_info_kv_pair.value_cursor.slot();
+            const object_size = if (value_slot.full) blk: {
+                // a tagged value is an inline object. one read gets the byte
+                // array's length and the object size in front of the record.
+                if (value_slot.tag != .bytes) return error.UnexpectedTag;
+                var head: [@sizeOf(u64) + inline_size_len]u8 = undefined;
+                var reader = state.core.db.core.reader();
+                try reader.seekTo(value_slot.value);
+                try reader.interface.readSliceAll(&head);
+                const value_size = std.mem.readInt(u64, head[0..@sizeOf(u64)], .big);
+                const record_size = std.math.cast(u32, std.math.sub(u64, value_size, inline_size_len) catch return error.WrongChunkSize) orelse return error.WrongChunkSize;
+                inline_record = .{ .position = value_slot.value + head.len, .size = record_size };
+                break :blk std.mem.readInt(u32, head[@sizeOf(u64)..], .big);
+            } else blk: {
                 var read_buffer: [repo_opts.buffer_size]u8 = undefined;
                 var reader = try chunk_info_kv_pair.value_cursor.reader(&read_buffer);
                 if (reader.size == 0) {
@@ -534,24 +579,18 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 }
             };
 
-            // no chunk can be larger than the object itself, so small objects
-            // (the common case for trees and commits) get a small cache.
-            // add 1 so streamRemaining can drain a full-sized chunk
-            const max_chunk_size: usize = @intCast(@min(object_size, repo_opts.extra.chunk_opts.max_size));
-            const chunk_cache = try allocator.alloc(u8, max_chunk_size + 1);
-            errdefer allocator.free(chunk_cache);
-
             return .{
                 .db = &state.core.db,
                 .allocator = allocator,
                 .chunk_info_cursor = chunk_info_kv_pair.value_cursor,
                 .chunk_info = null,
+                .inline_record = inline_record,
                 .position = 0,
                 .header = .{
                     .kind = try obj.ObjectKind.init(object_kind_name),
                     .size = object_size,
                 },
-                .chunk_cache = chunk_cache,
+                .chunk_cache = &.{},
                 .cache_start = 0,
                 .cache_end = 0,
             };
@@ -581,21 +620,39 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             // load the chunk that covers the current position when it falls
             // outside the cached range
             if (self.position < self.cache_start or self.position >= self.cache_end) {
-                // read the chunk info into memory the first time it's needed
-                const chunk_info = self.chunk_info orelse blk: {
-                    var read_buffer: [repo_opts.buffer_size]u8 = undefined;
-                    var reader = try self.chunk_info_cursor.reader(&read_buffer);
-                    const chunk_info = try self.allocator.alloc(u8, @intCast(reader.size));
-                    errdefer self.allocator.free(chunk_info);
-                    try reader.interface.readSliceAll(chunk_info);
-                    self.chunk_info = chunk_info;
-                    break :blk chunk_info;
-                };
+                if (self.position >= self.header.size) return 0;
 
-                const chunk_index = findChunkIndex(chunk_info, self.position) orelse return 0;
-                const span = try loadChunk(repo_opts, chunk_info, self.db, chunk_index, self.chunk_cache);
-                self.cache_start = span.object_offset;
-                self.cache_end = span.object_offset + span.len;
+                // no chunk can be larger than the object itself, so small objects
+                // (the common case for trees and commits) get a small cache.
+                // add 1 so streamRemaining can drain a full-sized chunk
+                if (self.chunk_cache.len == 0) {
+                    const max_chunk_size: usize = @intCast(@min(self.header.size, repo_opts.extra.chunk_opts.max_size));
+                    self.chunk_cache = try self.allocator.alloc(u8, max_chunk_size + 1);
+                }
+
+                // an inline object is a single record covering the whole object
+                if (self.inline_record) |location| {
+                    const object_size = std.math.cast(usize, self.header.size) orelse return error.WrongChunkSize;
+                    try readRecord(repo_opts, self.db, location.position, location.size, object_size, self.chunk_cache);
+                    self.cache_start = 0;
+                    self.cache_end = self.header.size;
+                } else {
+                    // read the chunk info into memory the first time it's needed
+                    const chunk_info = self.chunk_info orelse blk: {
+                        var read_buffer: [repo_opts.buffer_size]u8 = undefined;
+                        var reader = try self.chunk_info_cursor.reader(&read_buffer);
+                        const chunk_info = try self.allocator.alloc(u8, @intCast(reader.size));
+                        errdefer self.allocator.free(chunk_info);
+                        try reader.interface.readSliceAll(chunk_info);
+                        self.chunk_info = chunk_info;
+                        break :blk chunk_info;
+                    };
+
+                    const chunk_index = findChunkIndex(chunk_info, self.position) orelse return 0;
+                    const span = try loadChunk(repo_opts, chunk_info, self.db, chunk_index, self.chunk_cache);
+                    self.cache_start = span.object_offset;
+                    self.cache_end = span.object_offset + span.len;
+                }
                 if (self.position < self.cache_start or self.position >= self.cache_end) return 0;
             }
 

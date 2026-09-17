@@ -175,7 +175,7 @@ pub fn prune(
     // because entries can't be removed while the map is being iterated.
     // writing copies the map, so the cursor keeps seeing every entry.
 
-    try pruneOidMap(repo_opts, state, &live_oids, "object-id->chunk-info");
+    try pruneOidMap(repo_opts, state, &live_oids, "object-id->content");
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
@@ -337,13 +337,15 @@ fn findReferencedPositions(
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
-    const map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) orelse return;
+    const map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
     const map = try DB.HashMap(.read_only).init(map_cursor);
 
     var iter = try map.iterator();
     while (try iter.next()) |*entry_cursor| {
         var kv_pair = try entry_cursor.readKeyValuePair();
         if (!live_oids.contains(kv_pair.hash)) continue;
+        // an inline object holds its own record instead of positions
+        if (kv_pair.value_cursor.slot().full) continue;
 
         const chunk_info = try readChunkInfoAlloc(repo_opts, &kv_pair.value_cursor, allocator);
         defer allocator.free(chunk_info);
@@ -363,7 +365,7 @@ fn patchChunkInfoPositions(
     compaction_map: *DiskOffsets,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
-    const map_cursor = (try source_moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) orelse return;
+    const map_cursor = (try source_moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
     const object_map = try DB.HashMap(.read_only).init(map_cursor);
 
     var write_buffer: [repo_opts.buffer_size]u8 = undefined;
@@ -372,6 +374,8 @@ fn patchChunkInfoPositions(
     var iter = try object_map.iterator();
     while (try iter.next()) |*entry_cursor| {
         var kv_pair = try entry_cursor.readKeyValuePair();
+        // an inline object holds its own record instead of positions
+        if (kv_pair.value_cursor.slot().full) continue;
         const source_position = kv_pair.value_cursor.slot().value;
         const target_position = (try compaction_map.get(source_position)) orelse return error.ChunkInfoNotFound;
 

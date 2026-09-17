@@ -4533,3 +4533,66 @@ fn testMergeDryRun(
         try repo.core.repo_dir.access(io, "MERGE_MSG", .{});
     }
 }
+
+test "inline and chunked objects" {
+    // an empty object has no chunk at all, so it keeps an empty chunk info
+    try testObjectStorage(0, false, false);
+    try testObjectStorage(1, true, false);
+    // anything up to the minimum chunk size is a single chunk
+    try testObjectStorage(4096, true, false);
+    try testObjectStorage(200_000, false, false);
+    // a gc moves every record
+    try testObjectStorage(0, false, true);
+    try testObjectStorage(1, true, true);
+    try testObjectStorage(4096, true, true);
+    try testObjectStorage(200_000, false, true);
+}
+
+fn testObjectStorage(size: usize, expect_inline: bool, collect: bool) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    // random content can't be compressed, so both record kinds get exercised along with text
+    const content = try allocator.alloc(u8, size);
+    defer allocator.free(content);
+    var prng = std.Random.DefaultPrng.init(size);
+    prng.random().bytes(content);
+    try addFile(.xit, opts, &repo, io, allocator, "random", content);
+    try addFile(.xit, opts, &repo, io, allocator, "text", "some text that compresses, some text that compresses\n");
+    _ = try repo.commit(io, allocator, .{ .message = "commit" });
+
+    if (collect) _ = try repo.garbageCollect(io, allocator, .{});
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(.xit, opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var index = try idx.Index(.xit, opts).init(state, io, allocator);
+    defer index.deinit();
+    const entry = (index.entries.get("random") orelse return error.EntryNotFound)[0] orelse return error.EntryNotFound;
+
+    const value_cursor = (try moment.cursor.readPath(void, &.{
+        .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "object-id->content") } },
+        .{ .hash_map_get = .{ .value = hash.bytesToInt(opts.hash, &entry.oid) } },
+    })).?;
+    try std.testing.expectEqual(expect_inline, value_cursor.slot().full);
+
+    var reader = try obj.ObjectReader(.xit, opts).init(state, io, allocator, &std.fmt.bytesToHex(entry.oid, .lower));
+    defer reader.deinit();
+    try std.testing.expectEqual(size, reader.header().size);
+    const actual = try reader.interface.allocRemaining(allocator, .unlimited);
+    defer allocator.free(actual);
+    try std.testing.expectEqualSlices(u8, content, actual);
+
+    // seeking into the middle works for both forms
+    if (size > 1) {
+        try reader.seekTo(size / 2);
+        try std.testing.expectEqual(content[size / 2], try reader.interface.takeByte());
+    }
+}
