@@ -50,8 +50,9 @@
 //! how patches are applied: load the snapshot and collect edits from the chosen
 //! patches, skipping those already applied. verify their dependencies and removed
 //! line ids, apply removals and insertions, then sort the remaining lines by
-//! position. when merging, compare edits to find conflict regions. return the
-//! updated file and newly applied edit ids for saving or writing the merged text.
+//! position. when merging, compare the new edits with those the base lacks to
+//! find conflict regions. return the updated file and newly applied edit ids
+//! for saving or writing the merged text.
 
 const std = @import("std");
 const rp = @import("./repo.zig");
@@ -394,7 +395,8 @@ pub const CommitStats = struct {
 // the base snapshot, when given, must be an ancestor of the target snapshot
 // and of every commit the patches came from. edits it already applied are
 // skipped during conflict detection, since every new edit was made on a
-// lineage that included them.
+// lineage that included them. the patches themselves must come from one
+// first-parent chain; they aren't checked for conflicts with each other.
 pub fn applyPatches(
     comptime opts: rp.RepoOpts(.xit),
     moment: *const rp.Repo(.xit, opts).DB.HashMap(.read_only),
@@ -412,7 +414,6 @@ pub fn applyPatches(
         .edits = .empty,
     };
     errdefer application.deinit(allocator);
-    if (kind == .create and application.file.has_conflict) return error.ConflictedPatchSnapshot;
     const base_edits: ?DB.HashSet(.read_only) = if (base_snapshot) |base| blk: {
         const cursor = (try base.readPath(void, &.{
             .{ .hash_map_get = .{ .value = path_hash } },
@@ -540,17 +541,13 @@ fn applyPatchesToFile(
         }
     }
 
-    // compare new edits with concurrent applied edits and with each other
-    for (pending.keys(), 0..) |id, edit_index| {
+    // compare new edits with concurrent applied edits. new edits come from one
+    // lineage, so each was made with knowledge of the earlier ones.
+    for (pending.keys()) |id| {
         _ = scratch.reset(.retain_capacity);
         const edit = try file.readEdit(id, scratch.allocator());
         const edit_range = try file.range(edit, scratch.allocator());
         for (concurrent.items) |other_id| {
-            _ = other_arena.reset(.retain_capacity);
-            const other = try file.readEdit(other_id, other_arena.allocator());
-            if (try file.conflict(edit, edit_range, other, other_arena.allocator())) |region| try file.addRegion(region);
-        }
-        for (pending.keys()[0..edit_index]) |other_id| {
             _ = other_arena.reset(.retain_capacity);
             const other = try file.readEdit(other_id, other_arena.allocator());
             if (try file.conflict(edit, edit_range, other, other_arena.allocator())) |region| try file.addRegion(region);
@@ -725,12 +722,6 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         }
 
         pub fn deinit(self: *Self) void {
-            const allocator = self.arena.child_allocator;
-            for (self.regions.items) |region| {
-                allocator.free(region.start);
-                allocator.free(region.end);
-            }
-            self.regions.deinit(allocator);
             self.arena.deinit();
         }
 
@@ -938,24 +929,19 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         }
 
         fn addRegion(self: *Self, value: Region) !void {
-            const allocator = self.arena.child_allocator;
+            for (self.regions.items) |region| {
+                if (!less(value.start, region.start) and !endsBefore(region.end, value.end)) return;
+            }
+            const allocator = self.arena.allocator();
             var start: []const u8 = try allocator.dupe(u8, value.start);
-            errdefer allocator.free(start);
             var end: []const u8 = try allocator.dupe(u8, value.end);
-            errdefer allocator.free(end);
             var i: usize = 0;
             while (i < self.regions.items.len) {
                 const region = Region{ .start = start, .end = end };
                 const other = self.regions.items[i];
                 if (region.contains(other.start) or other.contains(region.start)) {
-                    if (less(other.start, start)) {
-                        allocator.free(start);
-                        start = other.start;
-                    } else allocator.free(other.start);
-                    if (endsBefore(end, other.end)) {
-                        allocator.free(end);
-                        end = other.end;
-                    } else allocator.free(other.end);
+                    if (less(other.start, start)) start = other.start;
+                    if (endsBefore(end, other.end)) end = other.end;
                     _ = self.regions.swapRemove(i);
                     i = 0;
                 } else i += 1;
@@ -1082,7 +1068,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 if (value.len > start.len and std.mem.startsWith(u8, value, start)) return error.InvalidGapList;
             }
             const count = try reader.interface.takeInt(u32, .big);
-            if (count > (reader.size -| reader.logicalPos()) / hash.byteLen(opts.hash)) return error.InvalidEdit;
+            if (count > (reader.size -| reader.logicalPos()) / hash.byteLen(opts.hash)) return error.InvalidGapList;
             const deps = try allocator.alloc(Id, count);
             for (deps) |*dep| dep.* = try reader.interface.takeInt(Id, .big);
             return .{ .start = start, .end = end, .deps = deps };
