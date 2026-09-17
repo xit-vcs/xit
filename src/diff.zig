@@ -23,19 +23,13 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
 
         // text is read once and kept in memory. lines are slices of the content.
         const Source = union(enum) {
-            buffer: struct {
-                arena: *std.heap.ArenaAllocator,
-                content: []const u8,
-            },
+            buffer: []const u8,
             nothing,
             binary,
 
             fn deinit(self: *Source, allocator: std.mem.Allocator) void {
                 switch (self.*) {
-                    .buffer => |*buffer| {
-                        buffer.arena.deinit();
-                        allocator.destroy(buffer.arena);
-                    },
+                    .buffer => |buffer| allocator.free(buffer),
                     .nothing => {},
                     .binary => {},
                 }
@@ -222,14 +216,9 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             self.line_offsets = &.{};
             if (limited and self.size > repo_opts.max_text_size) return;
 
-            const arena = try self.allocator.create(std.heap.ArenaAllocator);
-            arena.* = std.heap.ArenaAllocator.init(self.allocator);
-            errdefer {
-                arena.deinit();
-                self.allocator.destroy(arena);
-            }
             // the size is known, so reserve it once instead of growing by copies
-            var content = try std.Io.Writer.Allocating.initCapacity(arena.allocator(), @intCast(self.size));
+            var content = try std.Io.Writer.Allocating.initCapacity(self.allocator, @intCast(self.size));
+            errdefer content.deinit();
             var offsets: std.ArrayList(usize) = .empty;
             errdefer offsets.deinit(self.allocator);
             const limit: std.Io.Limit = if (limited) .limited(repo_opts.max_line_size) else .unlimited;
@@ -252,11 +241,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             };
 
             if (is_text) {
-                self.source = .{ .buffer = .{ .arena = arena, .content = content.written() } };
                 self.line_offsets = try offsets.toOwnedSlice(self.allocator);
+                self.source = .{ .buffer = try content.toOwnedSlice() };
             } else {
-                arena.deinit();
-                self.allocator.destroy(arena);
+                content.deinit();
                 offsets.clearAndFree(self.allocator);
             }
         }
@@ -268,9 +256,9 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             };
             if (self.current_line >= self.line_offsets.len) return null;
             const start = self.line_offsets[self.current_line];
-            const end = if (self.current_line + 1 < self.line_offsets.len) self.line_offsets[self.current_line + 1] - 1 else buffer.content.len;
+            const end = if (self.current_line + 1 < self.line_offsets.len) self.line_offsets[self.current_line + 1] - 1 else buffer.len;
             self.current_line += 1;
-            return buffer.content[start..end];
+            return buffer[start..end];
         }
 
         pub fn get(self: *Self, line_num: usize) ![]const u8 {
