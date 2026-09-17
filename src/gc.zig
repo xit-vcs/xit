@@ -169,7 +169,7 @@ pub fn prune(
     // find every chunk record referenced by a live object
     var referenced_positions = std.AutoHashMap(u64, void).init(allocator);
     defer referenced_positions.deinit();
-    try findReferencedPositions(repo_opts, state.readOnly(), allocator, &live_oids, &referenced_positions);
+    try findReferencedPositions(repo_opts, state.readOnly(), &live_oids, &referenced_positions);
 
     // each map is iterated through a cursor taken before it is written to,
     // because entries can't be removed while the map is being iterated.
@@ -238,10 +238,7 @@ pub fn compactDatabase(
         .fsync = false,
     }, &offset_map);
 
-    // chunk info holds the position of each chunk record, which compaction
-    // has just moved, so patch them in the unpublished database.
-    const moment = try repo.core.latestMoment();
-    try patchChunkInfoPositions(repo_opts, moment, io, allocator, new_db_file, &offset_map);
+    // objects point at their chunk records through slots, so compaction has already moved them
     try new_db_file.sync(io);
 
     const size_after = try new_db_file.length(io);
@@ -327,11 +324,10 @@ fn findLiveOids(
     }
 }
 
-// collects every chunk record position referenced by a live object's chunk info
+// collects the position of every chunk record a live object points at
 fn findReferencedPositions(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
-    allocator: std.mem.Allocator,
     live_oids: *const std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
     referenced_positions: *std.AutoHashMap(u64, void),
 ) !void {
@@ -342,63 +338,10 @@ fn findReferencedPositions(
 
     var iter = try map.iterator();
     while (try iter.next()) |*entry_cursor| {
-        var kv_pair = try entry_cursor.readKeyValuePair();
+        const kv_pair = try entry_cursor.readKeyValuePair();
         if (!live_oids.contains(kv_pair.hash)) continue;
-        // an inline object holds its own record instead of positions
-        if (kv_pair.value_cursor.slot().full) continue;
-
-        const chunk_info = try readChunkInfoAlloc(repo_opts, &kv_pair.value_cursor, allocator);
-        defer allocator.free(chunk_info);
-        try chunk.collectRecordPositions(chunk_info, referenced_positions);
+        // only a chunked object points at records. inline and empty objects are plain values.
+        if (kv_pair.value_cursor.slot().tag != .array_list) continue;
+        try chunk.collectRecordPositions(repo_opts, kv_pair.value_cursor, referenced_positions);
     }
-}
-
-// patch opaque chunk-record positions in the unpublished database. the
-// compaction map both locates each chunk-info byte array in the target and
-// relocates the record positions stored inside it.
-fn patchChunkInfoPositions(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    source_moment: rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    target_file: std.Io.File,
-    compaction_map: *DiskOffsets,
-) !void {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const map_cursor = (try source_moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
-    const object_map = try DB.HashMap(.read_only).init(map_cursor);
-
-    var write_buffer: [repo_opts.buffer_size]u8 = undefined;
-    var writer = target_file.writer(io, &write_buffer);
-
-    var iter = try object_map.iterator();
-    while (try iter.next()) |*entry_cursor| {
-        var kv_pair = try entry_cursor.readKeyValuePair();
-        // an inline object holds its own record instead of positions
-        if (kv_pair.value_cursor.slot().full) continue;
-        const source_position = kv_pair.value_cursor.slot().value;
-        const target_position = (try compaction_map.get(source_position)) orelse return error.ChunkInfoNotFound;
-
-        const chunk_info = try readChunkInfoAlloc(repo_opts, &kv_pair.value_cursor, allocator);
-        defer allocator.free(chunk_info);
-        try chunk.rewriteRecordPositions(chunk_info, compaction_map);
-
-        try writer.seekTo(target_position + @sizeOf(u64));
-        try writer.interface.writeAll(chunk_info);
-    }
-    try writer.interface.flush();
-}
-
-// reads an object's chunk info into memory
-fn readChunkInfoAlloc(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    cursor: *rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-    allocator: std.mem.Allocator,
-) ![]u8 {
-    var read_buffer: [repo_opts.buffer_size]u8 = undefined;
-    var reader = try cursor.reader(&read_buffer);
-    const chunk_info = try allocator.alloc(u8, @intCast(reader.size));
-    errdefer allocator.free(chunk_info);
-    try reader.interface.readSliceAll(chunk_info);
-    return chunk_info;
 }

@@ -4596,3 +4596,48 @@ fn testObjectStorage(size: usize, expect_inline: bool, collect: bool) !void {
         try std.testing.expectEqual(content[size / 2], try reader.interface.takeByte());
     }
 }
+
+test "shared chunks survive gc" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    // the second object begins with the first one's bytes, so they share chunks
+    const content = try allocator.alloc(u8, 300_000);
+    defer allocator.free(content);
+    var prng = std.Random.DefaultPrng.init(300_000);
+    prng.random().bytes(content);
+    const kept = content[0..200_000];
+    try addFile(.xit, opts, &repo, io, allocator, "kept", kept);
+    _ = try repo.commit(io, allocator, .{ .message = "kept", .timestamp = 1 });
+    try repo.addBranch(io, .{ .name = "side" });
+    var switched = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "side" } } });
+    defer switched.deinit();
+    try addFile(.xit, opts, &repo, io, allocator, "dead", content);
+    _ = try repo.commit(io, allocator, .{ .message = "dead", .timestamp = 2 });
+    var switched_back = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+    defer switched_back.deinit();
+    try repo.removeBranch(io, .{ .name = "side" });
+
+    // the dead object's own chunks go, but the ones it shared must stay
+    const result = try repo.garbageCollect(io, allocator, .{});
+    try std.testing.expect(result.size_after < result.size_before);
+    var moment = try repo.core.latestMoment();
+    const state = rp.Repo(.xit, opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
+    var index = try idx.Index(.xit, opts).init(state, io, allocator);
+    defer index.deinit();
+    const entry = (index.entries.get("kept") orelse return error.EntryNotFound)[0] orelse return error.EntryNotFound;
+    var reader = try obj.ObjectReader(.xit, opts).init(state, io, allocator, &std.fmt.bytesToHex(entry.oid, .lower));
+    defer reader.deinit();
+    const actual = try reader.interface.allocRemaining(allocator, .unlimited);
+    defer allocator.free(actual);
+    try std.testing.expectEqualSlices(u8, kept, actual);
+}
