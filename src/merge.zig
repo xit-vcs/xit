@@ -308,14 +308,11 @@ pub fn MergeConflict(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-/// the lines from one side of a conflicted region
+/// the lines from one side of a conflicted region, borrowed from their source
 const LineRange = struct {
     lines: std.ArrayList([]const u8),
 
     fn deinit(self: *LineRange, allocator: std.mem.Allocator) void {
-        for (self.lines.items) |line| {
-            allocator.free(line);
-        }
         self.lines.deinit(allocator);
     }
 
@@ -359,61 +356,35 @@ const ConflictMarkers = struct {
 
 /// append the resolution of a conflicted region to the line buffer: the
 /// autoresolved side if two sides agree, otherwise all three sides wrapped
-/// in conflict markers. returns true if there was a conflict. the lines are
-/// moved (not copied) out of the given ranges.
+/// in conflict markers. returns true if there was a conflict. the buffer
+/// borrows the lines and markers, which must outlive it.
 fn appendResolvedOrConflict(
     allocator: std.mem.Allocator,
     line_buffer: *std.ArrayList([]const u8),
     markers: *const ConflictMarkers,
-    base_lines: *LineRange,
-    target_lines: *LineRange,
-    source_lines: *LineRange,
+    base_lines: LineRange,
+    target_lines: LineRange,
+    source_lines: LineRange,
 ) !bool {
     // if base == target or target == source, return source to autoresolve conflict
-    if (base_lines.eql(target_lines.*) or target_lines.eql(source_lines.*)) {
+    if (base_lines.eql(target_lines) or target_lines.eql(source_lines)) {
         try line_buffer.appendSlice(allocator, source_lines.lines.items);
-        source_lines.lines.clearAndFree(allocator);
         return false;
     }
     // if base == source, return target to autoresolve conflict
-    else if (base_lines.eql(source_lines.*)) {
+    else if (base_lines.eql(source_lines)) {
         try line_buffer.appendSlice(allocator, target_lines.lines.items);
-        target_lines.lines.clearAndFree(allocator);
         return false;
     }
 
     // return conflict
-
-    const target_marker = try allocator.dupe(u8, markers.target);
-    {
-        errdefer allocator.free(target_marker);
-        try line_buffer.append(allocator, target_marker);
-    }
+    try line_buffer.append(allocator, markers.target);
     try line_buffer.appendSlice(allocator, target_lines.lines.items);
-    target_lines.lines.clearAndFree(allocator);
-
-    const base_marker = try allocator.dupe(u8, markers.base);
-    {
-        errdefer allocator.free(base_marker);
-        try line_buffer.append(allocator, base_marker);
-    }
+    try line_buffer.append(allocator, markers.base);
     try line_buffer.appendSlice(allocator, base_lines.lines.items);
-    base_lines.lines.clearAndFree(allocator);
-
-    const separate_marker = try allocator.dupe(u8, ConflictMarkers.separate);
-    {
-        errdefer allocator.free(separate_marker);
-        try line_buffer.append(allocator, separate_marker);
-    }
-
+    try line_buffer.append(allocator, ConflictMarkers.separate);
     try line_buffer.appendSlice(allocator, source_lines.lines.items);
-    source_lines.lines.clearAndFree(allocator);
-    const source_marker = try allocator.dupe(u8, markers.source);
-    {
-        errdefer allocator.free(source_marker);
-        try line_buffer.append(allocator, source_marker);
-    }
-
+    try line_buffer.append(allocator, markers.source);
     return true;
 }
 
@@ -455,25 +426,11 @@ fn writeBlobWithDiff3(
     const initLineRange = struct {
         fn init(inner_allocator: std.mem.Allocator, iter: *df.LineIterator(repo_kind, repo_opts), range_maybe: ?df.Diff3Iterator(repo_kind, repo_opts).Range) !LineRange {
             var lines: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (lines.items) |line| {
-                    inner_allocator.free(line);
-                }
-                lines.deinit(inner_allocator);
-            }
+            errdefer lines.deinit(inner_allocator);
             if (range_maybe) |range| {
-                for (range.begin..range.end) |line_num| {
-                    const line = try iter.get(line_num);
-                    {
-                        const line_dupe = try inner_allocator.dupe(u8, line);
-                        errdefer inner_allocator.free(line_dupe);
-                        try lines.append(inner_allocator, line_dupe);
-                    }
-                }
+                for (range.begin..range.end) |line_num| try lines.append(inner_allocator, try iter.get(line_num));
             }
-            return .{
-                .lines = lines,
-            };
+            return .{ .lines = lines };
         }
     }.init;
 
@@ -484,7 +441,7 @@ fn writeBlobWithDiff3(
         target_iter: *df.LineIterator(repo_kind, repo_opts),
         source_iter: *df.LineIterator(repo_kind, repo_opts),
         diff3_iter: *df.Diff3Iterator(repo_kind, repo_opts),
-        line_buffer: std.ArrayList([]const u8) = .empty,
+        line_buffer: std.ArrayList([]const u8) = .empty, // borrowed from the iterators and markers
         line_index: usize = 0,
         current_line: ?[]const u8,
         needs_newline: bool = false,
@@ -508,14 +465,7 @@ fn writeBlobWithDiff3(
                 const chunk = try self.diff3_iter.next() orelse break;
                 switch (chunk) {
                     .clean => |clean| {
-                        for (clean.begin..clean.end) |line_num| {
-                            const line = try self.base_iter.get(line_num);
-                            {
-                                const line_dupe = try self.allocator.dupe(u8, line);
-                                errdefer self.allocator.free(line_dupe);
-                                try self.line_buffer.append(self.allocator, line_dupe);
-                            }
-                        }
+                        for (clean.begin..clean.end) |line_num| try self.line_buffer.append(self.allocator, try self.base_iter.get(line_num));
                     },
                     .conflict => |conflict| {
                         var base_lines = try initLineRange(self.allocator, self.base_iter, conflict.o_range);
@@ -525,7 +475,7 @@ fn writeBlobWithDiff3(
                         var source_lines = try initLineRange(self.allocator, self.source_iter, conflict.b_range);
                         defer source_lines.deinit(self.allocator);
 
-                        if (try appendResolvedOrConflict(self.allocator, &self.line_buffer, self.markers, &base_lines, &target_lines, &source_lines)) {
+                        if (try appendResolvedOrConflict(self.allocator, &self.line_buffer, self.markers, base_lines, target_lines, source_lines)) {
                             self.has_conflict = true;
                         }
                     },
@@ -545,7 +495,6 @@ fn writeBlobWithDiff3(
             self.current_line = current_line[size..];
             if (size < current_line.len) return size;
 
-            self.allocator.free(self.line_buffer.items[self.line_index]);
             self.line_index += 1;
             if (self.line_index < self.line_buffer.items.len) {
                 self.current_line = self.line_buffer.items[self.line_index];
@@ -563,9 +512,6 @@ fn writeBlobWithDiff3(
             self.target_iter.reset();
             self.source_iter.reset();
             try self.diff3_iter.reset();
-            for (self.line_buffer.items[self.line_index..]) |buffer| {
-                self.allocator.free(buffer);
-            }
             self.line_buffer.clearAndFree(self.allocator);
             self.line_index = 0;
             self.current_line = null;
@@ -619,10 +565,7 @@ fn writeBlobWithDiff3(
             .end = 0,
         },
     };
-    defer {
-        for (stream.line_buffer.items[stream.line_index..]) |buffer| allocator.free(buffer);
-        stream.line_buffer.deinit(allocator);
-    }
+    defer stream.line_buffer.deinit(allocator);
 
     const header = obj.ObjectHeader{ .kind = .blob, .size = try stream.count() };
     has_conflict.* = stream.has_conflict;
@@ -740,7 +683,7 @@ fn writeBlobWithPatches(
                     if (region.contains(line.position)) try range.lines.append(render_allocator, try reader.readLine(line.id, render_allocator));
                 }
             }
-            if (try appendResolvedOrConflict(render_allocator, &lines, &markers, &ranges[0], &ranges[1], &ranges[2])) has_conflict.* = true;
+            if (try appendResolvedOrConflict(render_allocator, &lines, &markers, ranges[0], ranges[1], ranges[2])) has_conflict.* = true;
             while (index < merged_file.lines.items.len and region.contains(merged_file.lines.items[index].position)) : (index += 1) {}
         }
     }
