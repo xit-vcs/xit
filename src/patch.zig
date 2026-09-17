@@ -29,13 +29,13 @@
 //!   0xffffffff is the file end), then a counted list of dependency ids: the
 //!   neighbors' edits and the deletions that made them adjacent;
 //! - a u32 inserted-line count;
+//! - a hash of the inserted lines, each as a u32 byte length and its text
+//!   without '\n';
 //! - only for replacements, the placement: a length-prefixed prefix, then the
-//!   u64 bounds its ordinals lie strictly between;
-//! - u64 text offsets for inserted lines 64, 128, etc. line 0's offset is zero;
-//! - each inserted line as a u32 byte length and its text, without '\n'.
-//! integers are big endian. offsets are relative to the start of the text data.
-//! the edit id hashes the record excluding placement (including its length)
-//! and the offset table. paths, commits, and unrelated edits aren't part of it.
+//!   u64 bounds its ordinals lie strictly between.
+//! integers are big endian. the edit id hashes the record excluding placement.
+//! paths, commits, and unrelated edits aren't part of it. the text itself isn't
+//! stored: line i of a snapshot is line i of the blob named by its oid field.
 //!
 //! positions are sequences of (u64 ordinal, edit id) pairs, compared as bytes.
 //! lines under the same prefix are siblings ordered by ordinal, then by id. an
@@ -167,30 +167,31 @@ pub fn writeAndApplyPatches(
         var gap_list: ?File(repo_opts).GapList = null;
         var next_gaps: std.ArrayList([]const Id) = .empty;
         defer next_gaps.deinit(allocator);
+        // the line ids the new file must have, in order
+        var expected: std.ArrayList(LineId(repo_opts.hash).Int) = .empty;
+        defer expected.deinit(allocator);
 
         // create and store the patch. each run of insertions/deletions
         // becomes an edit with its own id and text.
         const patch_hash = blk: {
+            var recorded = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            if (try snapshot.cursor.readOnly().readPath(void, &.{
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(FileField.oid) },
+            })) |cursor| {
+                if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
+            }
             if (line_iter_pair.a.source == .binary) {
-                // compare to the retained text, even if its blob is no longer stored
-                const text = try file.readText(allocator);
-                defer allocator.free(text);
+                // compare to the retained text state, which its recorded blob holds
                 const text_iter = if (file.lines.items.len == 0)
                     try df.LineIterator(.xit, repo_opts).initFromNothing(allocator, line_iter_pair.path)
                 else
-                    try df.LineIterator(.xit, repo_opts).initFromBuffer(allocator, line_iter_pair.path, &([_]u8{0} ** hash.byteLen(repo_opts.hash)), null, text);
+                    try df.LineIterator(.xit, repo_opts).initFromTextOid(state.readOnly(), io, allocator, line_iter_pair.path, &recorded);
                 line_iter_pair.a.deinit();
                 line_iter_pair.a = text_iter;
-            } else {
+            } else if (!std.mem.eql(u8, &recorded, &line_iter_pair.a.oid)) {
                 // the snapshot must describe the parent's blob
-                var recorded = [_]u8{0} ** hash.byteLen(repo_opts.hash);
-                if (try snapshot.cursor.readOnly().readPath(void, &.{
-                    .{ .hash_map_get = .{ .value = path_hash } },
-                    .{ .array_list_get = @intFromEnum(FileField.oid) },
-                })) |cursor| {
-                    if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
-                }
-                if (!std.mem.eql(u8, &recorded, &line_iter_pair.a.oid)) return error.SnapshotBlobMismatch;
+                return error.SnapshotBlobMismatch;
             }
             if (file.lines.items.len != line_iter_pair.a.count()) return error.InvalidLineList;
             var diff = try df.MyersDiffIterator(.xit, repo_opts).init(allocator, &line_iter_pair.a, &line_iter_pair.b);
@@ -215,6 +216,7 @@ pub fn writeAndApplyPatches(
                             stats.lines_added += 1;
                         }
                     }
+                    try expected.append(allocator, file.lines.items[old_index].id);
                     old_index += 1;
                     if (gap_list) |list| try next_gaps.append(allocator, list.deps[old_index]);
                     next_edit = try diff.next();
@@ -223,14 +225,11 @@ pub fn writeAndApplyPatches(
                 // include records created by earlier edits in this transaction
                 file.moment = state.readOnly().extra.moment.*;
                 const start = old_index;
-                var text_buffer = std.Io.Writer.Allocating.init(allocator);
-                defer text_buffer.deinit();
-                var offsets: std.ArrayList(u64) = .empty;
-                defer offsets.deinit(allocator);
+                var text_hasher = hash.Hasher(repo_opts.hash).init(.{});
                 var text_count: usize = 0;
                 var lines_added: u64 = 0;
                 var lines_removed: u64 = 0;
-                // write inserted text as the diff yields it
+                // hash inserted text as the diff yields it
                 while (next_edit) |change| : (next_edit = try diff.next()) {
                     switch (change) {
                         .del => |del| {
@@ -239,8 +238,10 @@ pub fn writeAndApplyPatches(
                         },
                         .ins => |ins| {
                             const line = try line_iter_pair.b.get(ins.new_line.num);
-                            if (text_count > 0 and text_count % File(repo_opts).text_block_size == 0) try offsets.append(allocator, text_buffer.written().len);
-                            try writeLengthPrefixedBytes(&text_buffer.writer, line);
+                            var line_size: [4]u8 = undefined;
+                            std.mem.writeInt(u32, &line_size, @intCast(line.len), .big);
+                            text_hasher.update(&line_size);
+                            text_hasher.update(line);
                             text_count += 1;
                             if (ins.new_line.num < line_counts[1]) lines_added += 1;
                         },
@@ -274,27 +275,23 @@ pub fn writeAndApplyPatches(
                     });
                 }
                 try buffer.writer.writeInt(u32, @intCast(text_count), .big);
-                var edit_hasher = hash.Hasher(repo_opts.hash).init(.{});
-                edit_hasher.update(buffer.written());
-                edit_hasher.update(text_buffer.written());
-                var edit_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                edit_hasher.final(&edit_bytes);
-                const id = hash.bytesToInt(repo_opts.hash, &edit_bytes);
-                // placement and the seek table aren't part of the edit's identity
+                var text_hash: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                text_hasher.final(&text_hash);
+                try buffer.writer.writeAll(&text_hash);
+                const id = hash.hashInt(repo_opts.hash, buffer.written());
+                for (0..text_count) |index| try expected.append(allocator, @bitCast(LineId(repo_opts.hash){ .edit_id = id, .line = @intCast(index) }));
+                // placement isn't part of the edit's identity
                 if (removed.len > 0 and text_count > 0) {
                     const placement = try File(repo_opts).replacementPlacement(removed, @intCast(text_count), file.arena.allocator());
                     try writeLengthPrefixedBytes(&buffer.writer, placement.prefix);
                     try buffer.writer.writeInt(u64, placement.lo, .big);
                     try buffer.writer.writeInt(u64, placement.hi, .big);
                 }
-                for (offsets.items) |offset| try buffer.writer.writeInt(u64, offset, .big);
-                try buffer.writer.writeAll(text_buffer.written());
                 var record = try records.putCursor(id);
                 if (record.slot().empty()) {
                     try record.write(.{ .bytes = buffer.written() });
                 } else {
-                    // reused records still need checking; freshly written text was
-                    // already hashed above and uses the offsets we just constructed.
+                    // reused records still need checking; a fresh one was just hashed
                     var scratch = std.heap.ArenaAllocator.init(allocator);
                     defer scratch.deinit();
                     try File(repo_opts).verify(try file.readEdit(id, scratch.allocator()));
@@ -341,6 +338,11 @@ pub fn writeAndApplyPatches(
         // refresh the moment so the new patch record is visible
         file.moment = state.readOnly().extra.moment.*;
         try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, null);
+        // the text isn't stored, so the lines must be exactly those of the new blob, in order
+        if (file.lines.items.len != expected.items.len) return error.InvalidLineList;
+        for (file.lines.items, expected.items) |line, id| {
+            if (line.id != id) return error.InvalidLineList;
+        }
         try application.save(&snapshot, allocator, line_iter_pair.path, if (gap_list) |list| .{ .write = .{ .before = list.chunks, .after = next_gaps.items } } else .keep);
 
         // associate the patch hash and blob with path/commit
@@ -617,7 +619,6 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         const Id = hash.HashInt(opts.hash);
         const Line = LineId(opts.hash).Int;
         const line_size = @bitSizeOf(Line) / 8;
-        const text_block_size = 64;
         const pair_size = hash.byteLen(opts.hash) + 8;
         const max_ordinal = std.math.maxInt(u64);
         const stride: u64 = 1 << 32;
@@ -634,8 +635,6 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             gap: Gap,
             text_count: u32,
             header_end: u64,
-            index_start: u64,
-            text_start: u64,
         };
         pub const Node = struct {
             id: Line,
@@ -669,28 +668,20 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 .edits = if (edit_cursor) |cursor| try DB.HashSet(.read_only).init(cursor) else null,
             };
             errdefer self.deinit();
-            if (try snapshot.readPath(void, &.{
-                .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(FileField.lines) },
-            })) |cursor| {
-                var line_cursor = cursor;
-                var buffer: [opts.buffer_size]u8 = undefined;
-                var reader = try line_cursor.reader(&buffer);
-                if (reader.size % line_size != 0) return error.InvalidLineList;
-                // lines from the same edit share its header and placement. cache
-                // only edits with live lines, without reading their historical text.
-                var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, where: Placement }) = .empty;
-                defer edits.deinit(allocator);
-                while (reader.logicalPos() < reader.size) {
-                    const id = try reader.interface.takeInt(Line, .big);
-                    const line: LineId(opts.hash) = @bitCast(id);
-                    const entry = try edits.getOrPut(allocator, line.edit_id);
-                    if (!entry.found_existing) {
-                        const edit = try self.readEdit(line.edit_id, self.arena.allocator());
-                        entry.value_ptr.* = .{ .edit = edit, .where = try placement(edit, self.arena.allocator()) };
-                    }
-                    try self.lines.append(self.arena.allocator(), try nodeFromEdit(entry.value_ptr.edit, entry.value_ptr.where, line.line, self.arena.allocator()));
+            const ids = try lineIds(snapshot, allocator, path_hash);
+            defer allocator.free(ids);
+            // lines from the same edit share its header and placement,
+            // so only edits with live lines are read
+            var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, where: Placement }) = .empty;
+            defer edits.deinit(allocator);
+            for (ids) |id| {
+                const line: LineId(opts.hash) = @bitCast(id);
+                const entry = try edits.getOrPut(allocator, line.edit_id);
+                if (!entry.found_existing) {
+                    const edit = try self.readEdit(line.edit_id, self.arena.allocator());
+                    entry.value_ptr.* = .{ .edit = edit, .where = try placement(edit, self.arena.allocator()) };
                 }
+                try self.lines.append(self.arena.allocator(), try nodeFromEdit(entry.value_ptr.edit, entry.value_ptr.where, line.line, self.arena.allocator()));
             }
             return self;
         }
@@ -704,80 +695,20 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             return try edits.getSlot(id) != null;
         }
 
-        pub fn readText(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-            var buffer = std.Io.Writer.Allocating.init(allocator);
-            errdefer buffer.deinit();
-            var reader = TextReader.init(self, allocator);
-            defer reader.deinit();
-            for (self.lines.items, 0..) |node_value, i| {
-                const text = try reader.readLine(node_value.id, allocator);
-                defer allocator.free(text);
-                if (i > 0) try buffer.writer.writeByte('\n');
-                try buffer.writer.writeAll(text);
-            }
-            return buffer.toOwnedSlice();
+        // the ids alone, for finding a line's index in the blob the snapshot describes
+        pub fn lineIds(snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) ![]const Line {
+            var cursor = (try snapshot.readPath(void, &.{
+                .{ .hash_map_get = .{ .value = path_hash } },
+                .{ .array_list_get = @intFromEnum(FileField.lines) },
+            })) orelse return &.{};
+            var buffer: [opts.buffer_size]u8 = undefined;
+            var reader = try cursor.reader(&buffer);
+            if (reader.size % line_size != 0) return error.InvalidLineList;
+            const ids = try allocator.alloc(Line, @intCast(reader.size / line_size));
+            errdefer allocator.free(ids);
+            for (ids) |*id| id.* = try reader.interface.takeInt(Line, .big);
+            return ids;
         }
-
-        /// sequential reads share one edit header and buffered cursor. jumps use
-        /// the sparse text index, without retaining text from unrequested lines.
-        /// must not be copied or moved after the first readLine call.
-        pub const TextReader = struct {
-            file: *const Self,
-            arena: std.heap.ArenaAllocator,
-            edit: ?Edit = null,
-            reader: DB.Cursor(.read_only).Reader = undefined,
-            buffer: [opts.buffer_size]u8 = undefined,
-            next_line: u64 = 0,
-
-            pub fn init(file: *const Self, allocator: std.mem.Allocator) @This() {
-                return .{ .file = file, .arena = std.heap.ArenaAllocator.init(allocator) };
-            }
-
-            pub fn deinit(self: *@This()) void {
-                self.arena.deinit();
-            }
-
-            pub fn readLine(self: *@This(), id: Line, allocator: std.mem.Allocator) ![]const u8 {
-                errdefer self.edit = null;
-                const line: LineId(opts.hash) = @bitCast(id);
-                const edit_changed = if (self.edit) |edit| edit.id != line.edit_id else true;
-                if (edit_changed) {
-                    _ = self.arena.reset(.retain_capacity);
-                    self.edit = try self.file.readEdit(line.edit_id, self.arena.allocator());
-                    // initialize after the reader has its final address: the cursor
-                    // reader borrows both our edit cursor and our buffer.
-                    const edit = if (self.edit) |*edit| edit else unreachable;
-                    self.reader = try edit.cursor.reader(&self.buffer);
-                    try self.reader.seekTo(edit.text_start);
-                    self.next_line = 0;
-                }
-                const edit = self.edit orelse unreachable;
-                if (line.line >= edit.text_count) return error.InvalidLineId;
-                const reader = &self.reader;
-                if (line.line != self.next_line) {
-                    const block = line.line / text_block_size;
-                    const offset = if (block == 0) 0 else blk: {
-                        try reader.seekTo(edit.index_start + (block - 1) * 8);
-                        break :blk try reader.interface.takeInt(u64, .big);
-                    };
-                    if (offset > reader.size - edit.text_start) return error.InvalidEdit;
-                    try reader.seekTo(edit.text_start + offset);
-                    for (0..line.line % text_block_size) |_| {
-                        const size = try reader.interface.takeInt(u32, .big);
-                        if (size > reader.size -| reader.logicalPos()) return error.InvalidEdit;
-                        try reader.seekTo(reader.logicalPos() + size);
-                    }
-                }
-                const size = try reader.interface.takeInt(u32, .big);
-                // stored lines were classified as text when written; only the record bounds them
-                if (size > reader.size -| reader.logicalPos()) return error.InvalidEdit;
-                const text = try allocator.alloc(u8, size);
-                errdefer allocator.free(text);
-                try reader.interface.readSliceAll(text);
-                self.next_line = @as(u64, line.line) + 1;
-                return text;
-            }
-        };
 
         // gaps are only needed when creating a patch from a commit snapshot.
         fn readGaps(self: *Self, snapshot: DB.Cursor(.read_only), path_hash: Id) !GapList {
@@ -1073,28 +1004,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 hasher.update(try reader.interface.take(size));
                 remaining -= size;
             }
-            try reader.seekTo(edit.text_start);
-            for (0..edit.text_count) |i| {
-                if (i > 0 and i % text_block_size == 0) {
-                    var index_buffer: [8]u8 = undefined;
-                    // cursor readers have independent positions; this seek leaves text alone.
-                    var index_reader = try edit.cursor.reader(&index_buffer);
-                    try index_reader.seekTo(edit.index_start + (i / text_block_size - 1) * 8);
-                    if (try index_reader.interface.takeInt(u64, .big) != reader.logicalPos() - edit.text_start) return error.InvalidEdit;
-                }
-                const size_bytes = (try reader.interface.takeArray(4)).*;
-                hasher.update(&size_bytes);
-                remaining = std.mem.readInt(u32, &size_bytes, .big);
-                if (remaining > reader.size -| reader.logicalPos()) return error.InvalidEdit;
-                while (remaining > 0) {
-                    const size: usize = @intCast(@min(remaining, buffer.len));
-                    hasher.update(try reader.interface.take(size));
-                    remaining -= size;
-                }
-            }
             var result: [hash.byteLen(opts.hash)]u8 = undefined;
             hasher.final(&result);
-            if (reader.logicalPos() != reader.size or hash.bytesToInt(opts.hash, &result) != edit.id) return error.InvalidEdit;
+            if (hash.bytesToInt(opts.hash, &result) != edit.id) return error.InvalidEdit;
         }
 
         fn readEdit(self: *const Self, id: Id, allocator: std.mem.Allocator) !Edit {
@@ -1109,17 +1021,18 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             try reader.seekTo(reader.logicalPos() + @as(u64, removed_count) * line_size);
             const gap = if (removed_count == 0) try readGap(&reader, allocator) else Gap{};
             const text_count = try reader.interface.takeInt(u32, .big);
+            // the hash of the inserted text ends the part the id covers
+            if (hash.byteLen(opts.hash) > reader.size -| reader.logicalPos()) return error.InvalidEdit;
+            try reader.seekTo(reader.logicalPos() + hash.byteLen(opts.hash));
             const header_end = reader.logicalPos();
             if (removed_count > 0 and text_count > 0) {
                 const size = try reader.interface.takeInt(u32, .big);
                 if (size % pair_size != 0 or size + 16 > reader.size -| reader.logicalPos()) return error.InvalidEdit;
                 try reader.seekTo(reader.logicalPos() + size + 16);
             }
-            const index_start = reader.logicalPos();
-            const text_start = index_start + ((@as(u64, text_count) -| 1) / text_block_size) * 8;
-            if (text_start > reader.size or text_count > (reader.size - text_start) / 4) return error.InvalidEdit;
+            if (reader.logicalPos() != reader.size) return error.InvalidEdit;
             if (removed_count == 0 and text_count == 0) return error.InvalidEdit;
-            return .{ .id = id, .cursor = cursor, .removed_count = removed_count, .gap = gap, .text_count = text_count, .header_end = header_end, .index_start = index_start, .text_start = text_start };
+            return .{ .id = id, .cursor = cursor, .removed_count = removed_count, .gap = gap, .text_count = text_count, .header_end = header_end };
         }
 
         fn removedIds(edit: Edit, allocator: std.mem.Allocator) ![]const Line {

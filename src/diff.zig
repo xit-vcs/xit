@@ -159,6 +159,31 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 }
             }
 
+            return initFromObject(state, io, allocator, path, oid, mode_maybe, true);
+        }
+
+        // for a blob that was already accepted as text, like one a patch snapshot
+        // describes. the limits only classify new blobs, so they don't apply.
+        pub fn initFromTextOid(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            oid: *const [hash.byteLen(repo_opts.hash)]u8,
+        ) !Self {
+            return initFromObject(state, io, allocator, path, oid, null, false);
+        }
+
+        fn initFromObject(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            oid: *const [hash.byteLen(repo_opts.hash)]u8,
+            mode_maybe: ?fs.Mode,
+            limited: bool,
+        ) !Self {
+            const oid_hex = std.fmt.bytesToHex(oid, .lower);
             var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &oid_hex);
             defer object_reader.deinit();
             var iter = Self{
@@ -172,7 +197,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .current_line = 0,
                 .source = undefined,
             };
-            try iter.readLines(&object_reader.interface, true);
+            try iter.readLines(&object_reader.interface, limited);
             return iter;
         }
 
@@ -208,9 +233,9 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         /// reads every line into memory, including the empty line after a final
-        /// newline. invalid utf-8 or too many lines make the file binary, and
-        /// reading stops there. limited sources are also binary when the file
-        /// or a line is too large; buffers hold text that was already accepted.
+        /// newline. invalid utf-8 makes the file binary, and reading stops there.
+        /// limited sources are also binary when the file or a line is too large
+        /// or there are too many lines; other sources were already accepted.
         fn readLines(self: *Self, reader: *std.Io.Reader, limited: bool) !void {
             self.source = .binary;
             self.line_offsets = &.{};
@@ -229,7 +254,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     error.StreamTooLong => break false,
                     else => |e| return e,
                 };
-                if (offsets.items.len == repo_opts.max_line_count or !std.unicode.utf8ValidateSlice(content.written()[start..])) break false;
+                if ((limited and offsets.items.len == repo_opts.max_line_count) or !std.unicode.utf8ValidateSlice(content.written()[start..])) break false;
                 try offsets.append(self.allocator, start);
                 // the stream stopped at a newline or at the end
                 _ = reader.peekByte() catch |err| switch (err) {

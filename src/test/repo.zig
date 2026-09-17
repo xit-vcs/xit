@@ -1015,7 +1015,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     // both files should share patch ids, but track their application separately
     const paths = [_][]const u8{ "a.txt", "b.txt" };
     if (case == .history) {
-        // the historical text alone exceeds the patch application's budget
+        // a long history of replacements, which an application must handle within a small budget
         var old_text = [_]u8{'x'} ** 8192;
         for (0..64) |i| {
             _ = try std.fmt.bufPrint(old_text[0..8], "{d:0>8}", .{i});
@@ -1159,7 +1159,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
         snapshot_oid: [hash.hexLen(opts.hash)]u8,
         patch_oid: [hash.hexLen(opts.hash)]u8,
         third_oid: ?[hash.hexLen(opts.hash)]u8,
-        corruption: enum { count, gap, placement, text } = .count,
+        corruption: enum { count, gap, placement, text_hash } = .count,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -1194,14 +1194,15 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 switch (ctx.corruption) {
                     .count => try records.put(edit_id, .{ .bytes = "\xff\xff\xff\xff" }),
                     .gap => try records.put(edit_id, .{ .bytes = "\x00\x00\x00\x00" ++ "\x00\x00\x00\x01x" ++ "\xff\xff\xff\xff" }),
-                    .placement, .text => {
+                    .placement, .text_hash => {
                         // the returned allocation is owned by this test.
                         const bytes = @constCast(try (try records.getCursor(edit_id)).?.readBytesAlloc(allocator, opts.max_read_size));
                         defer allocator.free(bytes);
+                        // a removal count, one line id, and an inserted-line count precede the text hash
+                        const text_hash_offset = 4 + hash.byteLen(opts.hash) + 4 + 4;
                         if (ctx.corruption == .placement) {
-                            const offset = 4 + hash.byteLen(opts.hash) + 4 + 4;
-                            std.mem.writeInt(u32, bytes[offset..][0..4], 1, .big);
-                        } else bytes[bytes.len - 1] ^= 1;
+                            std.mem.writeInt(u32, bytes[text_hash_offset + hash.byteLen(opts.hash) ..][0..4], 1, .big);
+                        } else bytes[text_hash_offset] ^= 1;
                         try records.put(edit_id, .{ .bytes = bytes });
                     },
                 }
@@ -1277,7 +1278,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     defer repo.core.db_file.unlock(io);
     const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
     if (case == .rollback) {
-        for ([_]@TypeOf(ctx.corruption){ .count, .gap, .placement, .text }) |corruption| {
+        for ([_]@TypeOf(ctx.corruption){ .count, .gap, .placement, .text_hash }) |corruption| {
             var corrupt_ctx = ctx;
             corrupt_ctx.corruption = corruption;
             try std.testing.expectError(if (corruption == .gap) error.InvalidGapList else error.InvalidEdit, history.appendContext(.{ .slot = try history.getSlot(-1) }, corrupt_ctx));
@@ -1341,24 +1342,8 @@ fn testMergeEdits(case: EditMergeCase) !void {
                 })).?;
                 var file = try patch.File(opts).load(&moment, snapshot, allocator, hash.hashInt(opts.hash, "f"));
                 defer file.deinit();
-                const text = try file.readText(allocator);
-                defer allocator.free(text);
-                try std.testing.expectEqualStrings(content, text);
-                if (case.shared_gap_chunks) {
-                    var reader = patch.File(opts).TextReader.init(&file, allocator);
-                    defer reader.deinit();
-                    // a failed allocation must leave the line readable on retry.
-                    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-                    try std.testing.expectError(error.OutOfMemory, reader.readLine(file.lines.items[0].id, failing.allocator()));
-                    for ([_]usize{ 0, 63, 64, 65, 127, 128, 129, 0 }) |line_index| {
-                        const id = file.lines.items[line_index].id;
-                        var expected_lines = std.mem.splitScalar(u8, content, '\n');
-                        for (0..line_index) |_| _ = expected_lines.next();
-                        const actual_line = try reader.readLine(id, allocator);
-                        defer allocator.free(actual_line);
-                        try std.testing.expectEqualStrings(expected_lines.next().?, actual_line);
-                    }
-                }
+                // patch creation already checked the ids against the blob's lines, in order
+                try std.testing.expectEqual(std.mem.count(u8, content, "\n") + 1, file.lines.items.len);
                 if (case.max_position_depth) |depth| {
                     for (file.lines.items) |line| try std.testing.expect(line.position.len <= depth * (hash.byteLen(opts.hash) + 8));
                 }

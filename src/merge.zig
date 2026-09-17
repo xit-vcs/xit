@@ -650,12 +650,37 @@ fn writeBlobWithPatches(
     };
     defer application.deinit(allocator);
     const merged_file = &application.file;
-    var text_reader = patch.File(repo_opts).TextReader.init(merged_file, allocator);
-    defer text_reader.deinit();
+
+    // the text isn't in the patch data. line i of a snapshot is line i of the blob
+    // it describes, and every surviving line is in the target or the source tip.
+    const LineIterator = df.LineIterator(.xit, repo_opts);
+    var target_iter = try LineIterator.initFromTextOid(state.readOnly(), io, allocator, path, target_file_oid);
+    defer target_iter.deinit();
+    var source_iter = try LineIterator.initFromTextOid(state.readOnly(), io, allocator, path, source_file_oid);
+    defer source_iter.deinit();
+    // the base is only read when a conflict needs its side. rendered lines are
+    // borrowed, so every iterator lives until the blob is written.
+    var base_iter = if (merged_file.regions.items.len == 0)
+        try LineIterator.initFromNothing(allocator, path)
+    else if (base_file_oid_maybe) |base_file_oid|
+        try LineIterator.initFromTextOid(state.readOnly(), io, allocator, path, base_file_oid)
+    else
+        try LineIterator.initFromNothing(allocator, path);
+    defer base_iter.deinit();
+    if (target_iter.source == .binary or source_iter.source == .binary or base_iter.source == .binary) return null;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const render_allocator = arena.allocator();
+    var text: std.AutoHashMapUnmanaged(patch.LineId(repo_opts.hash).Int, []const u8) = .empty;
+    {
+        const target_ids = try patch.File(repo_opts).lineIds(snapshots.target, render_allocator, path_hash);
+        const source_ids = try patch.File(repo_opts).lineIds(snapshots.source[snapshots.source.len - 1], render_allocator, path_hash);
+        if (target_ids.len != target_iter.count() or source_ids.len != source_iter.count()) return error.InvalidLineList;
+        for (target_ids, 0..) |id, i| try text.put(render_allocator, id, try target_iter.get(i));
+        for (source_ids, 0..) |id, i| try text.put(render_allocator, id, try source_iter.get(i));
+    }
+
     var lines: std.ArrayList([]const u8) = .empty;
     has_conflict.* = false;
     var index: usize = 0;
@@ -667,27 +692,24 @@ fn writeBlobWithPatches(
         defer target_file.deinit();
         var source_file = try patch.File(repo_opts).load(state.readOnly().extra.moment, snapshots.source[snapshots.source.len - 1], allocator, path_hash);
         defer source_file.deinit();
-        var readers = [_]patch.File(repo_opts).TextReader{
-            .init(&base_file, allocator),
-            .init(&target_file, allocator),
-            .init(&source_file, allocator),
-        };
-        defer for (&readers) |*reader| reader.deinit();
+        if (base_file.lines.items.len != base_iter.count()) return error.InvalidLineList;
+        const files = [_]*const patch.File(repo_opts){ &base_file, &target_file, &source_file };
+        const iters = [_]*LineIterator{ &base_iter, &target_iter, &source_iter };
         for (merged_file.regions.items) |region| {
             while (index < merged_file.lines.items.len and std.mem.order(u8, merged_file.lines.items[index].position, region.start) == .lt) : (index += 1) {
-                try lines.append(render_allocator, try text_reader.readLine(merged_file.lines.items[index].id, render_allocator));
+                try lines.append(render_allocator, text.get(merged_file.lines.items[index].id) orelse return error.InvalidLineId);
             }
             var ranges = [_]LineRange{.{ .lines = .empty }} ** 3;
-            for (&readers, &ranges) |*reader, *range| {
-                for (reader.file.lines.items) |line| {
-                    if (region.contains(line.position)) try range.lines.append(render_allocator, try reader.readLine(line.id, render_allocator));
+            for (files, iters, &ranges) |file, iter, *range| {
+                for (file.lines.items, 0..) |line, i| {
+                    if (region.contains(line.position)) try range.lines.append(render_allocator, try iter.get(i));
                 }
             }
             if (try appendResolvedOrConflict(render_allocator, &lines, &markers, ranges[0], ranges[1], ranges[2])) has_conflict.* = true;
             while (index < merged_file.lines.items.len and region.contains(merged_file.lines.items[index].position)) : (index += 1) {}
         }
     }
-    for (merged_file.lines.items[index..]) |line| try lines.append(render_allocator, try text_reader.readLine(line.id, render_allocator));
+    for (merged_file.lines.items[index..]) |line| try lines.append(render_allocator, text.get(line.id) orelse return error.InvalidLineId);
     const content = try std.mem.join(render_allocator, "\n", lines.items);
     var reader = std.Io.Reader.fixed(content);
     var oid: [hash.byteLen(repo_opts.hash)]u8 = undefined;
