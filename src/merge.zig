@@ -650,23 +650,32 @@ fn writeBlobWithPatches(
     path: []const u8,
     context: *MergeContext(.xit, repo_opts),
 ) !?[hash.byteLen(repo_opts.hash)]u8 {
-    // a binary file may still have a snapshot from its last text version
-    for ([_]?*const [hash.byteLen(repo_opts.hash)]u8{ base_file_oid_maybe, target_file_oid, source_file_oid }) |file_oid_maybe| {
-        const file_oid = file_oid_maybe orelse continue;
-        var iter = try df.LineIterator(.xit, repo_opts).initFromOid(state.readOnly(), io, allocator, path, file_oid, null);
-        defer iter.deinit();
-        if (iter.source == .binary) {
-            has_conflict.* = true;
-            return source_file_oid.*;
-        }
-    }
-
+    // check availability before reading any blobs, since diff3 reads them again
     const snapshots = (try context.firstParentSnapshots(base_oid)) orelse return null;
+
+    const path_hash = hash.hashInt(repo_opts.hash, path);
+
+    // the lines describe the recorded blob. a binary commit keeps its last text
+    // state, so a different blob means binary or a stale snapshot. diff3 handles both.
+    const nothing = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    const Check = struct { snapshot: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only), oid: *const [hash.byteLen(repo_opts.hash)]u8 };
+    for ([_]Check{
+        .{ .snapshot = snapshots.base, .oid = base_file_oid_maybe orelse &nothing },
+        .{ .snapshot = snapshots.target, .oid = target_file_oid },
+        .{ .snapshot = snapshots.source[snapshots.source.len - 1], .oid = source_file_oid },
+    }) |check| {
+        var recorded = nothing;
+        if (try check.snapshot.readPath(void, &.{
+            .{ .hash_map_get = .{ .value = path_hash } },
+            .{ .array_list_get = @intFromEnum(patch.FileField.oid) },
+        })) |cursor| {
+            if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
+        }
+        if (!std.mem.eql(u8, &recorded, check.oid)) return null;
+    }
 
     var patch_ids: std.ArrayList(hash.HashInt(repo_opts.hash)) = .empty;
     defer patch_ids.deinit(allocator);
-
-    const path_hash = hash.hashInt(repo_opts.hash, path);
 
     // scan oldest first so patches are already in application order
     var parent_patch_id_maybe: ?hash.HashInt(repo_opts.hash) = null;

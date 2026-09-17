@@ -3,7 +3,7 @@
 //!
 //! commit-id->snapshot maps each commit to a path map, initially shared with
 //! its first parent and copied on write. path strings are stored as readable
-//! keys. each file's value is an array of four database slots (FileField):
+//! keys. each file's value is an array of five database slots (FileField):
 //! - patch: the last patch created for the file, inherited if unchanged;
 //! - edits: the set of all applied edit ids, including conflicted edits;
 //! - lines: a conflict byte (0 or 1), then ordered surviving line ids, including
@@ -12,6 +12,8 @@
 //! - gaps: a persistent sequence of blobs containing live boundaries, including
 //!   both file ends. stable positions choose boundaries (about 16 gaps per blob,
 //!   at most 64). unchanged blobs and tree nodes are shared between snapshots.
+//! - oid: the blob the lines describe. a binary commit keeps the last text
+//!   state, so its oid differs from the commit's blob.
 //! commit-id->stats stores eight u64s: lines added/changed/removed,
 //! bytes added/removed, then files added/changed/removed. paired removals and
 //! insertions within each edit count only as changed lines. bytes sum per-file
@@ -350,9 +352,10 @@ pub fn writeAndApplyPatches(
         try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, null, false);
         try application.save(&snapshot, allocator, line_iter_pair.path, if (gap_list) |list| .{ .write = .{ .before = list.chunks, .after = next_gaps.items } } else .keep);
 
-        // associate patch hash with path/commit
+        // associate the patch hash and blob with path/commit
         const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
         try fields.put(@intFromEnum(FileField.patch), .{ .bytes = &hash.intToBytes(Id, patch_hash) });
+        try fields.put(@intFromEnum(FileField.oid), .{ .bytes = &line_iter_pair.b.oid });
     }
 
     // save even zero totals, so an indexed commit differs from a missing summary.
@@ -1135,7 +1138,7 @@ pub fn LineId(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const FileField = enum(u8) { patch, edits, lines, gaps };
+pub const FileField = enum(u8) { patch, edits, lines, gaps, oid };
 
 fn writeLengthPrefixedBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeInt(u32, @intCast(bytes.len), .big);
