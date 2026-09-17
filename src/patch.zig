@@ -346,7 +346,7 @@ pub fn writeAndApplyPatches(
         // apply the patch to the snapshot it was created from
         // refresh the moment so the new patch record is visible
         file.moment = state.readOnly().extra.moment.*;
-        try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, false);
+        try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, null, false);
         try application.save(&snapshot, allocator, line_iter_pair.path, if (gap_list) |list| .{ .write = .{ .before = list.chunks, .after = next_gaps.items } } else .keep);
 
         // associate patch hash with path/commit
@@ -391,22 +391,36 @@ pub const CommitStats = struct {
     files_removed: u64 = 0,
 };
 
+// the base snapshot, when given, must be an ancestor of the target snapshot
+// and of every commit the patches came from. edits it already applied are
+// skipped during conflict detection, since every new edit was made on a
+// lineage that included them.
 pub fn applyPatches(
     comptime opts: rp.RepoOpts(.xit),
     moment: *const rp.Repo(.xit, opts).DB.HashMap(.read_only),
     snapshot: rp.Repo(.xit, opts).DB.Cursor(.read_only),
+    base_snapshot: ?rp.Repo(.xit, opts).DB.Cursor(.read_only),
     allocator: std.mem.Allocator,
     path: []const u8,
     patch_hashes: []const hash.HashInt(opts.hash),
     kind: PatchApplicationKind,
 ) !PatchApplication(opts) {
+    const DB = rp.Repo(.xit, opts).DB;
+    const path_hash = hash.hashInt(opts.hash, path);
     var application = PatchApplication(opts){
-        .file = try File(opts).load(moment, snapshot, allocator, hash.hashInt(opts.hash, path)),
+        .file = try File(opts).load(moment, snapshot, allocator, path_hash),
         .edits = .empty,
     };
     errdefer application.deinit(allocator);
     if (kind == .create and application.file.has_conflict) return error.ConflictedPatchSnapshot;
-    try applyPatchesToFile(opts, &application, allocator, patch_hashes, kind, true);
+    const base_edits: ?DB.HashSet(.read_only) = if (base_snapshot) |base| blk: {
+        const cursor = (try base.readPath(void, &.{
+            .{ .hash_map_get = .{ .value = path_hash } },
+            .{ .array_list_get = @intFromEnum(FileField.edits) },
+        })) orelse break :blk null;
+        break :blk try DB.HashSet(.read_only).init(cursor);
+    } else null;
+    try applyPatchesToFile(opts, &application, allocator, patch_hashes, kind, base_edits, true);
     return application;
 }
 
@@ -417,6 +431,7 @@ fn applyPatchesToFile(
     allocator: std.mem.Allocator,
     patch_hashes: []const hash.HashInt(opts.hash),
     kind: PatchApplicationKind,
+    base_edits: ?rp.Repo(.xit, opts).DB.HashSet(.read_only),
     verify_edits: bool,
 ) !void {
     const Id = hash.HashInt(opts.hash);
@@ -510,18 +525,30 @@ fn applyPatchesToFile(
         }
     }
 
-    // compare new edits with earlier applied edits and with each other
+    // only edits concurrent with the new ones can conflict. collect them once,
+    // without reading the file's entire history for each new edit.
+    var concurrent: std.ArrayList(Id) = .empty;
+    defer concurrent.deinit(allocator);
+    if (file.edits) |old_edits| {
+        var iter = try old_edits.iterator();
+        while (try iter.next()) |entry| {
+            const other_id = (try entry.readKeyValuePair()).hash;
+            if (base_edits) |base| {
+                if (try base.getSlot(other_id) != null) continue;
+            }
+            try concurrent.append(allocator, other_id);
+        }
+    }
+
+    // compare new edits with concurrent applied edits and with each other
     for (pending.keys(), 0..) |id, edit_index| {
         _ = scratch.reset(.retain_capacity);
         const edit = try file.readEdit(id, scratch.allocator());
         const edit_range = try file.range(edit, scratch.allocator());
-        if (file.edits) |old_edits| {
-            var iter = try old_edits.iterator();
-            while (try iter.next()) |entry| {
-                _ = other_arena.reset(.retain_capacity);
-                const other = try file.readEdit((try entry.readKeyValuePair()).hash, other_arena.allocator());
-                if (try file.conflict(edit, edit_range, other, other_arena.allocator())) |region| try file.addRegion(region);
-            }
+        for (concurrent.items) |other_id| {
+            _ = other_arena.reset(.retain_capacity);
+            const other = try file.readEdit(other_id, other_arena.allocator());
+            if (try file.conflict(edit, edit_range, other, other_arena.allocator())) |region| try file.addRegion(region);
         }
         for (pending.keys()[0..edit_index]) |other_id| {
             _ = other_arena.reset(.retain_capacity);

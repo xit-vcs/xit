@@ -1192,7 +1192,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             var read_moment = moment.readOnly();
             if (ctx.case != .later_edit) {
                 const size_before = try cursor.db.core.length();
-                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{patch_id}, if (ctx.create) .create else .merge);
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id}, if (ctx.create) .create else .merge);
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(size_before, try cursor.db.core.length());
                 try application.save(&snapshot, patch_allocator, paths[0], .clear);
@@ -1212,7 +1212,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 })).?;
                 var id: [hash.byteLen(opts.hash)]u8 = undefined;
                 _ = try third_patch.readBytes(&id);
-                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{hash.bytesToInt(opts.hash, &id)}, .merge);
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{hash.bytesToInt(opts.hash, &id)}, .merge);
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(1, application.file.regions.items.len);
                 try std.testing.expectEqual(@as(usize, if (ctx.case == .history) 6 else 7), application.file.lines.items.len);
@@ -1237,7 +1237,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             // applying the patch again should make no changes at all.
             try cursor.db.freeze();
             const size_before = try cursor.db.core.length();
-            var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), patch_allocator, paths[0], &.{patch_id}, .merge);
+            var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id}, .merge);
             defer application.deinit(patch_allocator);
             try std.testing.expectEqual(0, application.edits.count());
             try application.save(&snapshot, patch_allocator, paths[0], .clear);
@@ -1484,6 +1484,54 @@ test "merge conflict edits" {
     try testMergeEdits(.{ .name = "trailing newline", .base = "a\nb\nc\n", .target = &.{"a\nc\n"}, .source = &.{"a\nB\nc\n"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c\n" } } });
     try testMergeEdits(.{ .name = "missing cherry-pick dependency", .pick = true, .target = &.{"a\nb\nc\nd\nE"}, .source = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne" }, .expected = &.{ .{ .text = "a\nb" }, .{ .conflict = .{ "X", null, "Y" } }, .{ .text = "c\nd\nE" } } });
     try testMergeEdits(.{ .name = "several competing edits", .target = &.{ "a\nB\nc\nd\ne", "a\nBB\nc\nd\ne" }, .source = &.{ "a\nC\nc\nd\ne", "a\nCC\nc\nd\ne", "a\nCCC\nc\nd\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", "BB", "CCC" } }, .{ .text = "c\nd\ne" } } });
+}
+
+test "merge after sync" {
+    try testMergeAfterSync(.diff3, false);
+    try testMergeAfterSync(.diff3, true);
+    try testMergeAfterSync(.patch, false);
+    try testMergeAfterSync(.patch, true);
+}
+
+// the source branch merged the target's history, then the target advanced.
+// the merge base sits on the target's first-parent chain but not the source's,
+// so the source's first-parent patches describe content the base already has.
+// an orphan source has no common first-parent ancestor with the base at all.
+fn testMergeAfterSync(algo: mrg.MergeAlgorithm, orphan: bool) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(temp_path);
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    try addFile(.xit, opts, &repo, io, allocator, "f", "a\nb\nc\nd\ne");
+    const root_oid = try repo.commit(io, allocator, .{ .message = "root", .timestamp = 1 });
+    // the deletion changes the gap that the target's insertion lands in
+    try addFile(.xit, opts, &repo, io, allocator, "f", "a\nb\nd\ne");
+    const source_oid = try repo.commit(io, allocator, .{ .message = "source", .parent_oids = if (orphan) &.{} else &.{root_oid}, .timestamp = 2 });
+    try addFile(.xit, opts, &repo, io, allocator, "f", "a\nb\nX\nc\nd\ne");
+    const target_oid = try repo.commit(io, allocator, .{ .message = "target", .parent_oids = &.{root_oid}, .timestamp = 3 });
+    try addFile(.xit, opts, &repo, io, allocator, "f", "a\nb\nX\nd\ne");
+    _ = try repo.commit(io, allocator, .{ .message = "sync", .parent_oids = &.{ source_oid, target_oid }, .timestamp = 4 });
+    try repo.addBranch(io, .{ .name = "source" });
+    try addFile(.xit, opts, &repo, io, allocator, "f", "a\nb\nX\nc\nd\nE");
+    _ = try repo.commit(io, allocator, .{ .message = "target again", .parent_oids = &.{target_oid}, .timestamp = 5 });
+    try repo.patchAll(io, allocator, null);
+
+    var switched = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
+    defer switched.deinit();
+    var merge = try repo.merge(io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = algo, .source = &.{.{ .ref = .{ .kind = .head, .name = "source" } }} } } }, null);
+    defer merge.deinit();
+    try std.testing.expect(merge.result == .success);
+    const content = try repo.core.work_dir.readFileAlloc(io, "f", allocator, .limited(4096));
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("a\nb\nX\nd\nE", content);
 }
 
 test "merge at ref" {

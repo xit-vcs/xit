@@ -206,8 +206,7 @@ fn MergeContext(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
 
             base: Cursor,
             target: Cursor,
-            source: []const Cursor, // oldest first
-            has_boundary: bool,
+            source: []const Cursor, // oldest first, starting with the base
 
             fn load(
                 ancestry: *Ancestry(repo_kind, repo_opts),
@@ -222,41 +221,33 @@ fn MergeContext(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
                 const target = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &ancestry.tips[0]))) orelse return null;
                 const base = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, base_oid))) orelse return null;
 
-                // the base may not be in source's first-parent history.
-                // use the stored depths to find their common first-parent ancestor.
-                const patch_base_oid_maybe: ?Oid = ancestor: {
-                    const depths_cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return null;
-                    const depths = try DB.HashMap(.read_only).init(depths_cursor);
-                    var oids = [2]Oid{ base_oid.*, ancestry.tips[1] };
-                    var counts: [2]u64 = undefined;
-                    for (oids, &counts) |oid, *count| {
-                        const depth = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null;
-                        count.* = try depth.readUint();
-                    }
-                    while (!std.mem.eql(u8, &oids[0], &oids[1])) {
-                        const side: usize = if (counts[0] >= counts[1]) 0 else 1;
-                        const parents = (try ancestry.load(oids[side])).parents;
-                        if (parents.len == 0) break :ancestor null;
-                        oids[side] = parents[0];
-                        counts[side] = std.math.sub(u64, counts[side], 1) catch return error.InvalidCommitDepth;
-                    }
-                    break :ancestor oids[0];
-                };
+                // patches only describe first-parent history, so the base must be on
+                // the source's first-parent chain. a base reached through another
+                // parent would make the chain re-apply content the base already has
+                // under new identities. use the stored depths to walk down to it.
+                const depths_cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return null;
+                const depths = try DB.HashMap(.read_only).init(depths_cursor);
+                var counts: [2]u64 = undefined;
+                for ([2]Oid{ base_oid.*, ancestry.tips[1] }, &counts) |oid, *count| {
+                    const depth = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null;
+                    count.* = try depth.readUint();
+                }
 
                 // changes from other parents are already included in a merge commit
                 var snapshots: std.ArrayList(Cursor) = .empty;
-                var oid_maybe: ?Oid = ancestry.tips[1];
-                while (oid_maybe) |oid| {
+                var oid = ancestry.tips[1];
+                var depth = counts[1];
+                while (depth > counts[0]) : (depth -= 1) {
                     try snapshots.append(allocator, (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null);
-                    if (patch_base_oid_maybe) |*patch_base_oid| {
-                        if (std.mem.eql(u8, patch_base_oid, &oid)) break;
-                    }
                     const parents = (try ancestry.load(oid)).parents;
-                    oid_maybe = if (parents.len > 0) parents[0] else null;
+                    if (parents.len == 0) return error.InvalidCommitDepth;
+                    oid = parents[0];
                 }
+                if (!std.mem.eql(u8, &oid, base_oid)) return null;
+                try snapshots.append(allocator, base);
                 // store application order once for all files in this merge
                 std.mem.reverse(Cursor, snapshots.items);
-                return .{ .base = base, .target = target, .source = snapshots.items, .has_boundary = patch_base_oid_maybe != null };
+                return .{ .base = base, .target = target, .source = snapshots.items };
             }
         };
 
@@ -691,9 +682,9 @@ fn writeBlobWithPatches(
             break :blk hash.bytesToInt(repo_opts.hash, &patch_id_bytes);
         };
 
-        // skip the boundary ancestor, but include an unrelated root's patch
+        // skip the base's own patch
         if (patch_id_maybe) |patch_id| {
-            if (patch_id != parent_patch_id_maybe and (i > 0 or !snapshots.has_boundary)) {
+            if (patch_id != parent_patch_id_maybe and i > 0) {
                 try patch_ids.append(allocator, patch_id);
             }
         }
@@ -703,7 +694,7 @@ fn writeBlobWithPatches(
     if (patch_ids.items.len == 0) return null;
 
     // apply patches together to check their dependencies
-    var application = patch.applyPatches(repo_opts, state.readOnly().extra.moment, snapshots.target, allocator, path, patch_ids.items, .merge) catch |err| switch (err) {
+    var application = patch.applyPatches(repo_opts, state.readOnly().extra.moment, snapshots.target, snapshots.base, allocator, path, patch_ids.items, .merge) catch |err| switch (err) {
         error.MissingPatchDependency => return null,
         else => return err,
     };
