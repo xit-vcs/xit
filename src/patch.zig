@@ -181,6 +181,16 @@ pub fn writeAndApplyPatches(
                     try df.LineIterator(.xit, repo_opts).initFromBuffer(io, allocator, line_iter_pair.path, &([_]u8{0} ** hash.byteLen(repo_opts.hash)), null, text);
                 line_iter_pair.a.deinit();
                 line_iter_pair.a = text_iter;
+            } else {
+                // the snapshot must describe the parent's blob
+                var recorded = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                if (try snapshot.cursor.readOnly().readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = path_hash } },
+                    .{ .array_list_get = @intFromEnum(FileField.oid) },
+                })) |cursor| {
+                    if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
+                }
+                if (!std.mem.eql(u8, &recorded, &line_iter_pair.a.oid)) return error.SnapshotBlobMismatch;
             }
             if (file.lines.items.len != line_iter_pair.a.count()) return error.InvalidLineList;
             var diff = try df.MyersDiffIterator(.xit, repo_opts).init(allocator, &line_iter_pair.a, &line_iter_pair.b);

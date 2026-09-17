@@ -975,6 +975,7 @@ test "applied patches" {
     try testAppliedPatches(.conflict);
     try testAppliedPatches(.rollback);
     try testAppliedPatches(.merge);
+    try testAppliedPatches(.stale_oid);
     try testMergeEdits(.{ .name = "shared replacement with context", .rebuild = true, .shared_gaps = true, .target = &.{ "a\nB\nc\nd\ne", "longer\nB\nc\nd\ne" }, .source = &.{"a\nB\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "longer\nB\nc\nd\nE" }} });
     try testMergeEdits(.{ .name = "shared insertion with context", .target = &.{ "longer\nb\nc\nd\ne", "longer\nb\nX\nc\nd\ne" }, .source = &.{"a\nb\nX\nc\nd\nE"}, .shared_edits = 1, .expected = &.{.{ .text = "longer\nb\nX\nc\nd\nE" }} });
     try testMergeEdits(.{ .name = "different locations", .target = &.{"a\nX\nb\nc\nd\ne"}, .source = &.{"a\nb\nc\nX\nd\ne"}, .shared_edits = 0, .expected = &.{.{ .text = "a\nX\nb\nc\nX\nd\ne" }} });
@@ -993,7 +994,7 @@ test "applied patches" {
     try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .shared_gap_chunks = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{ ("A\nb\n" ** 220) ++ "c\nd", ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nd" }, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nD" }} });
 }
 
-fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollback, merge }) !void {
+fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollback, merge, stale_oid }) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
@@ -1049,6 +1050,27 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     } else null;
     try repo.patchAll(io, allocator, null);
     if (case == .history) _ = try repo.garbageCollect(io, allocator, .{});
+
+    if (case == .stale_oid) {
+        // a snapshot that names the wrong blob must not be diffed against
+        const Corrupt = struct {
+            oid: [hash.hexLen(opts.hash)]u8,
+
+            pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                const moment = try DB.HashMap(.read_write).init(cursor.*);
+                const snapshots = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "commit-id->snapshot")));
+                const snapshot = try DB.HashMap(.read_write).init(try snapshots.putCursor(try hash.hexToInt(opts.hash, &ctx.oid)));
+                const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(hash.hashInt(opts.hash, paths[0])));
+                try fields.put(@intFromEnum(patch.FileField.oid), .{ .bytes = &([_]u8{1} ** hash.byteLen(opts.hash)) });
+            }
+        };
+        const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
+        try history.appendContext(.{ .slot = try history.getSlot(-1) }, Corrupt{ .oid = target_oid });
+        for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, "a\nB\nc\nd\nE");
+        _ = try repo.commit(io, allocator, .{ .message = "stale", .parent_oids = &.{target_oid}, .timestamp = 5 });
+        try std.testing.expectError(error.SnapshotBlobMismatch, repo.patchAll(io, allocator, null));
+        return;
+    }
 
     if (case == .merge) {
         // missing cache data should allow a merge, but damaged patches must fail.
