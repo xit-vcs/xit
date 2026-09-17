@@ -64,6 +64,9 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         net_buffer_size: usize = 65536,
         read_size: usize = 2048,
         max_read_size: usize = 4096,
+        // these two decide which new blobs are text. lines already stored in
+        // patch data stay readable, so lowering them doesn't reclassify existing
+        // snapshots; a file only becomes binary at its next change.
         max_line_size: usize = 10_000,
         max_line_count: usize = 10_000_000,
         max_tree_size: u64 = 1_000_000, // max size in bytes of a single tree object before reading it is aborted with error.TreeTooLarge

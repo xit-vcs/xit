@@ -798,7 +798,8 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                     }
                 }
                 const size = try reader.interface.takeInt(u32, .big);
-                if (size > opts.max_line_size or size > reader.size -| reader.logicalPos()) return error.InvalidEdit;
+                // stored lines were classified as text when written; only the record bounds them
+                if (size > reader.size -| reader.logicalPos()) return error.InvalidEdit;
                 const text = try allocator.alloc(u8, size);
                 errdefer allocator.free(text);
                 try reader.interface.readSliceAll(text);
@@ -1012,7 +1013,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 const size_bytes = (try reader.interface.takeArray(4)).*;
                 hasher.update(&size_bytes);
                 remaining = std.mem.readInt(u32, &size_bytes, .big);
-                if (remaining > opts.max_line_size) return error.InvalidEdit;
+                if (remaining > reader.size -| reader.logicalPos()) return error.InvalidEdit;
                 while (remaining > 0) {
                     const size: usize = @intCast(@min(remaining, buffer.len));
                     hasher.update(try reader.interface.take(size));

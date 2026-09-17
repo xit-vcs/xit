@@ -265,10 +265,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             var lines: std.ArrayList([]const u8) = .empty;
             errdefer lines.deinit(arena.allocator());
 
-            // match object readers, including the empty line at the end
+            // match object readers, including the empty line at the end. buffers
+            // hold text that was already accepted, so line size isn't limited here.
             var line_iter = std.mem.splitScalar(u8, buffer, '\n');
             while (line_iter.next()) |line| {
-                if (buffer.len > 0 and line.len >= repo_opts.max_line_size) return error.StreamTooLong;
                 try lines.append(arena.allocator(), try arena.allocator().dupe(u8, line));
             }
 
