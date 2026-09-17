@@ -655,7 +655,7 @@ fn runCommand(
         },
         .upload_pack => |upload_pack_cmd| {
             var options = upload_pack_cmd.options;
-            options.protocol_version = server_common.detectProtocolVersion(run_opts.environ_map);
+            options.protocol_version = server_common.parseProtocolVersion(run_opts.environ_map.get("GIT_PROTOCOL"));
             var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
             var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
             var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
@@ -664,7 +664,7 @@ fn runCommand(
         },
         .receive_pack => |receive_pack_cmd| {
             var options = receive_pack_cmd.options;
-            options.protocol_version = server_common.detectProtocolVersion(run_opts.environ_map);
+            options.protocol_version = server_common.parseProtocolVersion(run_opts.environ_map.get("GIT_PROTOCOL"));
             var stdin_buf: [repo_opts.net_buffer_size]u8 = undefined;
             var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
             var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
@@ -702,7 +702,7 @@ fn runCommand(
                 .query_string = environ_map.get("QUERY_STRING") orelse "",
                 .content_type = environ_map.get("CONTENT_TYPE") orelse "",
                 .has_remote_user = environ_map.get("REMOTE_USER") != null,
-                .protocol_version = server_common.detectProtocolVersion(environ_map),
+                .protocol_version = server_common.parseProtocolVersion(environ_map.get("GIT_PROTOCOL")),
             });
         },
         .patch => |patch_cmd| switch (repo_kind) {

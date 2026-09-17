@@ -30,14 +30,16 @@ pub fn getFeatureValue(features: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-pub fn detectProtocolVersion(environ_map: *std.process.Environ.Map) ProtocolVersion {
-    const git_protocol = environ_map.get("GIT_PROTOCOL") orelse return .v0;
+/// the version a client asked for in its GIT_PROTOCOL env value or
+/// Git-Protocol header
+pub fn parseProtocolVersion(value: ?[]const u8) ProtocolVersion {
+    const git_protocol = value orelse return .v0;
     var version: ProtocolVersion = .v0;
     var iter = std.mem.splitScalar(u8, git_protocol, ':');
     while (iter.next()) |entry| {
-        const value = std.mem.trimStart(u8, entry, " ");
-        if (std.mem.startsWith(u8, value, "version=")) {
-            const v = value["version=".len..];
+        const pair = std.mem.trimStart(u8, entry, " ");
+        if (std.mem.startsWith(u8, pair, "version=")) {
+            const v = pair["version=".len..];
             if (std.mem.eql(u8, v, "2"))
                 version = .v2
             else if (std.mem.eql(u8, v, "1") and version != .v2)
