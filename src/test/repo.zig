@@ -991,7 +991,8 @@ test "applied patches" {
     try testMergeEdits(.{ .name = "editing a replacement", .target = &.{ "a\nu\nv\nc\nd\ne", "a\nu\nx\nv\nc\nd\ne", "a\np\nq\nx\nv\nc\nd\ne" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\np\nq\nx\nv\nc\nd\ne" }} });
     try testMergeEdits(.{ .name = "insertions in nested replacement", .target = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\ny\nw\nv\nd\ne" }, .source = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nz\ny\nv\nd\ne" }, .expected = &.{.{ .text = "a\nx\nz\ny\nw\nv\nd\ne" }} });
     try testMergeEdits(.{ .name = "large edit record", .shared_gaps = true, .target = &.{"a\n" ++ ("B" ** 6000) ++ "\nc\nd\ne"}, .source = &.{"a\nb\nc\nd\nE"}, .expected = &.{.{ .text = "a\n" ++ ("B" ** 6000) ++ "\nc\nd\nE" }} });
-    try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .shared_gap_chunks = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{ ("A\nb\n" ** 220) ++ "c\nd", ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nd" }, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nD" }} });
+    try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{ ("A\nb\n" ** 220) ++ "c\nd", ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nd" }, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nD" }} });
+    try testMergeEdits(.{ .name = "chunk sharing", .shared_chunks = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{("a\nb\n" ** 110) ++ "X\nb\n" ++ ("a\nb\n" ** 109) ++ "c\nd"}, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("a\nb\n" ** 110) ++ "X\nb\n" ++ ("a\nb\n" ** 109) ++ "c\nD" }} });
 }
 
 fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollback, merge, stale_oid }) !void {
@@ -1216,7 +1217,8 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id});
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(size_before, try cursor.db.core.length());
-                try application.save(&snapshot, patch_allocator, paths[0], .keep);
+                // a one-line replacement leaves every gap as it was
+                try application.save(&snapshot, patch_allocator, paths[0], application.file.gaps);
             }
             const membership = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1237,19 +1239,13 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(1, application.file.regions.items.len);
                 try std.testing.expectEqual(6, application.file.lines.items.len);
-                try std.testing.expectError(error.ConflictedPatchApplication, application.save(&snapshot, patch_allocator, paths[0], .keep));
+                try std.testing.expectError(error.ConflictedPatchApplication, application.save(&snapshot, patch_allocator, paths[0], application.file.gaps));
             }
-            const line_list = try snapshot.cursor.readPath(void, &.{
+            const line_list = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @intFromEnum(patch.FileField.lines) },
             });
-            try std.testing.expect(line_list != null);
-            const gaps = try snapshot.cursor.readPathSlot(void, &.{
-                .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
-            });
-            // the snapshot keeps its inherited gaps
-            try std.testing.expect(gaps != null and gaps.?.tag != .none);
+            try std.testing.expect(line_list != null and line_list.?.tag != .none);
 
             // freezing forces any writes to copy existing data.
             // applying the patch again should make no changes at all.
@@ -1258,13 +1254,13 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id});
             defer application.deinit(patch_allocator);
             try std.testing.expectEqual(0, application.edits.count());
-            try application.save(&snapshot, patch_allocator, paths[0], .keep);
+            try application.save(&snapshot, patch_allocator, paths[0], application.file.gaps);
             try std.testing.expectEqual(size_before, try cursor.db.core.length());
-            const gaps_after = try snapshot.cursor.readPathSlot(void, &.{
+            const line_list_after = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
+                .{ .array_list_get = @intFromEnum(patch.FileField.lines) },
             });
-            try std.testing.expectEqualDeep(gaps, gaps_after);
+            try std.testing.expectEqualDeep(line_list, line_list_after);
         }
     };
     const ctx = Ctx{
@@ -1301,7 +1297,7 @@ const EditMergeCase = struct {
     },
     shared_edits: ?usize = null,
     shared_gaps: bool = false,
-    shared_gap_chunks: bool = false,
+    shared_chunks: bool = false,
     max_position_depth: ?usize = null,
     pick: bool = false,
     rebuild: bool = false,
@@ -1366,7 +1362,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
             try repo.patchAll(io, allocator, null);
             const after = try repo.core.latestMoment();
             for (oids) |oid| {
-                for ([_]patch.FileField{ .patch, .gaps }) |field| {
+                for ([_]patch.FileField{ .patch, .lines }) |field| {
                     var bytes: [2][]const u8 = .{ &.{}, &.{} };
                     defer for (bytes) |value| allocator.free(value);
                     for ([_]DB.HashMap(.read_only){ before, after }, &bytes) |moment, *value| {
@@ -1376,7 +1372,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
                             .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "f") } },
                             .{ .array_list_get = @intFromEnum(field) },
                         })).?;
-                        if (field == .gaps) {
+                        if (field == .lines) {
                             var buffer = std.Io.Writer.Allocating.init(allocator);
                             defer buffer.deinit();
                             const list = try DB.LinkedArrayList(.read_only).init(cursor);
@@ -1393,8 +1389,8 @@ fn testMergeEdits(case: EditMergeCase) !void {
                 }
             }
         }
-        // compare the stored gaps and applied edits between branches
-        if (case.shared_edits != null or case.shared_gaps or case.shared_gap_chunks) {
+        // compare the stored lines, gaps, and applied edits between branches
+        if (case.shared_edits != null or case.shared_gaps or case.shared_chunks) {
             const DB = rp.Repo(.xit, opts).DB;
             const moment = try repo.core.latestMoment();
             var files: [2]DB.ArrayList(.read_only) = undefined;
@@ -1405,15 +1401,24 @@ fn testMergeEdits(case: EditMergeCase) !void {
                     .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "f") } },
                 })).?);
             }
-            if (case.shared_gaps) try std.testing.expectEqualDeep(
-                (try files[0].getSlot(@intFromEnum(patch.FileField.gaps))).?,
-                (try files[1].getSlot(@intFromEnum(patch.FileField.gaps))).?,
-            );
-            if (case.shared_gap_chunks) {
+            if (case.shared_gaps) {
+                // the line ids differ between branches, but the gaps between them don't
+                var loaded: [2]patch.File(opts) = undefined;
+                for (oids, &loaded) |oid, *file| {
+                    const snapshot = (try moment.cursor.readPath(void, &.{
+                        .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
+                        .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
+                    })).?;
+                    file.* = try patch.File(opts).load(&moment, snapshot, allocator, hash.hashInt(opts.hash, "f"));
+                }
+                defer for (&loaded) |*file| file.deinit();
+                try std.testing.expectEqualDeep(loaded[0].gaps, loaded[1].gaps);
+            }
+            if (case.shared_chunks) {
                 var slots = std.AutoHashMap(u64, void).init(allocator);
                 defer slots.deinit();
                 var lists: [2]DB.LinkedArrayList(.read_only) = undefined;
-                for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.gaps))).?);
+                for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.lines))).?);
                 var left = try lists[0].iterator();
                 while (try left.next()) |entry| try slots.put(entry.slot().value, {});
                 var shared: usize = 0;
