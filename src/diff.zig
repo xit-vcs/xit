@@ -87,7 +87,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         .current_line = 0,
                         .source = undefined,
                     };
-                    iter.readLines(&reader.interface, .limited(repo_opts.max_line_size)) catch |err| switch (err) {
+                    iter.readLines(&reader.interface, true) catch |err| switch (err) {
                         error.ReadFailed => |e| return reader.err orelse e,
                         else => |e| return e,
                     };
@@ -178,7 +178,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .current_line = 0,
                 .source = undefined,
             };
-            try iter.readLines(&object_reader.interface, .limited(repo_opts.max_line_size));
+            try iter.readLines(&object_reader.interface, true);
             return iter;
         }
 
@@ -202,7 +202,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 .current_line = 0,
                 .source = undefined,
             };
-            try iter.readLines(&reader, .unlimited);
+            try iter.readLines(&reader, false);
             return iter;
         }
 
@@ -214,18 +214,25 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         /// reads every line into memory, including the empty line after a final
-        /// newline. invalid utf-8, a line over the limit, or too many lines make
-        /// the file binary, and reading stops there.
-        fn readLines(self: *Self, reader: *std.Io.Reader, limit: std.Io.Limit) !void {
+        /// newline. invalid utf-8 or too many lines make the file binary, and
+        /// reading stops there. limited sources are also binary when the file
+        /// or a line is too large; buffers hold text that was already accepted.
+        fn readLines(self: *Self, reader: *std.Io.Reader, limited: bool) !void {
+            self.source = .binary;
+            self.line_offsets = &.{};
+            if (limited and self.size > repo_opts.max_text_size) return;
+
             const arena = try self.allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(self.allocator);
             errdefer {
                 arena.deinit();
                 self.allocator.destroy(arena);
             }
-            var content = std.Io.Writer.Allocating.init(arena.allocator());
+            // the size is known, so reserve it once instead of growing by copies
+            var content = try std.Io.Writer.Allocating.initCapacity(arena.allocator(), @intCast(self.size));
             var offsets: std.ArrayList(usize) = .empty;
             errdefer offsets.deinit(self.allocator);
+            const limit: std.Io.Limit = if (limited) .limited(repo_opts.max_line_size) else .unlimited;
 
             const is_text = while (true) {
                 const start = content.written().len;
@@ -251,8 +258,6 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 arena.deinit();
                 self.allocator.destroy(arena);
                 offsets.clearAndFree(self.allocator);
-                self.source = .binary;
-                self.line_offsets = &.{};
             }
         }
 

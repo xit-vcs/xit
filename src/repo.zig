@@ -64,11 +64,12 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         net_buffer_size: usize = 65536,
         read_size: usize = 2048,
         max_read_size: usize = 4096,
-        // these two decide which new blobs are text. lines already stored in
+        // these three decide which new blobs are text. lines already stored in
         // patch data stay readable, so lowering them doesn't reclassify existing
         // snapshots; a file only becomes binary at its next change.
-        max_line_size: usize = 10_000,
-        max_line_count: usize = 10_000_000,
+        max_line_size: usize = 10_000, // a line this long or longer marks a file binary, such as minified javascript
+        max_line_count: usize = 1_000_000, // lines cost memory beyond their bytes, especially in the patch system
+        max_text_size: u64 = 50 * 1024 * 1024, // text files are read whole, so this bounds memory per file
         max_tree_size: u64 = 1_000_000, // max size in bytes of a single tree object before reading it is aborted with error.TreeTooLarge
         max_edit_count: usize = 1_000_000, // max edit distance before a diff is aborted with error.DiffTooLarge
         max_total_line_count: usize = 50_000_000, // max total lines across all files in a diff before it is aborted with error.DiffTooLarge
