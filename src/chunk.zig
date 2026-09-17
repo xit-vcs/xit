@@ -296,7 +296,7 @@ fn makeChunkRecord(
         if (!repo_opts.extra.compress_chunks or chunk.len <= 8) break :compress null;
 
         var payload_writer = std.Io.Writer.fixed(payload_buffer[0..chunk.len]);
-        var dbuf = [_]u8{0} ** std.compress.flate.max_window_len;
+        var dbuf: [std.compress.flate.max_window_len]u8 = undefined;
         var zlib_stream = std.compress.flate.Compress.init(&payload_writer, &dbuf, .zlib, .default) catch break :compress null;
         zlib_stream.writer.writeAll(chunk) catch break :compress null;
         zlib_stream.finish() catch break :compress null;
@@ -335,8 +335,9 @@ pub fn writeChunks(
     const chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
     const chunk_map = try DB.HashMap(.read_write).init(chunk_map_cursor);
 
-    var chunk_buffer = [_]u8{0} ** repo_opts.extra.chunk_opts.max_size;
-    var record_buffer = [_]u8{0} ** (chunk_record_header_size + repo_opts.extra.chunk_opts.max_size);
+    // scratch space, left uninitialized because zeroing it costs more than small objects do
+    var chunk_buffer: [repo_opts.extra.chunk_opts.max_size]u8 = undefined;
+    var record_buffer: [chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
     var iter = FastCdc(repo_opts.extra.chunk_opts).init(object_len);
     var end_offset: u64 = 0;
     while (try iter.next(&hashed.reader, &chunk_buffer)) |chunk| {
@@ -368,12 +369,19 @@ pub fn writeChunks(
     }
 
     hashed.hasher.final(object_hash_bytes);
+    const object_hash = hash.bytesToInt(repo_opts.hash, object_hash_bytes);
+
+    // an object that already exists has its chunks and chunk info. every commit
+    // writes all of its trees, so rewriting them would grow the database each time.
+    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"))) |existing_cursor| {
+        const existing = try DB.HashMap(.read_only).init(existing_cursor);
+        if (try existing.getCursor(object_hash) != null) return;
+    }
 
     // Write chunk info directly into the object map after every chunk record is
     // finished. xitdb byte writers must be contiguous and cannot be interleaved.
     const object_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->chunk-info"));
     const object_map = try DB.HashMap(.read_write).init(object_map_cursor);
-    const object_hash = hash.bytesToInt(repo_opts.hash, object_hash_bytes);
     try object_map.putKey(object_hash, .{ .bytes = object_kind_name });
 
     var chunk_info_cursor = try object_map.putCursor(object_hash);
@@ -434,9 +442,10 @@ pub fn loadChunk(
         0
     else
         std.mem.readInt(u64, chunk_info[chunk_index * chunk_entry_size - @sizeOf(u64) ..][0..@sizeOf(u64)], .big);
-    const chunk_size: usize = @intCast(end_offset - object_offset);
+    // offsets come from the database, so a damaged entry must be an error, not a panic
+    const chunk_size = std.math.cast(usize, std.math.sub(u64, end_offset, object_offset) catch return error.WrongChunkSize) orelse return error.WrongChunkSize;
 
-    var reader_buffer = [_]u8{0} ** (chunk_record_header_size + repo_opts.extra.chunk_opts.max_size);
+    var reader_buffer: [chunk_record_header_size + repo_opts.extra.chunk_opts.max_size]u8 = undefined;
     if (record_size < chunk_record_header_size or record_size > reader_buffer.len or chunk_size > buf.len) {
         return error.WrongChunkSize;
     }
@@ -455,7 +464,7 @@ pub fn loadChunk(
         .none => payload,
         .zlib => zlib: {
             var payload_reader = std.Io.Reader.fixed(payload);
-            var zlib_stream_buffer = [_]u8{0} ** std.compress.flate.max_window_len;
+            var zlib_stream_buffer: [std.compress.flate.max_window_len]u8 = undefined;
             var zlib_stream: std.compress.flate.Decompress = .init(&payload_reader, .zlib, &zlib_stream_buffer);
             var chunk_writer = std.Io.Writer.fixed(buf);
             const size = try zlib_stream.reader.streamRemaining(&chunk_writer);
