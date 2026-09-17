@@ -1484,12 +1484,27 @@ fn testMergeEdits(case: EditMergeCase) !void {
 }
 
 test "merge conflict edits" {
+    try testMergeEdits(.{ .name = "replacement inside deletion", .target = &.{"a\ne"}, .source = &.{ "a\nb\nX\nY\nc\nd\ne", "a\nb\nP\nQ\nc\nd\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", null, "b\nP\nQ\nc\nd" } }, .{ .text = "e" } } });
+    // each step inserts a line right after "a", halving the room before the
+    // previous one. after 31 steps a single line still fits, two don't.
+    const narrowing = comptime blk: {
+        var steps: [31][]const u8 = undefined;
+        var content: []const u8 = "a\nb";
+        for (&steps, 0..) |*step, i| {
+            content = std.fmt.comptimePrint("a\nh{d}\n", .{i}) ++ content[2..];
+            step.* = content;
+        }
+        break :blk steps;
+    };
+    try testMergeEdits(.{ .name = "same gap at different depths", .base = "a\nb", .target = &(narrowing ++ [_][]const u8{"a\nX\n" ++ narrowing[30][2..]}), .source = &(narrowing ++ [_][]const u8{"a\nY\nZ\n" ++ narrowing[30][2..]}), .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ null, "X", "Y\nZ" } }, .{ .text = narrowing[30][2..] } } });
+    try testMergeEdits(.{ .name = "insertion inside a rewrite of a shared replacement", .target = &.{ "a\nU\nV\nd\ne", "a\nP\nQ\nd\ne", "a\nP\nX\nQ\nd\ne" }, .source = &.{ "a\nU\nV\nd\ne", "a\nU\nV\nd\nE" }, .expected = &.{.{ .text = "a\nP\nX\nQ\nd\nE" }} });
+    try testMergeEdits(.{ .name = "insertion before a shared insertion", .base = "a\nb", .target = &.{ "a\nY\nb", "a\nX\nY\nb" }, .source = &.{ "a\nY\nb", "a\nY\nB" }, .expected = &.{.{ .text = "a\nX\nY\nB" }} });
     try testMergeEdits(.{ .name = "overlapping deletions", .target = &.{"a\nd\ne"}, .source = &.{"a\nb\ne"}, .expected = &.{.{ .text = "a\ne" }} });
     try testMergeEdits(.{ .name = "delete and replace", .target = &.{"a\nc\nd\ne"}, .source = &.{"a\nB\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c\nd\ne" } } });
     try testMergeEdits(.{ .name = "insert inside deletion", .target = &.{"a\ne"}, .source = &.{"a\nb\nX\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", null, "b\nX\nc\nd" } }, .{ .text = "e" } } });
     try testMergeEdits(.{ .name = "replace insertion inside deletion", .target = &.{"a\ne"}, .source = &.{ "a\nb\nX\nc\nd\ne", "a\nb\nY\nc\nd\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", null, "b\nY\nc\nd" } }, .{ .text = "e" } } });
     try testMergeEdits(.{ .name = "insert at deletion boundaries", .target = &.{"a\ne"}, .source = &.{"a\nX\nb\nc\nd\nY\ne"}, .expected = &.{.{ .text = "a\nX\nY\ne" }} });
-    try testMergeEdits(.{ .name = "same gap after deletion", .max_position_depth = 3, .target = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nX\ne" }, .source = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nY\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ null, "X", "Y" } }, .{ .text = "e" } } });
+    try testMergeEdits(.{ .name = "same gap after deletion", .max_position_depth = 3, .target = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nX\ne" }, .source = &.{ "a\ne", "a\nX\ne", "a\ne", "a\nY\ne" }, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b\nc\nd", "X", "Y" } }, .{ .text = "e" } } });
     try testMergeEdits(.{ .name = "same gap in nested replacement", .target = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nw\ny\nv\nd\ne" }, .source = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nz\ny\nv\nd\ne" }, .expected = &.{ .{ .text = "a\nx" }, .{ .conflict = .{ null, "w", "z" } }, .{ .text = "y\nv\nd\ne" } } });
     try testMergeEdits(.{ .name = "later replacement", .target = &.{ "a\nB\nc\nd\ne", "a\nBB\nc\nd\ne" }, .source = &.{"a\nc\nd\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", "BB", null } }, .{ .text = "c\nd\ne" } } });
     try testMergeEdits(.{ .name = "multiple regions", .target = &.{"a\nc\ne"}, .source = &.{"a\nB\nc\nD\ne"}, .expected = &.{ .{ .text = "a" }, .{ .conflict = .{ "b", null, "B" } }, .{ .text = "c" }, .{ .conflict = .{ "d", null, "D" } }, .{ .text = "e" } } });

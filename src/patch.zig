@@ -8,9 +8,11 @@
 //! - edits: the set of all applied edit ids;
 //! - lines: ordered surviving line ids. a line id is an edit id followed by
 //!   the u32 index of a line inserted by that edit, starting at zero.
-//! - gaps: a persistent sequence of blobs containing live boundaries, including
-//!   both file ends. stable positions choose boundaries (about 16 gaps per blob,
-//!   at most 64). unchanged blobs and tree nodes are shared between snapshots.
+//! - gaps: a persistent sequence of blobs, one entry per boundary between lines
+//!   including both file ends, holding the ids of deletions that made the
+//!   neighbors adjacent. stable positions choose blob boundaries (about 16 gaps
+//!   per blob, at most 64). unchanged blobs and tree nodes are shared between
+//!   snapshots.
 //! - oid: the blob the lines describe. a binary commit keeps the last text
 //!   state, so its oid differs from the commit's blob.
 //! commit-id->stats stores eight u64s: lines added/changed/removed,
@@ -22,30 +24,34 @@
 //! patch-id->edit-list stores ordered edit ids, without a count. the patch id
 //! hashes those ids. edit-id->edit stores each edit once, in this order:
 //! - a u32 removal count and the removed line ids in order;
-//! - only for pure insertions, the original gap: length-prefixed start/end
-//!   positions, then a counted list of dependency ids (u32 lengths/counts).
-//!   an end length of 0xffffffff denotes a point; otherwise the gap is a span;
+//! - only for pure insertions, the gap: the length-prefixed positions of the
+//!   surviving neighbors (an empty start is the file start; an end length of
+//!   0xffffffff is the file end), then a counted list of dependency ids: the
+//!   neighbors' edits and the deletions that made them adjacent;
 //! - a u32 inserted-line count;
-//! - only for replacements, the first removed line's position (u32 length/bytes);
+//! - only for replacements, the placement: a length-prefixed prefix, then the
+//!   u64 bounds its ordinals lie strictly between;
 //! - u64 text offsets for inserted lines 64, 128, etc. line 0's offset is zero;
 //! - each inserted line as a u32 byte length and its text, without '\n'.
 //! integers are big endian. offsets are relative to the start of the text data.
 //! the edit id hashes the record excluding placement (including its length)
 //! and the offset table. paths, commits, and unrelated edits aren't part of it.
 //!
-//! positions are sequences of (edit id, ordinal) pairs: even ordinals name
-//! gaps, odd ordinals name lines. insertions extend their gap's position;
-//! replacements extend the first removed line's position, except 1:1 keeps it.
-//! insertions split gaps; replacements preserve their exterior gaps. deletions
-//! join gaps, keeping outer bounds and the sorted union of dependencies plus
-//! the deletion id. joining an insertion's exterior gaps restores its original
-//! bounds; a reopened point becomes a span with equal bounds. points use their
-//! start directly; a span's insertion position extends its start with a hash
-//! of its bounds and dependencies, so reinserting text after deletion has a
-//! new identity.
+//! positions are sequences of (u64 ordinal, edit id) pairs, compared as bytes.
+//! lines under the same prefix are siblings ordered by ordinal, then by id. an
+//! edit's lines get ordinals strictly between its neighbors' ordinals at the
+//! shallowest level with room, padding with zero pairs when the left neighbor
+//! is shorter. appends and prepends step by a fixed stride so room lasts;
+//! other insertions divide the interval. only an exhausted interval nests.
+//! a one-line replacement keeps the removed line's position; several lines
+//! replacing one nest under it; otherwise replacements span the interval
+//! between the first and last removed lines, so an edit's lines always lie
+//! within its conflict range and rewriting a block barely narrows it.
+//! positions are derived from stored bounds alone, so concurrent insertions
+//! into the same gap collide and are detected.
 //!
 //! how patches are created: compare changed files with their first parent using
-//! myers, recording edits, statistics, and gap changes. apply the edits and save
+//! myers, recording edits, statistics, and gap dependencies. apply the edits and save
 //! the snapshot, sharing unchanged gap chunks.
 //!
 //! how patches are applied: load the snapshot and collect edits from the chosen
@@ -159,7 +165,7 @@ pub fn writeAndApplyPatches(
         defer application.deinit(allocator);
         const file = &application.file;
         var gap_list: ?File(repo_opts).GapList = null;
-        var next_gaps: std.ArrayList(File(repo_opts).Gap) = .empty;
+        var next_gaps: std.ArrayList([]const Id) = .empty;
         defer next_gaps.deinit(allocator);
 
         // create and store the patch. each run of insertions/deletions
@@ -210,7 +216,7 @@ pub fn writeAndApplyPatches(
                         }
                     }
                     old_index += 1;
-                    if (gap_list) |list| try next_gaps.append(allocator, list.values[old_index]);
+                    if (gap_list) |list| try next_gaps.append(allocator, list.deps[old_index]);
                     next_edit = try diff.next();
                     continue;
                 }
@@ -248,19 +254,25 @@ pub fn writeAndApplyPatches(
                 stats.lines_removed += lines_removed - lines_changed;
                 // deletions in this edit are a contiguous slice of the old lines
                 const removed = file.lines.items[start..old_index];
-                // one-line replacements preserve every gap. load them only when
-                // a change needs to split or join boundaries, keeping the old prefix.
+                // one-line replacements keep every gap. load the list only when a
+                // change splits or joins boundaries, keeping the old prefix.
                 if (gap_list == null and !(removed.len == 1 and text_count == 1)) {
                     const list = try file.readGaps(snapshot.cursor.readOnly(), path_hash);
                     gap_list = list;
-                    try next_gaps.appendSlice(allocator, list.values[0 .. start + 1]);
+                    try next_gaps.appendSlice(allocator, list.deps[0 .. start + 1]);
                 }
-                const gap = if (removed.len == 0) (gap_list orelse unreachable).values[start] else File(repo_opts).Gap{};
                 var buffer = std.Io.Writer.Allocating.init(allocator);
                 defer buffer.deinit();
                 try buffer.writer.writeInt(u32, @intCast(removed.len), .big);
                 for (removed) |line| try buffer.writer.writeInt(LineId(repo_opts.hash).Int, line.id, .big);
-                if (removed.len == 0) try File(repo_opts).writeGap(&buffer.writer, gap);
+                if (removed.len == 0) {
+                    // the gap between the surviving neighbors
+                    try File(repo_opts).writeGap(&buffer.writer, .{
+                        .start = if (start > 0) file.lines.items[start - 1].position else "",
+                        .end = if (start < file.lines.items.len) file.lines.items[start].position else null,
+                        .deps = try file.gapDeps(allocator, start, (gap_list orelse unreachable).deps[start]),
+                    });
+                }
                 try buffer.writer.writeInt(u32, @intCast(text_count), .big);
                 var edit_hasher = hash.Hasher(repo_opts.hash).init(.{});
                 edit_hasher.update(buffer.written());
@@ -270,7 +282,10 @@ pub fn writeAndApplyPatches(
                 const id = hash.bytesToInt(repo_opts.hash, &edit_bytes);
                 // placement and the seek table aren't part of the edit's identity
                 if (removed.len > 0 and text_count > 0) {
-                    try writeLengthPrefixedBytes(&buffer.writer, removed[0].position);
+                    const placement = try File(repo_opts).replacementPlacement(removed, @intCast(text_count), file.arena.allocator());
+                    try writeLengthPrefixedBytes(&buffer.writer, placement.prefix);
+                    try buffer.writer.writeInt(u64, placement.lo, .big);
+                    try buffer.writer.writeInt(u64, placement.hi, .big);
                 }
                 for (offsets.items) |offset| try buffer.writer.writeInt(u64, offset, .big);
                 try buffer.writer.writeAll(text_buffer.written());
@@ -288,57 +303,30 @@ pub fn writeAndApplyPatches(
 
                 // a one-line replacement keeps both exterior gaps
                 if (removed.len == 1 and text_count == 1) {
-                    if (gap_list) |list| try next_gaps.append(allocator, list.values[old_index]);
+                    if (gap_list) |list| try next_gaps.append(allocator, list.deps[old_index]);
                     continue;
                 }
 
-                // update the gaps alongside the diff. keep span bounds intact
-                // so independent deletions can be combined in either order.
-                const gaps = (gap_list orelse unreachable).values;
+                // update the gap dependencies alongside the diff
+                const deps = (gap_list orelse unreachable).deps;
                 if (text_count == 0) {
-                    var deps: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
-                    defer deps.deinit(allocator);
-                    for (gaps[start .. old_index + 1]) |old_gap| {
-                        for (old_gap.deps) |dep| try deps.put(allocator, dep, {});
+                    // a deletion joins the surrounding gaps, keeping every dependency
+                    // so independent deletions can be combined in either order
+                    var joined: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+                    defer joined.deinit(allocator);
+                    for (deps[start .. old_index + 1]) |old| {
+                        for (old) |dep| try joined.put(allocator, dep, {});
                     }
-                    try deps.put(allocator, id, {});
-                    std.mem.sort(Id, deps.keys(), {}, std.sort.asc(Id));
-                    const end = gaps[old_index].end orelse gaps[old_index].start;
-                    var joined: File(repo_opts).Gap = .{
-                        .start = gaps[start].start,
-                        .end = end,
-                        .deps = try file.arena.allocator().dupe(Id, deps.keys()),
-                    };
-                    // joining an insertion's exterior gaps reopens its original gap.
-                    // matching prefixes and ordinals 0 and 2 * line count identify
-                    // both ends of the same insertion. keep deletion dependencies,
-                    // but don't nest positions on each cycle.
-                    const position_size = hash.byteLen(repo_opts.hash) + 8;
-                    if (joined.start.len >= position_size and joined.start.len == end.len and
-                        std.mem.eql(u8, joined.start[0 .. end.len - 8], end[0 .. end.len - 8]) and
-                        std.mem.readInt(u64, joined.start[end.len - 8 ..][0..8], .big) == 0)
-                    {
-                        const owner = std.mem.readInt(Id, joined.start[end.len - position_size ..][0..comptime hash.byteLen(repo_opts.hash)], .big);
-                        const inserted = try file.readEdit(owner, file.arena.allocator());
-                        if (inserted.removed_count == 0 and std.mem.readInt(u64, end[end.len - 8 ..][0..8], .big) == @as(u64, inserted.text_count) * 2) {
-                            joined.start = inserted.gap.start;
-                            joined.end = inserted.gap.end orelse inserted.gap.start;
-                        }
-                    }
-                    next_gaps.items[next_gaps.items.len - 1] = joined;
+                    try joined.put(allocator, id, {});
+                    std.mem.sort(Id, joined.keys(), {}, std.sort.asc(Id));
+                    next_gaps.items[next_gaps.items.len - 1] = try file.arena.allocator().dupe(Id, joined.keys());
                 } else {
-                    // insertions split a gap; replacements keep the exterior gaps
-                    const insertion = removed.len == 0;
-                    const parent = if (insertion) try File(repo_opts).resolveGap(gap, file.arena.allocator()) else removed[0].position;
-                    const deps = try file.arena.allocator().dupe(Id, &.{id});
-                    if (insertion) _ = next_gaps.pop();
-                    const first: usize = if (insertion) 0 else 1;
-                    const end = if (insertion) text_count + 1 else text_count;
-                    for (first..end) |i| try next_gaps.append(allocator, .{
-                        .start = try File(repo_opts).position(file.arena.allocator(), parent, id, @as(u64, i) * 2),
-                        .deps = deps,
-                    });
-                    if (!insertion) try next_gaps.append(allocator, gaps[old_index]);
+                    // new lines start without dependencies between them. an insertion
+                    // splits its gap; a replacement keeps its exterior gaps.
+                    if (removed.len == 0) _ = next_gaps.pop();
+                    const interior = if (removed.len == 0) text_count + 1 else text_count - 1;
+                    for (0..interior) |_| try next_gaps.append(allocator, &.{});
+                    if (removed.len > 0) try next_gaps.append(allocator, deps[old_index]);
                 }
             }
             if (patch_buffer.written().len == 0) continue;
@@ -490,10 +478,10 @@ fn applyPatchesToFile(
     for (pending.keys()) |id| {
         const edit = try file.readEdit(id, file.arena.allocator());
         if (edit.text_count == 0) continue;
-        const parent = try File(opts).editParent(edit, file.arena.allocator());
+        const where = try File(opts).placement(edit, file.arena.allocator());
         for (0..edit.text_count) |ordinal| {
             const line: LineId(opts.hash).Int = @bitCast(LineId(opts.hash){ .edit_id = id, .line = @intCast(ordinal) });
-            if (!removed.contains(line)) try file.lines.append(file.arena.allocator(), try File(opts).nodeFromEdit(edit, parent, ordinal, file.arena.allocator()));
+            if (!removed.contains(line)) try file.lines.append(file.arena.allocator(), try File(opts).nodeFromEdit(edit, where, ordinal, file.arena.allocator()));
         }
     }
     std.mem.sort(File(opts).Node, file.lines.items, {}, struct {
@@ -558,7 +546,7 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             self.edits.deinit(allocator);
         }
 
-        pub fn save(self: *const @This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, path: []const u8, gaps: union(enum) { keep, write: struct { before: []const File(opts).GapChunk, after: []const File(opts).Gap } }) !void {
+        pub fn save(self: *const @This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, path: []const u8, gaps: union(enum) { keep, write: struct { before: []const File(opts).GapChunk, after: []const []const hash.HashInt(opts.hash) } }) !void {
             // snapshots hold chosen text, never conflict alternatives
             if (self.file.regions.items.len > 0) return error.ConflictedPatchApplication;
             // applied ids are scoped to this file: a nonempty patch on a new path
@@ -586,12 +574,15 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
                     var new_index: usize = 0;
                     var start: usize = 0;
                     buffer.clearRetainingCapacity();
-                    for (values.after, 0..) |gap, i| {
-                        try File(opts).writeGap(&buffer.writer, gap);
+                    const lines = self.file.lines.items;
+                    for (values.after, 0..) |deps, i| {
+                        try buffer.writer.writeInt(u32, @intCast(deps.len), .big);
+                        for (deps) |dep| try buffer.writer.writeInt(hash.HashInt(opts.hash), dep, .big);
                         // stable positions let later chunks remain shared after an
                         // insertion or deletion. cap long runs at 64 gaps.
-                        if (i + 1 < values.after.len and i + 1 - start < 64 and std.hash.Wyhash.hash(0, gap.start) & 15 != 0) continue;
-                        const chunk_start = values.after[start].start;
+                        const left = if (i == 0) "" else lines[i - 1].position;
+                        if (i + 1 < values.after.len and i + 1 - start < 64 and std.hash.Wyhash.hash(0, left) & 15 != 0) continue;
+                        const chunk_start = if (start == 0) "" else lines[start - 1].position;
                         while (old_index < values.before.len and std.mem.lessThan(u8, values.before[old_index].start, chunk_start)) {
                             try list.remove(@intCast(new_index));
                             old_index += 1;
@@ -627,9 +618,15 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         const Line = LineId(opts.hash).Int;
         const line_size = @bitSizeOf(Line) / 8;
         const text_block_size = 64;
+        const pair_size = hash.byteLen(opts.hash) + 8;
+        const max_ordinal = std.math.maxInt(u64);
+        const stride: u64 = 1 << 32;
         pub const Gap = struct { start: []const u8 = "", end: ?[]const u8 = null, deps: []const Id = &.{} };
         pub const GapChunk = struct { start: []const u8, cursor: DB.Cursor(.read_only) };
-        const GapList = struct { values: []const Gap, chunks: []const GapChunk };
+        const GapList = struct { deps: []const []const Id, chunks: []const GapChunk };
+        // where an edit's lines go: under prefix, with ordinals strictly between lo and hi
+        const Placement = struct { prefix: []const u8, lo: u64, hi: u64 };
+        const Lineage = struct { edit: Id, deletion: Id };
         const Edit = struct {
             id: Id,
             cursor: DB.Cursor(.read_only),
@@ -658,6 +655,8 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         edits: ?DB.HashSet(.read_only),
         lines: std.ArrayList(Node) = .empty,
         regions: std.ArrayList(Region) = .empty,
+        // whether an edit descends from a deletion, memoized for one application
+        lineage: std.AutoHashMapUnmanaged(Lineage, bool) = .empty,
 
         pub fn load(moment: *const DB.HashMap(.read_only), snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) !Self {
             const edit_cursor = try snapshot.readPath(void, &.{
@@ -680,7 +679,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 if (reader.size % line_size != 0) return error.InvalidLineList;
                 // lines from the same edit share its header and placement. cache
                 // only edits with live lines, without reading their historical text.
-                var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, parent: []const u8 }) = .empty;
+                var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, where: Placement }) = .empty;
                 defer edits.deinit(allocator);
                 while (reader.logicalPos() < reader.size) {
                     const id = try reader.interface.takeInt(Line, .big);
@@ -688,9 +687,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                     const entry = try edits.getOrPut(allocator, line.edit_id);
                     if (!entry.found_existing) {
                         const edit = try self.readEdit(line.edit_id, self.arena.allocator());
-                        entry.value_ptr.* = .{ .edit = edit, .parent = try editParent(edit, self.arena.allocator()) };
+                        entry.value_ptr.* = .{ .edit = edit, .where = try placement(edit, self.arena.allocator()) };
                     }
-                    try self.lines.append(self.arena.allocator(), try nodeFromEdit(entry.value_ptr.edit, entry.value_ptr.parent, line.line, self.arena.allocator()));
+                    try self.lines.append(self.arena.allocator(), try nodeFromEdit(entry.value_ptr.edit, entry.value_ptr.where, line.line, self.arena.allocator()));
                 }
             }
             return self;
@@ -787,14 +786,14 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 .{ .array_list_get = @intFromEnum(FileField.gaps) },
             })) orelse {
                 if (self.edits != null or self.lines.items.len != 0) return error.GapListNotFound;
-                return .{ .values = &.{.{}}, .chunks = &.{} };
+                return .{ .deps = &[_][]const Id{&.{}}, .chunks = &.{} };
             };
             const allocator = self.arena.allocator();
             const list = try DB.LinkedArrayList(.read_only).init(cursor);
             const count = try list.count();
             if (count == 0 or count > self.lines.items.len + 1) return error.InvalidGapList;
             const chunks = try allocator.alloc(GapChunk, @intCast(count));
-            const gaps = try allocator.alloc(Gap, self.lines.items.len + 1);
+            const gaps = try allocator.alloc([]const Id, self.lines.items.len + 1);
             var iter = try list.iterator();
             var index: usize = 0;
             for (chunks) |*chunk| {
@@ -804,103 +803,152 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 const start = index;
                 while (reader.logicalPos() < reader.size) {
                     if (index == gaps.len) return error.InvalidGapList;
-                    gaps[index] = try readGap(&reader, allocator);
+                    const dep_count = try reader.interface.takeInt(u32, .big);
+                    if (dep_count > (reader.size -| reader.logicalPos()) / hash.byteLen(opts.hash)) return error.InvalidGapList;
+                    const deps = try allocator.alloc(Id, dep_count);
+                    for (deps) |*dep| dep.* = try reader.interface.takeInt(Id, .big);
+                    gaps[index] = deps;
                     index += 1;
                 }
                 if (index == start or reader.logicalPos() != reader.size) return error.InvalidGapList;
-                chunk.* = .{ .start = gaps[start].start, .cursor = entry };
+                chunk.* = .{ .start = if (start == 0) "" else self.lines.items[start - 1].position, .cursor = entry };
             }
             if (index != gaps.len) return error.InvalidGapList;
             try self.validateGaps(gaps);
-            return .{ .values = gaps, .chunks = chunks };
+            return .{ .deps = gaps, .chunks = chunks };
         }
 
-        fn validateGaps(self: *const Self, gaps: []const Gap) !void {
+        fn validateGaps(self: *const Self, gaps: []const []const Id) !void {
             if (gaps.len != self.lines.items.len + 1) return error.InvalidGapList;
-            const position_size = hash.byteLen(opts.hash) + 8;
-            for (gaps, 0..) |gap, i| {
-                if (gap.start.len % position_size != 0) return error.InvalidGapList;
-                if (gap.end) |end| {
-                    if (end.len % position_size != 0 or less(end, gap.start)) return error.InvalidGapList;
-                    if (end.len > gap.start.len and std.mem.startsWith(u8, end, gap.start)) return error.InvalidGapList;
-                }
-                if (i > 0 and !less(self.lines.items[i - 1].position, gap.start)) return error.InvalidGapList;
-                if (i < self.lines.items.len and !less(gap.end orelse gap.start, self.lines.items[i].position)) return error.InvalidGapList;
-                for (gap.deps, 0..) |dep, j| {
-                    if (j > 0 and gap.deps[j - 1] >= dep) return error.InvalidGapList;
+            for (gaps) |deps| {
+                for (deps, 0..) |dep, j| {
+                    if (j > 0 and deps[j - 1] >= dep) return error.InvalidGapList;
                 }
             }
         }
 
-        fn conflict(self: *const Self, a: Edit, ar: Region, b: Edit, allocator: std.mem.Allocator) !?Region {
+        // an insertion depends on the edits that placed its neighbors and on the
+        // deletions that made them adjacent, so the same text in the same gap
+        // shares an id. a one-line replacement keeps its position, so the gap
+        // identity survives it.
+        fn gapDeps(self: *Self, allocator: std.mem.Allocator, index: usize, deletions: []const Id) ![]const Id {
+            var deps: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+            defer deps.deinit(allocator);
+            if (index > 0) try deps.put(allocator, positionId(self.lines.items[index - 1].position), {});
+            if (index < self.lines.items.len) try deps.put(allocator, positionId(self.lines.items[index].position), {});
+            for (deletions) |dep| try deps.put(allocator, dep, {});
+            std.mem.sort(Id, deps.keys(), {}, std.sort.asc(Id));
+            return self.arena.allocator().dupe(Id, deps.keys());
+        }
+
+        fn conflict(self: *Self, a: Edit, ar: Region, b: Edit, allocator: std.mem.Allocator) !?Region {
             if (a.id == b.id) return null;
             if (a.text_count == 0 and b.text_count == 0) return null;
             const br = try self.range(b, allocator);
-            if (!ar.contains(br.start) and !br.contains(ar.start)) return null;
             var overlaps = false;
             if (a.removed_count == 0 and b.removed_count == 0) {
-                overlaps = std.mem.eql(u8, ar.start, br.start);
-            } else if (a.removed_count > 0 and b.removed_count > 0) {
-                var i: u32 = 0;
-                var j: u32 = 0;
-                var scratch = std.heap.ArenaAllocator.init(allocator);
-                defer scratch.deinit();
-                while (i < a.removed_count and j < b.removed_count) {
-                    _ = scratch.reset(.retain_capacity);
-                    const ai = try removedAt(a, i);
-                    const bi = try removedAt(b, j);
-                    if (ai == bi) {
-                        overlaps = true;
-                        break;
-                    }
-                    const ap = (try self.node(ai, scratch.allocator())).position;
-                    const bp = (try self.node(bi, scratch.allocator())).position;
-                    switch (std.mem.order(u8, ap, bp)) {
-                        .lt => i += 1,
-                        .gt => j += 1,
-                        .eq => {
-                            i += 1;
-                            j += 1;
-                        },
-                    }
-                }
+                // the same gap, whatever room each insertion found for its lines
+                overlaps = std.mem.eql(u8, a.gap.start, b.gap.start) and std.mem.eql(u8, a.gap.end orelse "", b.gap.end orelse "");
             } else {
-                const insertion = if (a.removed_count == 0) a else b;
-                const deletion = if (a.removed_count == 0) b else a;
-                const region = if (a.removed_count == 0) br else ar;
-                const insertion_position = if (a.removed_count == 0) ar.start else br.start;
-                if (!less(region.start, insertion_position) or !less(insertion_position, region.end)) return null;
-                if (std.mem.indexOfScalar(Id, insertion.gap.deps, deletion.id) != null) return null;
-
-                // nested positions retain earlier replacements, even when
-                // the gap only depends directly on a later edit.
-                var ancestors = std.Io.Reader.fixed(insertion_position);
-                while (ancestors.bufferedLen() > 0) {
-                    const id = try ancestors.takeInt(Id, .big);
-                    _ = try ancestors.takeInt(u64, .big);
-                    if (id == deletion.id) return null;
-                }
-
-                // only surviving lines inside the deleted range can compete,
-                // including later lines nested inside this insertion.
-                const id_bytes = hash.intToBytes(Id, insertion.id);
-                const prefix = try std.mem.concat(allocator, u8, &.{ insertion_position, &id_bytes });
-                var begin: usize = 0;
-                var end = self.lines.items.len;
-                while (begin < end) {
-                    const middle = begin + (end - begin) / 2;
-                    if (less(self.lines.items[middle].position, prefix)) {
-                        begin = middle + 1;
-                    } else {
-                        end = middle;
+                if (!ar.contains(br.start) and !br.contains(ar.start)) return null;
+                if (a.removed_count > 0 and b.removed_count > 0) {
+                    var i: u32 = 0;
+                    var j: u32 = 0;
+                    var scratch = std.heap.ArenaAllocator.init(allocator);
+                    defer scratch.deinit();
+                    while (i < a.removed_count and j < b.removed_count) {
+                        _ = scratch.reset(.retain_capacity);
+                        const ai = try removedAt(a, i);
+                        const bi = try removedAt(b, j);
+                        if (ai == bi) {
+                            overlaps = true;
+                            break;
+                        }
+                        const ap = (try self.node(ai, scratch.allocator())).position;
+                        const bp = (try self.node(bi, scratch.allocator())).position;
+                        switch (std.mem.order(u8, ap, bp)) {
+                            .lt => i += 1,
+                            .gt => j += 1,
+                            .eq => {
+                                i += 1;
+                                j += 1;
+                            },
+                        }
                     }
                 }
-                if (begin == self.lines.items.len) return null;
-                const pos = self.lines.items[begin].position;
-                overlaps = std.mem.startsWith(u8, pos, prefix) and region.contains(pos);
+                if (!overlaps and a.text_count > 0 and b.removed_count > 0) overlaps = try self.placedInside(a, br, b, allocator);
+                if (!overlaps and b.text_count > 0 and a.removed_count > 0) overlaps = try self.placedInside(b, ar, a, allocator);
             }
             if (!overlaps) return null;
             return .{ .start = if (less(ar.start, br.start)) ar.start else br.start, .end = if (endsBefore(ar.end, br.end)) br.end else ar.end };
+        }
+
+        // whether the edit put a surviving line strictly inside the deleted
+        // range without descending from the deletion
+        fn placedInside(self: *Self, edit: Edit, region: Region, deletion: Edit, allocator: std.mem.Allocator) !bool {
+            const where = try placement(edit, allocator);
+            const first = try nodeFromEdit(edit, where, 0, allocator);
+            if (!less(region.start, first.position) or !less(first.position, region.end)) return false;
+            if (try self.inLineage(edit, deletion.id, allocator)) return false;
+            for (0..edit.text_count) |index| {
+                const line = try nodeFromEdit(edit, where, index, allocator);
+                if (region.contains(line.position) and self.survives(line)) return true;
+            }
+            return false;
+        }
+
+        // an edit descends from a deletion when any edit it depends on does:
+        // the creators of the lines it replaced, or for an insertion the gap's
+        // dependencies and the lines it nests under. memoized, so a chain of
+        // rewrites is walked once rather than once per rewrite.
+        fn inLineage(self: *Self, edit: Edit, id: Id, allocator: std.mem.Allocator) !bool {
+            const key = Lineage{ .edit = edit.id, .deletion = id };
+            if (self.lineage.get(key)) |found| return found;
+            var deps: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+            defer deps.deinit(allocator);
+            if (edit.removed_count > 0) {
+                for (try removedIds(edit, allocator)) |line| try deps.put(allocator, @as(LineId(opts.hash), @bitCast(line)).edit_id, {});
+            } else {
+                for (edit.gap.deps) |dep| try deps.put(allocator, dep, {});
+                const where = try placeBetween(edit.gap.start, edit.gap.end, edit.text_count, allocator);
+                var pairs = std.Io.Reader.fixed(where.prefix);
+                while (pairs.bufferedLen() >= pair_size) {
+                    _ = try pairs.takeInt(u64, .big);
+                    const owner = try pairs.takeInt(Id, .big);
+                    if (owner != 0) try deps.put(allocator, owner, {}); // zero pairs are padding
+                }
+            }
+            var found = false;
+            for (deps.keys()) |dep| {
+                if (dep == id or try self.inLineage(try self.readEdit(dep, allocator), id, allocator)) {
+                    found = true;
+                    break;
+                }
+            }
+            try self.lineage.put(self.arena.allocator(), key, found);
+            return found;
+        }
+
+        // lines sharing a position, like competing one-line replacements, differ by id
+        fn survives(self: *const Self, line: Node) bool {
+            var begin: usize = 0;
+            var end = self.lines.items.len;
+            while (begin < end) {
+                const middle = begin + (end - begin) / 2;
+                switch (std.mem.order(u8, self.lines.items[middle].position, line.position)) {
+                    .lt => begin = middle + 1,
+                    .gt => end = middle,
+                    .eq => {
+                        var index = middle;
+                        while (index > 0 and std.mem.eql(u8, self.lines.items[index - 1].position, line.position)) index -= 1;
+                        while (index < self.lines.items.len and std.mem.eql(u8, self.lines.items[index].position, line.position)) : (index += 1) {
+                            if (self.lines.items[index].id == line.id) return true;
+                        }
+                        return false;
+                    },
+                }
+            }
+            return false;
         }
 
         fn addRegion(self: *Self, value: Region) !void {
@@ -926,8 +974,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
 
         fn range(self: *const Self, edit: Edit, allocator: std.mem.Allocator) !Region {
             if (edit.removed_count == 0) {
-                const pos = try resolveGap(edit.gap, allocator);
-                return .{ .start = pos, .end = pos };
+                // the whole interval, so concurrent insertions into one gap share a range
+                const where = try placeBetween(edit.gap.start, edit.gap.end, edit.text_count, allocator);
+                return .{ .start = try bound(allocator, where.prefix, where.lo + 1), .end = try bound(allocator, where.prefix, where.hi - 1) };
             }
             return .{
                 .start = (try self.node(try removedAt(edit, 0), allocator)).position,
@@ -938,27 +987,79 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         fn node(self: *const Self, id: Line, allocator: std.mem.Allocator) !Node {
             const line: LineId(opts.hash) = @bitCast(id);
             const edit = try self.readEdit(line.edit_id, allocator);
-            return nodeFromEdit(edit, try editParent(edit, allocator), line.line, allocator);
+            return nodeFromEdit(edit, try placement(edit, allocator), line.line, allocator);
         }
 
-        fn nodeFromEdit(edit: Edit, parent: []const u8, ordinal: u64, allocator: std.mem.Allocator) !Node {
+        fn nodeFromEdit(edit: Edit, where: Placement, ordinal: u64, allocator: std.mem.Allocator) !Node {
             if (ordinal >= edit.text_count) return error.InvalidLineId;
             return .{
                 .id = @bitCast(LineId(opts.hash){ .edit_id = edit.id, .line = @intCast(ordinal) }),
-                .position = if (edit.removed_count == 1 and edit.text_count == 1) parent else try position(allocator, parent, edit.id, ordinal * 2 + 1),
+                .position = if (edit.removed_count == 1 and edit.text_count == 1) where.prefix else try position(allocator, where.prefix, ordinalAt(where, edit.text_count, ordinal, edit.removed_count > 0), edit.id),
             };
         }
 
-        fn editParent(edit: Edit, allocator: std.mem.Allocator) ![]const u8 {
+        fn placement(edit: Edit, allocator: std.mem.Allocator) !Placement {
             if (edit.text_count == 0) return error.InvalidLineId;
-            if (edit.removed_count == 0) return resolveGap(edit.gap, allocator);
+            if (edit.removed_count == 0) return placeBetween(edit.gap.start, edit.gap.end, edit.text_count, allocator);
             // replacement placement is shared by all its lines. reading
             // it doesn't require following the edits it replaced.
             var cursor = edit.cursor;
             var buffer: [opts.buffer_size]u8 = undefined;
             var reader = try cursor.reader(&buffer);
             try reader.seekTo(edit.header_end);
-            return readBytes(&reader, allocator);
+            const prefix = try readBytes(&reader, allocator);
+            const lo = try reader.interface.takeInt(u64, .big);
+            const hi = try reader.interface.takeInt(u64, .big);
+            if (hi <= lo or hi - lo - 1 < edit.text_count) return error.InvalidEdit;
+            return .{ .prefix = prefix, .lo = lo, .hi = hi };
+        }
+
+        // a one-line replacement keeps the removed line's position. several
+        // lines replacing one nest under it; otherwise they go strictly between
+        // the first and last removed lines, inside the edit's conflict range.
+        fn replacementPlacement(removed: []const Node, text_count: u32, allocator: std.mem.Allocator) !Placement {
+            if (removed.len == 1) return .{ .prefix = removed[0].position, .lo = 0, .hi = max_ordinal };
+            return placeBetween(removed[0].position, removed[removed.len - 1].position, text_count, allocator);
+        }
+
+        // finds the shallowest level with room for the ordinals strictly between
+        // positions a and b, else goes deeper under a, padding past its end with
+        // zero pairs. b is only a bound while it still shares the prefix.
+        fn placeBetween(a: []const u8, b_maybe: ?[]const u8, text_count: u32, allocator: std.mem.Allocator) !Placement {
+            var prefix: std.ArrayList(u8) = .empty;
+            defer prefix.deinit(allocator);
+            var level: usize = 0;
+            const b = b_maybe orelse "";
+            var b_active = b_maybe != null;
+            while (true) : (level += 1) {
+                const a_pair: ?[]const u8 = if ((level + 1) * pair_size <= a.len) a[level * pair_size ..][0..pair_size] else null;
+                const b_pair: ?[]const u8 = if (b_active and (level + 1) * pair_size <= b.len) b[level * pair_size ..][0..pair_size] else null;
+                const lo: u64 = if (a_pair) |pair| std.mem.readInt(u64, pair[0..8], .big) else 0;
+                const hi: u64 = if (b_pair) |pair| std.mem.readInt(u64, pair[0..8], .big) else max_ordinal;
+                if (hi > lo and hi - lo - 1 >= text_count) {
+                    return .{ .prefix = try allocator.dupe(u8, prefix.items), .lo = lo, .hi = hi };
+                }
+                const pair = a_pair orelse &([_]u8{0} ** pair_size);
+                try prefix.appendSlice(allocator, pair);
+                b_active = if (b_pair) |other| std.mem.eql(u8, pair, other) else false;
+            }
+        }
+
+        // spreads the ordinals strictly between lo and hi. appends and prepends
+        // step by a stride so room lasts; other insertions divide the interval.
+        // replacements use both ends, so rewriting a block over and over only
+        // narrows its interval by two each time.
+        fn ordinalAt(where: Placement, text_count: u32, index: u64, replacement: bool) u64 {
+            const count: u64 = text_count;
+            if (where.lo == 0 and where.hi == max_ordinal) return (1 << 63) + index * stride;
+            if (replacement) {
+                if (index == 0) return where.lo + 1;
+                if (index + 1 == count) return where.hi - 1;
+                return where.lo + 1 + index * ((where.hi - where.lo - 2) / (count - 1));
+            }
+            if (where.hi == max_ordinal and (count + 1) * stride < max_ordinal - where.lo) return where.lo + (index + 1) * stride;
+            if (where.lo == 0 and (count + 1) * stride < where.hi) return where.hi - (count - index) * stride;
+            return where.lo + (index + 1) * ((where.hi - where.lo) / (count + 1));
         }
 
         fn verify(edit_value: Edit) !void {
@@ -1011,14 +1112,24 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             const header_end = reader.logicalPos();
             if (removed_count > 0 and text_count > 0) {
                 const size = try reader.interface.takeInt(u32, .big);
-                if (size % (hash.byteLen(opts.hash) + 8) != 0 or size > reader.size -| reader.logicalPos()) return error.InvalidEdit;
-                try reader.seekTo(reader.logicalPos() + size);
+                if (size % pair_size != 0 or size + 16 > reader.size -| reader.logicalPos()) return error.InvalidEdit;
+                try reader.seekTo(reader.logicalPos() + size + 16);
             }
             const index_start = reader.logicalPos();
             const text_start = index_start + ((@as(u64, text_count) -| 1) / text_block_size) * 8;
             if (text_start > reader.size or text_count > (reader.size - text_start) / 4) return error.InvalidEdit;
             if (removed_count == 0 and text_count == 0) return error.InvalidEdit;
             return .{ .id = id, .cursor = cursor, .removed_count = removed_count, .gap = gap, .text_count = text_count, .header_end = header_end, .index_start = index_start, .text_start = text_start };
+        }
+
+        fn removedIds(edit: Edit, allocator: std.mem.Allocator) ![]const Line {
+            var cursor = edit.cursor;
+            var buffer: [opts.buffer_size]u8 = undefined;
+            var reader = try cursor.reader(&buffer);
+            try reader.seekTo(4);
+            const lines = try allocator.alloc(Line, edit.removed_count);
+            for (lines) |*line| line.* = try reader.interface.takeInt(Line, .big);
+            return lines;
         }
 
         fn removedAt(edit: Edit, index: u32) !Line {
@@ -1036,11 +1147,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 try reader.interface.discardAll(4);
                 break :blk null;
             } else try readBytes(reader, allocator);
-            const position_size = hash.byteLen(opts.hash) + 8;
-            if (start.len % position_size != 0) return error.InvalidGapList;
+            if (start.len % pair_size != 0) return error.InvalidGapList;
             if (end) |value| {
-                if (value.len % position_size != 0 or less(value, start)) return error.InvalidGapList;
-                if (value.len > start.len and std.mem.startsWith(u8, value, start)) return error.InvalidGapList;
+                if (value.len % pair_size != 0 or !less(start, value)) return error.InvalidGapList;
             }
             const count = try reader.interface.takeInt(u32, .big);
             if (count > (reader.size -| reader.logicalPos()) / hash.byteLen(opts.hash)) return error.InvalidGapList;
@@ -1056,26 +1165,23 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             for (gap.deps) |dep| try writer.writeInt(Id, dep, .big);
         }
 
-        fn resolveGap(gap: Gap, allocator: std.mem.Allocator) ![]const u8 {
-            const end = gap.end orelse return gap.start;
-            var hasher = std.Io.Writer.Hashing(hash.Hasher(opts.hash)).init(&.{});
-            try hasher.writer.writeAll("gap");
-            try writeLengthPrefixedBytes(&hasher.writer, gap.start);
-            try writeLengthPrefixedBytes(&hasher.writer, end);
-            for (gap.deps) |dep| try hasher.writer.writeInt(Id, dep, .big);
-            var bytes: [hash.byteLen(opts.hash)]u8 = undefined;
-            hasher.hasher.final(&bytes);
-            return position(allocator, gap.start, hash.bytesToInt(opts.hash, &bytes), 0);
+        fn positionId(pos: []const u8) Id {
+            return std.mem.readInt(Id, pos[pos.len - hash.byteLen(opts.hash) ..][0..comptime hash.byteLen(opts.hash)], .big);
         }
 
-        // positions contain (edit id, ordinal) pairs, with even ordinals
-        // for gaps and odd ordinals for lines. a nested position sorts
-        // after its parent.
-        fn position(allocator: std.mem.Allocator, parent: []const u8, id: Id, ordinal: u64) ![]const u8 {
-            const result = try allocator.alloc(u8, parent.len + hash.byteLen(opts.hash) + 8);
-            @memcpy(result[0..parent.len], parent);
-            std.mem.writeInt(Id, result[parent.len..][0..comptime hash.byteLen(opts.hash)], id, .big);
-            std.mem.writeInt(u64, result[result.len - 8 ..][0..8], ordinal, .big);
+        fn position(allocator: std.mem.Allocator, prefix: []const u8, ordinal: u64, id: Id) ![]const u8 {
+            const result = try allocator.alloc(u8, prefix.len + pair_size);
+            @memcpy(result[0..prefix.len], prefix);
+            std.mem.writeInt(u64, result[prefix.len..][0..8], ordinal, .big);
+            std.mem.writeInt(Id, result[prefix.len + 8 ..][0..comptime hash.byteLen(opts.hash)], id, .big);
+            return result;
+        }
+
+        // an ordinal without an id, before every line with that ordinal
+        fn bound(allocator: std.mem.Allocator, prefix: []const u8, ordinal: u64) ![]const u8 {
+            const result = try allocator.alloc(u8, prefix.len + 8);
+            @memcpy(result[0..prefix.len], prefix);
+            std.mem.writeInt(u64, result[prefix.len..][0..8], ordinal, .big);
             return result;
         }
 
@@ -1106,7 +1212,7 @@ pub fn LineId(comptime hash_kind: hash.HashKind) type {
         line: u32,
         edit_id: hash.HashInt(hash_kind),
 
-        pub const Int = @typeInfo(LineId(hash_kind)).@"struct".backing_integer.?;
+        pub const Int = @typeInfo(LineId(hash_kind)).@"struct".backing_integer orelse unreachable;
     };
 }
 
