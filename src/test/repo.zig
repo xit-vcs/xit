@@ -1034,7 +1034,6 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     try repo.addBranch(io, .{ .name = "target" });
     const source_content = switch (case) {
         .later_edit => "a\nBB\nc\nd\ne",
-        .conflict => "a\nother\nc\nd\ne",
         else => "a\nb\nc\nd\nE",
     };
     for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, source_content);
@@ -1161,7 +1160,6 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
         patch_oid: [hash.hexLen(opts.hash)]u8,
         third_oid: ?[hash.hexLen(opts.hash)]u8,
         corruption: enum { count, gap, placement, text } = .count,
-        create: bool = false,
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
@@ -1214,10 +1212,10 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             var read_moment = moment.readOnly();
             if (ctx.case != .later_edit) {
                 const size_before = try cursor.db.core.length();
-                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id}, if (ctx.create) .create else .merge);
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id});
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(size_before, try cursor.db.core.length());
-                try application.save(&snapshot, patch_allocator, paths[0], .clear);
+                try application.save(&snapshot, patch_allocator, paths[0], .keep);
             }
             const membership = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1234,11 +1232,11 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 })).?;
                 var id: [hash.byteLen(opts.hash)]u8 = undefined;
                 _ = try third_patch.readBytes(&id);
-                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{hash.bytesToInt(opts.hash, &id)}, .merge);
+                var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{hash.bytesToInt(opts.hash, &id)});
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(1, application.file.regions.items.len);
-                try std.testing.expectEqual(@as(usize, if (ctx.case == .history) 6 else 7), application.file.lines.items.len);
-                try application.save(&snapshot, patch_allocator, paths[0], .clear);
+                try std.testing.expectEqual(6, application.file.lines.items.len);
+                try std.testing.expectError(error.ConflictedPatchApplication, application.save(&snapshot, patch_allocator, paths[0], .keep));
             }
             const line_list = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1249,20 +1247,17 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @intFromEnum(patch.FileField.gaps) },
             });
-            // clearing gaps stores an explicit .none value, so the slot still exists
-            try std.testing.expectEqual(ctx.case == .later_edit, gaps != null and gaps.?.tag != .none);
-            var file = try patch.File(opts).load(&read_moment, snapshot.cursor.readOnly(), patch_allocator, path_hash);
-            defer file.deinit();
-            try std.testing.expectEqual(ctx.case == .conflict or ctx.case == .history, file.has_conflict);
+            // the snapshot keeps its inherited gaps
+            try std.testing.expect(gaps != null and gaps.?.tag != .none);
 
             // freezing forces any writes to copy existing data.
             // applying the patch again should make no changes at all.
             try cursor.db.freeze();
             const size_before = try cursor.db.core.length();
-            var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id}, .merge);
+            var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id});
             defer application.deinit(patch_allocator);
             try std.testing.expectEqual(0, application.edits.count());
-            try application.save(&snapshot, patch_allocator, paths[0], .clear);
+            try application.save(&snapshot, patch_allocator, paths[0], .keep);
             try std.testing.expectEqual(size_before, try cursor.db.core.length());
             const gaps_after = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1283,14 +1278,11 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
     if (case == .rollback) {
         for ([_]@TypeOf(ctx.corruption){ .count, .gap, .placement, .text }) |corruption| {
-            for ([_]bool{ false, true }) |create| {
-                var corrupt_ctx = ctx;
-                corrupt_ctx.corruption = corruption;
-                corrupt_ctx.create = create;
-                try std.testing.expectError(if (corruption == .gap) error.InvalidGapList else error.InvalidEdit, history.appendContext(.{ .slot = try history.getSlot(-1) }, corrupt_ctx));
-                const after = try repo.core.latestMoment();
-                try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
-            }
+            var corrupt_ctx = ctx;
+            corrupt_ctx.corruption = corruption;
+            try std.testing.expectError(if (corruption == .gap) error.InvalidGapList else error.InvalidEdit, history.appendContext(.{ .slot = try history.getSlot(-1) }, corrupt_ctx));
+            const after = try repo.core.latestMoment();
+            try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
         }
     } else {
         try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
@@ -1352,7 +1344,6 @@ fn testMergeEdits(case: EditMergeCase) !void {
                 const text = try file.readText(allocator);
                 defer allocator.free(text);
                 try std.testing.expectEqualStrings(content, text);
-                try std.testing.expect(!file.has_conflict);
                 if (case.shared_gap_chunks) {
                     var reader = patch.File(opts).TextReader.init(&file, allocator);
                     defer reader.deinit();

@@ -5,10 +5,9 @@
 //! its first parent and copied on write. path strings are stored as readable
 //! keys. each file's value is an array of five database slots (FileField):
 //! - patch: the last patch created for the file, inherited if unchanged;
-//! - edits: the set of all applied edit ids, including conflicted edits;
-//! - lines: a conflict byte (0 or 1), then ordered surviving line ids, including
-//!   conflict alternatives. a line id is an edit id followed by the u32 index
-//!   of a line inserted by that edit, starting at zero.
+//! - edits: the set of all applied edit ids;
+//! - lines: ordered surviving line ids. a line id is an edit id followed by
+//!   the u32 index of a line inserted by that edit, starting at zero.
 //! - gaps: a persistent sequence of blobs containing live boundaries, including
 //!   both file ends. stable positions choose boundaries (about 16 gaps per blob,
 //!   at most 64). unchanged blobs and tree nodes are shared between snapshots.
@@ -159,9 +158,6 @@ pub fn writeAndApplyPatches(
         };
         defer application.deinit(allocator);
         const file = &application.file;
-        // commit snapshots describe chosen text, without conflict alternatives.
-        // retained text states have creation gaps; foreign applications may not.
-        if (file.has_conflict) return error.ConflictedPatchSnapshot;
         var gap_list: ?File(repo_opts).GapList = null;
         var next_gaps: std.ArrayList(File(repo_opts).Gap) = .empty;
         defer next_gaps.deinit(allocator);
@@ -356,7 +352,7 @@ pub fn writeAndApplyPatches(
         // apply the patch to the snapshot it was created from
         // refresh the moment so the new patch record is visible
         file.moment = state.readOnly().extra.moment.*;
-        try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, null, false);
+        try applyPatchesToFile(repo_opts, &application, allocator, &.{patch_hash}, .create, null);
         try application.save(&snapshot, allocator, line_iter_pair.path, if (gap_list) |list| .{ .write = .{ .before = list.chunks, .after = next_gaps.items } } else .keep);
 
         // associate the patch hash and blob with path/commit
@@ -415,7 +411,6 @@ pub fn applyPatches(
     allocator: std.mem.Allocator,
     path: []const u8,
     patch_hashes: []const hash.HashInt(opts.hash),
-    kind: PatchApplicationKind,
 ) !PatchApplication(opts) {
     const DB = rp.Repo(.xit, opts).DB;
     const path_hash = hash.hashInt(opts.hash, path);
@@ -431,11 +426,11 @@ pub fn applyPatches(
         })) orelse break :blk null;
         break :blk try DB.HashSet(.read_only).init(cursor);
     } else null;
-    try applyPatchesToFile(opts, &application, allocator, patch_hashes, kind, base_edits, true);
+    try applyPatchesToFile(opts, &application, allocator, patch_hashes, .merge, base_edits);
     return application;
 }
 
-// only creation can skip verification, after hashing new records and checking reused ones.
+// creation skips verification: its new records were just hashed and reused ones checked.
 fn applyPatchesToFile(
     comptime opts: rp.RepoOpts(.xit),
     application: *PatchApplication(opts),
@@ -443,7 +438,6 @@ fn applyPatchesToFile(
     patch_hashes: []const hash.HashInt(opts.hash),
     kind: PatchApplicationKind,
     base_edits: ?rp.Repo(.xit, opts).DB.HashSet(.read_only),
-    verify_edits: bool,
 ) !void {
     const Id = hash.HashInt(opts.hash);
     const file = &application.file;
@@ -469,7 +463,7 @@ fn applyPatchesToFile(
     for (pending.keys()) |id| {
         _ = scratch.reset(.retain_capacity);
         const edit = try file.readEdit(id, scratch.allocator());
-        if (verify_edits) try File(opts).verify(edit);
+        if (kind == .merge) try File(opts).verify(edit);
         for (edit.gap.deps) |dep| {
             if (!pending.contains(dep) and !try file.contains(dep)) return error.MissingPatchDependency;
         }
@@ -515,27 +509,6 @@ fn applyPatchesToFile(
     var other_arena = std.heap.ArenaAllocator.init(allocator);
     defer other_arena.deinit();
 
-    // reconstruct existing conflict regions against the surviving lines
-    if (file.has_conflict) {
-        if (file.edits) |edits| {
-            var outer = try edits.iterator();
-            while (try outer.next()) |entry| {
-                const id = (try entry.readKeyValuePair()).hash;
-                _ = scratch.reset(.retain_capacity);
-                const a = try file.readEdit(id, scratch.allocator());
-                const ar = try file.range(a, scratch.allocator());
-                var inner = try edits.iterator();
-                while (try inner.next()) |other| {
-                    const other_id = (try other.readKeyValuePair()).hash;
-                    if (other_id <= id) continue;
-                    _ = other_arena.reset(.retain_capacity);
-                    const b = try file.readEdit(other_id, other_arena.allocator());
-                    if (try file.conflict(a, ar, b, other_arena.allocator())) |region| try file.addRegion(region);
-                }
-            }
-        }
-    }
-
     // only edits concurrent with the new ones can conflict. collect them once,
     // without reading the file's entire history for each new edit.
     var concurrent: std.ArrayList(Id) = .empty;
@@ -569,10 +542,9 @@ fn applyPatchesToFile(
             return File(opts).less(a.start, b.start);
         }
     }.lt);
-    file.has_conflict = file.regions.items.len > 0;
 }
 
-pub const PatchApplicationKind = enum { create, merge };
+const PatchApplicationKind = enum { create, merge };
 
 // the result of applying patches to a single file: its updated state and
 // newly applied edit ids. saves both to a snapshot when needed.
@@ -586,7 +558,9 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             self.edits.deinit(allocator);
         }
 
-        pub fn save(self: *const @This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, path: []const u8, gaps: union(enum) { keep, clear, write: struct { before: []const File(opts).GapChunk, after: []const File(opts).Gap } }) !void {
+        pub fn save(self: *const @This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, path: []const u8, gaps: union(enum) { keep, write: struct { before: []const File(opts).GapChunk, after: []const File(opts).Gap } }) !void {
+            // snapshots hold chosen text, never conflict alternatives
+            if (self.file.regions.items.len > 0) return error.ConflictedPatchApplication;
             // applied ids are scoped to this file: a nonempty patch on a new path
             // always reaches initialization below. repeats preserve the snapshot and gaps.
             if (self.edits.count() == 0) return;
@@ -600,16 +574,10 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             for (self.edits.keys()) |id| try set.put(id, .{ .uint = 1 });
             var buffer = std.Io.Writer.Allocating.init(allocator);
             defer buffer.deinit();
-            // keep the alternatives too, so another application can use this snapshot
-            try buffer.writer.writeByte(@intFromBool(self.file.has_conflict));
             for (self.file.lines.items) |line| try buffer.writer.writeInt(LineId(opts.hash).Int, line.id, .big);
             try fields.put(@intFromEnum(FileField.lines), .{ .bytes = buffer.written() });
             switch (gaps) {
                 .keep => {},
-                .clear => {
-                    // foreign applications can't inherit the old creation gaps
-                    try fields.put(@intFromEnum(FileField.gaps), .{ .slot = null });
-                },
                 .write => |values| {
                     // update the chunk list in position order, keeping unchanged blobs
                     const list = try DB.LinkedArrayList(.read_write).init(try fields.putCursor(@intFromEnum(FileField.gaps)));
@@ -690,7 +658,6 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         edits: ?DB.HashSet(.read_only),
         lines: std.ArrayList(Node) = .empty,
         regions: std.ArrayList(Region) = .empty,
-        has_conflict: bool = false,
 
         pub fn load(moment: *const DB.HashMap(.read_only), snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) !Self {
             const edit_cursor = try snapshot.readPath(void, &.{
@@ -710,9 +677,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 var line_cursor = cursor;
                 var buffer: [opts.buffer_size]u8 = undefined;
                 var reader = try line_cursor.reader(&buffer);
-                const flag = try reader.interface.takeByte();
-                if (flag > 1 or (reader.size - 1) % line_size != 0) return error.InvalidLineList;
-                self.has_conflict = flag == 1;
+                if (reader.size % line_size != 0) return error.InvalidLineList;
                 // lines from the same edit share its header and placement. cache
                 // only edits with live lines, without reading their historical text.
                 var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, parent: []const u8 }) = .empty;
@@ -816,7 +781,6 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         };
 
         // gaps are only needed when creating a patch from a commit snapshot.
-        // foreign application results may have lines but no creation gaps.
         fn readGaps(self: *Self, snapshot: DB.Cursor(.read_only), path_hash: Id) !GapList {
             const cursor = (try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },

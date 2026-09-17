@@ -644,7 +644,7 @@ fn writeBlobWithPatches(
     if (patch_ids.items.len == 0) return null;
 
     // apply patches together to check their dependencies
-    var application = patch.applyPatches(repo_opts, state.readOnly().extra.moment, snapshots.target, snapshots.base, allocator, path, patch_ids.items, .merge) catch |err| switch (err) {
+    var application = patch.applyPatches(repo_opts, state.readOnly().extra.moment, snapshots.target, snapshots.base, allocator, path, patch_ids.items) catch |err| switch (err) {
         error.MissingPatchDependency => return null,
         else => return err,
     };
@@ -659,7 +659,7 @@ fn writeBlobWithPatches(
     var lines: std.ArrayList([]const u8) = .empty;
     has_conflict.* = false;
     var index: usize = 0;
-    if (merged_file.has_conflict) {
+    if (merged_file.regions.items.len > 0) {
         const markers = try ConflictMarkers.init(render_allocator, base_oid, target_name, source_name);
         var base_file = try patch.File(repo_opts).load(state.readOnly().extra.moment, snapshots.base, allocator, path_hash);
         defer base_file.deinit();
