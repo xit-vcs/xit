@@ -37,6 +37,15 @@ pub const RunOpts = struct {
     environ_map: *std.process.Environ.Map,
 };
 
+// std.Progress.start can only be called once per process
+var progress_root: ?std.Progress.Node = null;
+
+/// clears the progress line. call before printing anything else.
+fn endProgress() void {
+    if (progress_root) |root| root.end();
+    progress_root = .none; // a later start is a no-op
+}
+
 const ProgressCtx = struct {
     run_opts: RunOpts,
     clear_line: *bool,
@@ -48,6 +57,11 @@ const ProgressCtx = struct {
                 if (self.node.*) |node| {
                     node.end();
                 }
+                const root = progress_root orelse blk: {
+                    const root = std.Progress.start(io, .{});
+                    progress_root = root;
+                    break :blk root;
+                };
                 const name = switch (start.kind) {
                     .writing_object_from_pack => "Writing object from pack",
                     .writing_object => "Writing object",
@@ -55,15 +69,15 @@ const ProgressCtx = struct {
                     .sending_bytes => "Sending bytes",
                     .receiving_bytes => "Receiving bytes",
                 };
-                self.node.* = std.Progress.start(io, .{ .root_name = name, .estimated_total_items = start.estimated_total_items });
+                self.node.* = root.start(name, start.estimated_total_items);
             },
             .complete_one => if (self.node.*) |node| node.completeOne(),
             .complete_total => |complete_total| if (self.node.*) |node| {
-                if (complete_total.kind == .receiving_bytes) {
-                    var buffer: [std.Progress.Node.max_name_len]u8 = undefined;
-                    node.setName(try std.fmt.bufPrint(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count}));
-                } else {
-                    node.setCompletedItems(complete_total.count);
+                var buffer: [std.Progress.Node.max_name_len]u8 = undefined;
+                switch (complete_total.kind) {
+                    .sending_bytes => node.setName(try std.fmt.bufPrint(&buffer, "Sending bytes: {Bi:.2}", .{complete_total.count})),
+                    .receiving_bytes => node.setName(try std.fmt.bufPrint(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count})),
+                    else => node.setCompletedItems(complete_total.count),
                 }
             },
             .child_text => |text| if (self.node.*) |node| {
@@ -75,6 +89,9 @@ const ProgressCtx = struct {
             },
             .text => |text| {
                 if (text.len == 0) return;
+                // keep the progress thread from redrawing mid-write
+                _ = try io.lockStderr(&.{}, null);
+                defer io.unlockStderr();
                 if (self.clear_line.*) {
                     try self.run_opts.out.print("\x1B[F", .{});
                 }
@@ -168,6 +185,7 @@ pub fn run(
                     global_config_path,
                     .{ .bare = clone_cmd.bare, .transport = .{ .progress_ctx = if (any_repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node } } },
                 );
+                endProgress();
                 defer repo.deinit(io, allocator);
 
                 if (repo_kind == .xit) {
@@ -225,6 +243,7 @@ pub fn runPrint(
     run_opts: RunOpts,
 ) !void {
     run(repo_kind, any_repo_opts, io, allocator, args, cwd_path, run_opts) catch |err| {
+        endProgress();
         const message: []const u8 = switch (err) {
             error.RepoNotFound => {
                 try run_opts.err.print(
@@ -573,6 +592,7 @@ fn runCommand(
                 merge_cmd,
                 if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node },
             );
+            endProgress();
             defer result.deinit();
             try printMergeResult(repo_kind, repo_opts, &result, run_opts);
         },
@@ -812,6 +832,7 @@ pub fn main(init: std.process.Init) !u8 {
     });
     defer threaded.deinit();
     const io = threaded.io();
+    defer endProgress();
 
     var args: std.ArrayList([]const u8) = .empty;
     defer args.deinit(allocator);

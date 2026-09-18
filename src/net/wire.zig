@@ -394,6 +394,11 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                             } });
                         }
                     }
+                    errdefer if (repo_opts.ProgressCtx != void) {
+                        if (self.opts.progress_ctx) |progress_ctx| {
+                            progress_ctx.run(io, .{ .end = .sending_bytes }) catch {};
+                        }
+                    };
 
                     var read_buffer = [_]u8{0} ** repo_opts.read_size;
                     var total_size: usize = 0;
@@ -411,6 +416,12 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                                 total_size += size;
                                 try progress_ctx.run(io, .{ .complete_total = .{ .kind = .sending_bytes, .count = total_size } });
                             }
+                        }
+                    }
+
+                    if (repo_opts.ProgressCtx != void) {
+                        if (self.opts.progress_ctx) |progress_ctx| {
+                            try progress_ctx.run(io, .{ .end = .sending_bytes });
                         }
                     }
                 } else {
