@@ -24,6 +24,13 @@ pub const GcResult = struct {
     size_after: u64,
 };
 
+// the sets of live things found while pruning grow with the repository, so
+// they are kept in a scratch database rather than on the heap. a plain file
+// is used because each write outside a transaction is flushed anyway.
+fn SetsDb(comptime repo_opts: rp.RepoOpts(.xit)) type {
+    return @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
+}
+
 // store offsets as u64 keys in a separate, mutable top-level xitdb hash map
 const DiskOffsets = struct {
     const DB = @import("xitdb").Database(.file, u64);
@@ -49,10 +56,11 @@ const DiskOffsets = struct {
     }
 };
 
+// keeps only the entries of an oid-keyed map whose key is in `live_oids`
 fn pruneOidMap(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
-    live_oids: *const std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
+    live_oids: SetsDb(repo_opts).HashSet(.read_write),
     map_name: []const u8,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
@@ -64,24 +72,27 @@ fn pruneOidMap(
     var iter = try old_map.iterator();
     while (try iter.next()) |*entry_cursor| {
         const kv_pair = try entry_cursor.readKeyValuePair();
-        if (!live_oids.contains(kv_pair.hash)) {
+        if (try live_oids.getSlot(kv_pair.hash) == null) {
             _ = try new_map.remove(kv_pair.hash);
         }
     }
 }
 
-fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, repo_opts).State(.read_write), allocator: std.mem.Allocator) !void {
+fn prunePatchData(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    allocator: std.mem.Allocator,
+    sets: SetsDb(repo_opts).HashMap(.read_write),
+) !void {
     const patch = @import("./patch.zig");
     const xitdb = @import("xitdb");
     const SlotInt = @typeInfo(xitdb.Slot).@"struct".backing_integer.?;
     const slot_size = @bitSizeOf(SlotInt) / 8;
     const DB = rp.Repo(.xit, repo_opts).DB;
-    var visited = std.AutoHashMap(u64, void).init(allocator);
-    defer visited.deinit();
-    var patches = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
-    defer patches.deinit();
-    var edits = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
-    defer edits.deinit();
+    const visited = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "visited-positions")));
+    const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
+    const edits = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-edits")));
+    // popped last-in first-out, so it holds at most one node's children per level of the trie
     var pending: std.ArrayList(struct { cursor: DB.Cursor(.read_only), kind: enum { files, edits } }) = .empty;
     defer pending.deinit(allocator);
 
@@ -96,12 +107,13 @@ fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, re
                 const cursor = entry.cursor;
                 const slot = cursor.slot();
                 if (slot.tag == .none) continue;
-                if ((try visited.getOrPut(slot.value)).found_existing) continue;
+                if (try visited.getSlot(slot.value) != null) continue;
+                try visited.put(slot.value, .{ .uint = 1 });
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
                         if (entry.kind == .edits) {
-                            try edits.put(kv_pair.hash, {});
+                            try edits.put(kv_pair.hash, .{ .uint = 1 });
                             continue;
                         }
                         const fields = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
@@ -109,7 +121,7 @@ fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, re
                             if (patch_cursor.slot().tag != .none) {
                                 var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                                 _ = try patch_cursor.readBytes(&id);
-                                try patches.put(hash.bytesToInt(repo_opts.hash, &id), {});
+                                try patches.put(hash.bytesToInt(repo_opts.hash, &id), .{ .uint = 1 });
                             }
                         }
                         if (try fields.getCursor(@intFromEnum(patch.FileField.edits))) |edit_cursor| {
@@ -141,13 +153,14 @@ fn prunePatchData(comptime repo_opts: rp.RepoOpts(.xit), state: rp.Repo(.xit, re
         }
     }
 
-    try pruneOidMap(repo_opts, state, &patches, "patch-id->edit-list");
-    try pruneOidMap(repo_opts, state, &edits, "edit-id->edit");
+    try pruneOidMap(repo_opts, state, patches, "patch-id->edit-list");
+    try pruneOidMap(repo_opts, state, edits, "edit-id->edit");
 }
 
 // the new repo db, ready to be renamed over "db"
 const db_new_name = "db.gc";
 const offsets_name = "db.gc.offsets";
+const sets_name = "db.gc.sets";
 
 // removes dead objects, snapshots, patch data, and chunks from the moment being written.
 // their records still take up space until compactDatabase runs afterwards.
@@ -161,28 +174,36 @@ pub fn prune(
     const patch = @import("./patch.zig");
     const DB = rp.Repo(.xit, repo_opts).DB;
 
+    // the scratch database for the live sets. the transaction holds the
+    // lock, so no other gc can be using the file.
+    const sets_file = try state.core.repo_dir.createFile(io, sets_name, .{ .truncate = true, .read = true });
+    defer {
+        sets_file.close(io);
+        state.core.repo_dir.deleteFile(io, sets_name) catch {};
+    }
+    var sets_db = try SetsDb(repo_opts).init(.{ .io = io, .file = sets_file, .fsync = false });
+    const sets = try SetsDb(repo_opts).HashMap(.read_write).init(sets_db.rootCursor());
+
     // find every object reachable from the roots
-    var live_oids = std.AutoHashMap(hash.HashInt(repo_opts.hash), void).init(allocator);
-    defer live_oids.deinit();
-    try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, &live_oids);
+    const live_oids = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-oids")));
+    try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids);
 
     // find every chunk record referenced by a live object
-    var referenced_positions = std.AutoHashMap(u64, void).init(allocator);
-    defer referenced_positions.deinit();
-    try findReferencedPositions(repo_opts, state.readOnly(), &live_oids, &referenced_positions);
+    const referenced_positions = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "referenced-positions")));
+    try findReferencedPositions(repo_opts, state.readOnly(), live_oids, referenced_positions);
 
     // each map is iterated through a cursor taken before it is written to,
     // because entries can't be removed while the map is being iterated.
     // writing copies the map, so the cursor keeps seeing every entry.
 
-    try pruneOidMap(repo_opts, state, &live_oids, "object-id->content");
+    try pruneOidMap(repo_opts, state, live_oids, "object-id->content");
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
-    try pruneOidMap(repo_opts, state, &live_oids, "commit-id->snapshot");
-    try pruneOidMap(repo_opts, state, &live_oids, patch.COMMIT_ID_TO_STATS_KEY);
-    try pruneOidMap(repo_opts, state, &live_oids, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
-    try prunePatchData(repo_opts, state, allocator);
+    try pruneOidMap(repo_opts, state, live_oids, "commit-id->snapshot");
+    try pruneOidMap(repo_opts, state, live_oids, patch.COMMIT_ID_TO_STATS_KEY);
+    try pruneOidMap(repo_opts, state, live_oids, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
+    try prunePatchData(repo_opts, state, allocator, sets);
 
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"))) |old_chunk_map_cursor| {
         const old_chunk_map = try DB.HashMap(.read_only).init(old_chunk_map_cursor);
@@ -193,7 +214,7 @@ pub fn prune(
         while (try iter.next()) |*entry_cursor| {
             const kv_pair = try entry_cursor.readKeyValuePair();
             const record_position = try chunk.chunkRecordPosition(kv_pair.value_cursor);
-            if (!referenced_positions.contains(record_position)) {
+            if (try referenced_positions.getSlot(record_position) == null) {
                 _ = try new_chunk_map.remove(kv_pair.hash);
             }
         }
@@ -265,24 +286,30 @@ pub fn compactDatabase(
 }
 
 // finds every object reachable from the supplied roots, HEAD, all refs,
-// in-progress merge heads, and blobs staged in the index
+// in-progress merge heads, and blobs staged in the index. this doesn't use
+// ObjectIterator, whose visited set is a heap map with every object in it.
 fn findLiveOids(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
     allocator: std.mem.Allocator,
     extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
-    live_oids: *std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
+    live_oids: SetsDb(repo_opts).HashSet(.read_write),
 ) !void {
-    var obj_iter = try obj.ObjectIterator(.xit, repo_opts).init(state, io, allocator, .{ .kind = .all });
-    defer obj_iter.deinit();
+    // objects whose content hasn't been read yet. an object is marked live
+    // when it is queued, so nothing is queued twice, and the queue is popped
+    // last-in first-out, so a commit's tree is finished before its parent is
+    // read. that keeps the queue to the pending parents of merge commits
+    // plus one tree's entries per level of the tree being read.
+    var pending: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+    defer pending.deinit(allocator);
 
-    for (extra_roots) |*oid| try obj_iter.include(oid);
+    for (extra_roots) |*oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, oid);
 
     // HEAD. this covers a detached HEAD; a symbolic HEAD points at a
     // ref that is included below.
     if (try rf.readHeadRecurMaybe(.xit, repo_opts, state, io)) |head_oid| {
-        try obj_iter.include(&head_oid);
+        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &head_oid);
     }
 
     // all refs under the "refs" key: heads, tags, remotes and any other kind
@@ -291,7 +318,7 @@ fn findLiveOids(
         defer ref_iter.deinit();
         while (try ref_iter.next()) |ref| {
             if (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) |oid| {
-                try obj_iter.include(&oid);
+                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &oid);
             }
         }
     }
@@ -300,7 +327,7 @@ fn findLiveOids(
     // unqualified ref that contains an oid must be added here, because
     // unlike the refs above, they can't be enumerated.
     if (try mrg.readAnyMergeHead(.xit, repo_opts, state, io)) |merge_oid| {
-        try obj_iter.include(&merge_oid);
+        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &merge_oid);
     }
 
     // blobs staged in the index
@@ -311,25 +338,54 @@ fn findLiveOids(
             for (entries_for_path) |entry_maybe| {
                 if (entry_maybe) |entry| {
                     const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
-                    try obj_iter.include(&entry_oid);
+                    try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid);
                 }
             }
         }
     }
 
     // walk the object graph
-    while (try obj_iter.next(allocator)) |object| {
+    while (pending.pop()) |oid| {
+        var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &oid);
         defer object.deinit();
-        try live_oids.put(try hash.hexToInt(repo_opts.hash, &object.oid), {});
+        switch (object.content) {
+            .blob => {},
+            .tree => |tree| for (tree.entries.values()) |entry| {
+                if (entry.mode.content.object_type == .gitlink) continue;
+                const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
+                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid);
+            },
+            .commit => |commit| {
+                if (commit.metadata.parent_oids) |parent_oids| {
+                    for (parent_oids) |*parent_oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, parent_oid);
+                }
+                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &commit.tree);
+            },
+            .tag => |tag| try includeLiveOid(repo_opts, allocator, live_oids, &pending, &tag.target),
+        }
     }
+}
+
+// marks an object live and queues it to be read, unless it already is
+fn includeLiveOid(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    allocator: std.mem.Allocator,
+    live_oids: SetsDb(repo_opts).HashSet(.read_write),
+    pending: *std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
+    oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !void {
+    const oid_int = try hash.hexToInt(repo_opts.hash, oid);
+    if (try live_oids.getSlot(oid_int) != null) return;
+    try live_oids.put(oid_int, .{ .uint = 1 });
+    try pending.append(allocator, oid.*);
 }
 
 // collects the position of every chunk record a live object points at
 fn findReferencedPositions(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
-    live_oids: *const std.AutoHashMap(hash.HashInt(repo_opts.hash), void),
-    referenced_positions: *std.AutoHashMap(u64, void),
+    live_oids: SetsDb(repo_opts).HashSet(.read_write),
+    referenced_positions: SetsDb(repo_opts).HashSet(.read_write),
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
@@ -339,9 +395,11 @@ fn findReferencedPositions(
     var iter = try map.iterator();
     while (try iter.next()) |*entry_cursor| {
         const kv_pair = try entry_cursor.readKeyValuePair();
-        if (!live_oids.contains(kv_pair.hash)) continue;
-        // only a chunked object points at records. inline and empty objects are plain values.
+        if (try live_oids.getSlot(kv_pair.hash) == null) continue;
+        // only a chunked object points at records, through the slots after its first element
         if (kv_pair.value_cursor.slot().tag != .array_list) continue;
-        try chunk.collectRecordPositions(repo_opts, kv_pair.value_cursor, referenced_positions);
+        const list = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
+        var records = try list.iteratorFrom(1);
+        while (try records.next()) |record_cursor| try referenced_positions.put(try chunk.chunkRecordPosition(record_cursor), .{ .uint = 1 });
     }
 }

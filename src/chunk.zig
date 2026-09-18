@@ -267,17 +267,6 @@ pub fn chunkRecordPosition(cursor: anytype) !u64 {
     return slot.value;
 }
 
-// collect the position of every chunk record a chunked object's list points at
-pub fn collectRecordPositions(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    content_cursor: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only),
-    positions: *std.AutoHashMap(u64, void),
-) !void {
-    const list = try rp.Repo(.xit, repo_opts).DB.ArrayList(.read_only).init(content_cursor);
-    var iter = try list.iteratorFrom(1);
-    while (try iter.next()) |record_cursor| try positions.put(try chunkRecordPosition(record_cursor), {});
-}
-
 // build a chunk record in `buffer`: the record header followed by the
 // chunk itself, compressed only if that makes the record smaller
 fn makeChunkRecord(
