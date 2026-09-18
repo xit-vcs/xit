@@ -1169,12 +1169,16 @@ pub fn writePatches(
 pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         const DB = rp.Repo(.xit, repo_opts).DB;
+        // the map of commits waiting on their parent grows with the history,
+        // so it lives in a temporary database rather than on the heap. a plain
+        // file is used because each write outside a transaction is synced anyway.
+        const TempDB = @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
         const db_name = "temp.db";
 
         repo_dir: std.Io.Dir,
         db_file: std.Io.File,
-        db: *DB,
-        parent_to_children: DB.HashMap(.read_write),
+        db: *TempDB,
+        parent_to_children: TempDB.HashMap(.read_write),
         oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
@@ -1185,20 +1189,15 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 state.core.repo_dir.deleteFile(io, db_name) catch {};
             }
 
-            const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
-            errdefer allocator.destroy(buffer_ptr);
-
-            buffer_ptr.* = std.Io.Writer.Allocating.init(allocator);
-            errdefer buffer_ptr.deinit();
-
-            const db_ptr = try allocator.create(DB);
+            // cursors point at the database, so it needs a stable address
+            const db_ptr = try allocator.create(TempDB);
             errdefer allocator.destroy(db_ptr);
-            db_ptr.* = try DB.init(.{ .io = io, .file = db_file, .buffer = buffer_ptr });
+            db_ptr.* = try TempDB.init(.{ .io = io, .file = db_file, .fsync = false });
 
-            const map = try DB.HashMap(.read_write).init(db_ptr.rootCursor());
+            const map = try TempDB.HashMap(.read_write).init(db_ptr.rootCursor());
 
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
-            const parent_to_children = try DB.HashMap(.read_write).init(parent_to_children_cursor);
+            const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
 
             return .{
                 .repo_dir = state.core.repo_dir,
@@ -1212,8 +1211,6 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
         pub fn deinit(self: *PatchWriter(repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
             self.db_file.close(io);
-            self.db.core.memory.buffer.deinit();
-            allocator.destroy(self.db.core.memory.buffer);
             self.repo_dir.deleteFile(io, db_name) catch {};
             allocator.destroy(self.db);
             self.oid_queue.deinit(allocator);
@@ -1256,7 +1253,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
                 if (!is_base_oid) {
                     const children_cursor = try self.parent_to_children.putCursor(parent_commit_id_int);
-                    const children = try DB.HashMap(.read_write).init(children_cursor);
+                    const children = try TempDB.HashMap(.read_write).init(children_cursor);
                     _ = try children.putCursor(commit_id_int);
                 }
             } else {
@@ -1304,7 +1301,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
                 const commit_id_int = try hash.hexToInt(repo_opts.hash, &oid_hex);
                 if (try self.parent_to_children.getCursor(commit_id_int)) |children_cursor| {
-                    const children = try DB.HashMap(.read_only).init(children_cursor);
+                    const children = try TempDB.HashMap(.read_only).init(children_cursor);
                     var children_iter = try children.iterator();
 
                     while (try children_iter.next()) |*next_cursor| {
