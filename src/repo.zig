@@ -25,6 +25,7 @@ pub const ProgressKind = enum {
     writing_object,
     writing_patch,
     sending_bytes,
+    receiving_bytes,
 };
 
 pub const ProgressEvent = union(enum) {

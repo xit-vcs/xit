@@ -53,11 +53,19 @@ const ProgressCtx = struct {
                     .writing_object => "Writing object",
                     .writing_patch => "Writing patch",
                     .sending_bytes => "Sending bytes",
+                    .receiving_bytes => "Receiving bytes",
                 };
                 self.node.* = std.Progress.start(io, .{ .root_name = name, .estimated_total_items = start.estimated_total_items });
             },
             .complete_one => if (self.node.*) |node| node.completeOne(),
-            .complete_total => |complete_total| if (self.node.*) |node| node.setCompletedItems(complete_total.count),
+            .complete_total => |complete_total| if (self.node.*) |node| {
+                if (complete_total.kind == .receiving_bytes) {
+                    var buffer: [std.Progress.Node.max_name_len]u8 = undefined;
+                    node.setName(try std.fmt.bufPrint(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count}));
+                } else {
+                    node.setCompletedItems(complete_total.count);
+                }
+            },
             .child_text => |text| if (self.node.*) |node| {
                 _ = node.start(text, 0);
             },
@@ -66,11 +74,13 @@ const ProgressCtx = struct {
                 self.node.* = null;
             },
             .text => |text| {
+                if (text.len == 0) return;
                 if (self.clear_line.*) {
                     try self.run_opts.out.print("\x1B[F", .{});
                 }
-                try self.run_opts.out.print("{s}\n", .{text});
-                self.clear_line.* = true;
+                const ends_with_newline = std.mem.endsWith(u8, text, "\n");
+                try self.run_opts.out.print("{s}{s}", .{ text, if (ends_with_newline) "" else "\n" });
+                self.clear_line.* = !ends_with_newline;
             },
         }
     }

@@ -574,6 +574,21 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 var temp_pack = try fs.LockFile.init(io, state.core.repo_dir, temp_pack_name);
                 defer temp_pack.deinit(io);
 
+                if (repo_opts.ProgressCtx != void) {
+                    if (self.opts.progress_ctx) |progress_ctx| {
+                        try progress_ctx.run(io, .{ .start = .{
+                            .kind = .receiving_bytes,
+                            .estimated_total_items = 0,
+                        } });
+                    }
+                }
+                errdefer if (repo_opts.ProgressCtx != void) {
+                    if (self.opts.progress_ctx) |progress_ctx| {
+                        progress_ctx.run(io, .{ .end = .receiving_bytes }) catch {};
+                    }
+                };
+
+                var total_size: usize = 0;
                 while (true) {
                     var pkt = try self.recvPkt(allocator);
                     defer pkt.deinit(allocator);
@@ -586,12 +601,23 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         },
                         .data => |data| if (data.len > 0) {
                             try temp_pack.lock_file.writeStreamingAll(io, data);
+                            if (repo_opts.ProgressCtx != void) {
+                                if (self.opts.progress_ctx) |progress_ctx| {
+                                    total_size += data.len;
+                                    try progress_ctx.run(io, .{ .complete_total = .{ .kind = .receiving_bytes, .count = total_size } });
+                                }
+                            }
                         },
                         .flush => break,
                         else => {},
                     }
                 }
 
+                if (repo_opts.ProgressCtx != void) {
+                    if (self.opts.progress_ctx) |progress_ctx| {
+                        try progress_ctx.run(io, .{ .end = .receiving_bytes });
+                    }
+                }
                 temp_pack.success = true;
             }
 
