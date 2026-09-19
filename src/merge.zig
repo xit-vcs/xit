@@ -127,6 +127,16 @@ pub fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             return true;
         }
 
+        // walk until no queued commit can still hand a flag on. timestamps only
+        // choose the work order, so a commit one tip reached can be passed
+        // before a newer-dated descendant turns out to be common: a lone `one` or
+        // `two` is then not proof that only that tip reaches it. stepping until
+        // the queue is empty settles every flag, at the cost of the whole
+        // shared history.
+        pub fn finish(self: *Self) !void {
+            while (self.pending > 0) if (!try self.step()) break;
+        }
+
         fn tipIsCommon(self: *const Self, side: usize) bool {
             const node = self.nodes.get(self.tips[side]) orelse unreachable;
             return node.flags & both == both;
