@@ -235,12 +235,10 @@ fn MergeContext(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
                 // the source's first-parent chain. a base reached through another
                 // parent would make the chain re-apply content the base already has
                 // under new identities. use the stored depths to walk down to it.
-                const depths_cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return null;
-                const depths = try DB.HashMap(.read_only).init(depths_cursor);
                 var counts: [2]u64 = undefined;
                 for ([2]Oid{ base_oid.*, ancestry.tips[1] }, &counts) |oid, *count| {
-                    const depth = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse return null;
-                    count.* = try depth.readUint();
+                    const stats = (try patch.readCommitStats(repo_opts, ancestry.state.extra.moment, &oid)) orelse return null;
+                    count.* = stats.first_parent_depth;
                 }
 
                 // changes from other parents are already included in a merge commit

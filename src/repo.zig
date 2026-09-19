@@ -218,46 +218,6 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     return false;
                 }
 
-                /// counts first-parent commits in this state, including uncommitted writes.
-                pub fn commitCount(
-                    self: Repo(.xit, repo_opts).State(write_mode),
-                    io: std.Io,
-                    allocator: std.mem.Allocator,
-                    target: rf.RefOrOid(repo_opts.hash),
-                ) !u64 {
-                    const state = if (write_mode == .read_write) self.readOnly() else self;
-                    const oid = switch (target) {
-                        .oid => |oid| oid.*,
-                        .ref => |ref| blk: {
-                            switch (ref.kind) {
-                                .head, .tag => {},
-                                else => return error.UnsupportedRefKind,
-                            }
-                            break :blk try rf.readRecurExisting(.xit, repo_opts, state, io, .{ .ref = ref }) orelse {
-                                if (ref.kind == .head) return 0;
-                                return error.CommitNotFound;
-                            };
-                        },
-                    };
-
-                    const depths_maybe: ?DB.HashMap(.read_only) = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) |cursor|
-                        try DB.HashMap(.read_only).init(cursor)
-                    else
-                        null;
-                    if (depths_maybe) |depths| {
-                        if (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) |depth_cursor| {
-                            return try depth_cursor.readUint();
-                        }
-                    }
-
-                    var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
-                    defer commit_object.deinit();
-
-                    const depths = depths_maybe orelse return error.CommitDepthNotFound;
-                    const depth_cursor = (try depths.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return error.CommitDepthNotFound;
-                    return try depth_cursor.readUint();
-                }
-
                 pub fn readOnly(self: State(.read_write)) State(.read_only) {
                     return switch (repo_kind) {
                         .git => .{ .core = self.core, .extra = .{} },
@@ -968,20 +928,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             return try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref });
         }
 
-        /// returns the number of commits on the target's first-parent chain.
-        /// this index is only stored by the xit backend.
-        pub fn commitCount(
-            self: *Repo(.xit, repo_opts),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-            target: rf.RefOrOid(repo_opts.hash),
-        ) !u64 {
-            var moment = try self.core.latestMoment();
-            const state = Repo(.xit, repo_opts).State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            return state.commitCount(io, allocator, target);
-        }
-
-        /// returns stored stats against the target's first parent, or null if absent.
+        /// returns stored depth and stats against the target's first parent, or null if absent.
         /// line counts are mutually exclusive and exclude binary changes.
         pub fn commitStats(
             self: *Repo(.xit, repo_opts),
@@ -996,26 +943,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 else => return error.UnsupportedRefKind,
             };
             const oid = (try rf.readRecurExisting(.xit, repo_opts, state, io, target)) orelse return null;
-            const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_STATS_KEY))) orelse return null;
-            const summaries = try DB.HashMap(.read_only).init(summaries_cursor);
-            const cursor = (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &oid))) orelse blk: {
-                // annotated tags use their target commit's summary.
-                var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
-                defer commit_object.deinit();
-                break :blk (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &commit_object.oid))) orelse return null;
-            };
-            var bytes: [64]u8 = undefined;
-            if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
-            return .{
-                .lines_added = std.mem.readInt(u64, bytes[0..8], .big),
-                .lines_changed = std.mem.readInt(u64, bytes[8..16], .big),
-                .lines_removed = std.mem.readInt(u64, bytes[16..24], .big),
-                .bytes_added = std.mem.readInt(u64, bytes[24..32], .big),
-                .bytes_removed = std.mem.readInt(u64, bytes[32..40], .big),
-                .files_added = std.mem.readInt(u64, bytes[40..48], .big),
-                .files_changed = std.mem.readInt(u64, bytes[48..56], .big),
-                .files_removed = std.mem.readInt(u64, bytes[56..64], .big),
-            };
+            if (try patch.readCommitStats(repo_opts, &moment, &oid)) |stats| return stats;
+
+            // annotated tags use their target commit's summary.
+            var commit_object = try obj.Object(.xit, repo_opts).initCommit(state, io, allocator, &oid);
+            defer commit_object.deinit();
+            return try patch.readCommitStats(repo_opts, &moment, &commit_object.oid);
         }
 
         pub fn listBranches(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, start: rf.RefIteratorStart) !rf.RefIterator(repo_kind, repo_opts) {

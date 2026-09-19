@@ -24,6 +24,7 @@ fn addFile(
 }
 
 test "gc" {
+    const patch = @import("../patch.zig");
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const repo_opts = rp.RepoOpts(.xit){ .is_test = true };
@@ -62,6 +63,7 @@ test "gc" {
     }
     try addFile(.xit, repo_opts, &repo, io, allocator, "side.bin", side_content);
     const side_commit = try repo.commit(io, allocator, .{ .message = "side" });
+    try repo.patchAll(io, allocator, null);
     {
         var result = try repo.switchDir(io, allocator, .{ .target = .{ .ref = .{ .kind = .head, .name = "master" } } });
         defer result.deinit();
@@ -74,7 +76,7 @@ test "gc" {
 
     // an otherwise unreachable object survives while supplied as an extra root
     _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = &.{side_commit} });
-    try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &side_commit }));
+    try std.testing.expectEqual(2, (try repo.commitStats(io, allocator, .{ .oid = &side_commit })).?.first_parent_depth);
     {
         var moment = try repo.core.latestMoment();
         const state = rp.Repo(.xit, repo_opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
@@ -102,16 +104,13 @@ test "gc" {
         }
     }
 
-    // its derived depth entry was pruned with it, while the live commit's
+    // its stats entry was pruned with it, while the live commit's
     // entry remains available.
     {
         var moment = try repo.core.latestMoment();
-        const depths_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY))) orelse return error.CommitDepthNotFound;
-        const depths = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(depths_cursor);
-        try std.testing.expectEqual(null, try depths.getCursor(try hash.hexToInt(repo_opts.hash, &side_commit)));
-        try std.testing.expect((try depths.getCursor(try hash.hexToInt(repo_opts.hash, &keep_commit))) != null);
+        try std.testing.expectEqual(null, try patch.readCommitStats(repo_opts, &moment, &side_commit));
     }
-    try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &keep_commit }));
+    try std.testing.expectEqual(1, (try repo.commitStats(io, allocator, .{ .oid = &keep_commit })).?.first_parent_depth);
 
     // committed content survived and reads back through the rewritten
     // chunk record positions
@@ -268,7 +267,7 @@ test "gc with patches" {
         }
         const summaries = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_STATS_KEY))).?);
         try std.testing.expectEqual(roots.len > 0, try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &trash_oid)) != null);
-        try std.testing.expectEqualDeep(patch.CommitStats{ .lines_added = 1, .lines_changed = 1, .bytes_added = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &keep_oid })).?);
+        try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = 2, .lines_added = 1, .lines_changed = 1, .bytes_added = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &keep_oid })).?);
     }
 
     // create an insertion from the surviving gaps, then merge after gc

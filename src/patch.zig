@@ -16,7 +16,7 @@
 //!   share the rest, along with unchanged tree nodes.
 //! - oid: the blob the lines describe. a binary commit keeps the last text
 //!   state, so its oid differs from the commit's blob.
-//! commit-id->stats stores eight u64s: lines added/changed/removed,
+//! commit-id->stats stores nine u64s: first-parent depth, lines added/changed/removed,
 //! bytes added/removed, then files added/changed/removed. paired removals and
 //! insertions within each edit count only as changed lines. bytes sum per-file
 //! growth/shrinkage and exclude submodules. file counts include binary and
@@ -98,13 +98,16 @@ pub fn writeAndApplyPatches(
     }
     var snapshot_cursor = try commit_id_to_snapshot.putCursor(commit_id_int);
 
-    // if there is a parent commit, set the initial value of the snapshot to the one from that commit
+    var stats: CommitStats = .{ .first_parent_depth = 1 };
+    // if there is a parent commit, inherit its snapshot and increment its depth
     if (parent_commit_oid_maybe) |*parent_commit_oid| {
         if (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, parent_commit_oid))) |parent_snapshot_cursor| {
             try snapshot_cursor.write(.{ .slot = parent_snapshot_cursor.slot() });
         } else {
             return error.ParentCommitSnapshotNotFound;
         }
+        const parent_stats = (try readCommitStats(repo_opts, state.readOnly().extra.moment, parent_commit_oid)) orelse return error.CommitStatsNotFound;
+        stats.first_parent_depth = std.math.add(u64, parent_stats.first_parent_depth, 1) catch return error.CommitDepthOverflow;
     }
 
     const snapshot = try DB.HashMap(.read_write).init(snapshot_cursor);
@@ -126,7 +129,6 @@ pub fn writeAndApplyPatches(
         .{ .tree = .{ .tree_diff = &tree_diff } },
     );
 
-    var stats: CommitStats = .{};
     // iterate over each modified file and create/apply the patch
     while (try file_iter.next()) |*line_iter_pair_ptr| {
         var line_iter_pair = line_iter_pair_ptr.*;
@@ -346,15 +348,10 @@ pub fn writeAndApplyPatches(
     }
 
     // save even zero totals, so an indexed commit differs from a missing summary.
-    var stats_bytes: [64]u8 = undefined;
-    std.mem.writeInt(u64, stats_bytes[0..8], stats.lines_added, .big);
-    std.mem.writeInt(u64, stats_bytes[8..16], stats.lines_changed, .big);
-    std.mem.writeInt(u64, stats_bytes[16..24], stats.lines_removed, .big);
-    std.mem.writeInt(u64, stats_bytes[24..32], stats.bytes_added, .big);
-    std.mem.writeInt(u64, stats_bytes[32..40], stats.bytes_removed, .big);
-    std.mem.writeInt(u64, stats_bytes[40..48], stats.files_added, .big);
-    std.mem.writeInt(u64, stats_bytes[48..56], stats.files_changed, .big);
-    std.mem.writeInt(u64, stats_bytes[56..64], stats.files_removed, .big);
+    var stats_bytes: [CommitStats.byte_len]u8 = undefined;
+    inline for (std.meta.fields(CommitStats), 0..) |field, i| {
+        std.mem.writeInt(u64, stats_bytes[i * 8 ..][0..8], @field(stats, field.name), .big);
+    }
     const summaries = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
     try summaries.put(commit_id_int, .{ .bytes = &stats_bytes });
 
@@ -371,7 +368,9 @@ pub fn writeAndApplyPatches(
 
 pub const COMMIT_ID_TO_STATS_KEY = "commit-id->stats";
 
+// fields are stored in declaration order as big-endian u64s.
 pub const CommitStats = struct {
+    first_parent_depth: u64 = 0,
     lines_added: u64 = 0,
     lines_changed: u64 = 0,
     lines_removed: u64 = 0,
@@ -380,7 +379,27 @@ pub const CommitStats = struct {
     files_added: u64 = 0,
     files_changed: u64 = 0,
     files_removed: u64 = 0,
+
+    const byte_len = std.meta.fields(@This()).len * @sizeOf(u64);
 };
+
+pub fn readCommitStats(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    moment: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
+    oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !?CommitStats {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY))) orelse return null;
+    const summaries = try DB.HashMap(.read_only).init(summaries_cursor);
+    const cursor = (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, oid))) orelse return null;
+    var bytes: [CommitStats.byte_len]u8 = undefined;
+    if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
+    var stats: CommitStats = undefined;
+    inline for (std.meta.fields(CommitStats), 0..) |field, i| {
+        @field(stats, field.name) = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .big);
+    }
+    return stats;
+}
 
 // the base snapshot, when given, must be an ancestor of the target snapshot
 // and of every commit the patches came from. edits it already applied are

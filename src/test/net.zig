@@ -950,7 +950,9 @@ fn testPush(
         const oid_master = (try server_repo.readRef(io, .{ .kind = .head, .name = "master" })).?;
         try std.testing.expectEqualStrings(&commit1, &oid_master);
         if (server_repo_kind == .xit) {
-            try std.testing.expectEqual(1, try server_repo.commitCount(io, allocator, .{ .oid = &oid_master }));
+            try std.testing.expectEqual(null, try server_repo.commitStats(io, allocator, .{ .oid = &oid_master }));
+            try server_repo.patchAll(io, allocator, null);
+            try std.testing.expectEqual(1, (try server_repo.commitStats(io, allocator, .{ .oid = &oid_master })).?.first_parent_depth);
         }
     }
 

@@ -133,9 +133,6 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         var result = try repo.resetDir(io, allocator, .{ .target = .{ .oid = &commit_b } });
         defer result.deinit();
     }
-    if (repo_kind == .xit) {
-        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "master" } }));
-    }
 
     {
         const readme_md_content = try repo.core.work_dir.readFileAlloc(io, "README.md", allocator, .limited(1024));
@@ -235,12 +232,12 @@ test "empty branch" {
     try testEmptyBranch(.xit, .{ .is_test = true });
 }
 
-test "commit count and stats" {
-    try testCommitCountAndStats(.{ .is_test = true });
-    try testCommitCountAndStats(.{ .is_test = true, .hash = .sha256 });
+test "commit stats" {
+    try testCommitStats(.{ .is_test = true });
+    try testCommitStats(.{ .is_test = true, .hash = .sha256 });
 }
 
-fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
+fn testCommitStats(comptime opts: rp.RepoOpts(.xit)) !void {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     const DB = rp.Repo(.xit, opts).DB;
@@ -251,11 +248,8 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
     try repo.addBranch(io, .{ .name = "empty", .target = .none });
-    try std.testing.expectEqual(0, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "empty" } }));
     try std.testing.expectEqual(null, try repo.commitStats(io, allocator, .{ .ref = .{ .kind = .head, .name = "empty" } }));
-    try std.testing.expectError(error.RefNotFound, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
     try std.testing.expectError(error.RefNotFound, repo.commitStats(io, allocator, .{ .ref = .{ .kind = .head, .name = "missing" } }));
-    try std.testing.expectError(error.UnsupportedRefKind, repo.commitCount(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
     try std.testing.expectError(error.UnsupportedRefKind, repo.commitStats(io, allocator, .{ .ref = .{ .kind = .none, .name = "HEAD" } }));
 
     // identical files share edits; only f changes in the cases below.
@@ -263,7 +257,7 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     try addFile(.xit, opts, &repo, io, allocator, "large", "line\n" ** 4096);
     try addFile(.xit, opts, &repo, io, allocator, "binary", "\xffbinary");
     const cases = [_]struct { content: ?[]const u8, stats: patch.CommitStats }{
-        .{ .content = "a\nb\n", .stats = .{ .lines_added = 4100, .bytes_added = 20495, .files_added = 4 } },
+        .{ .content = "a\nb\n", .stats = .{ .first_parent_depth = 1, .lines_added = 4100, .bytes_added = 20495, .files_added = 4 } },
         .{ .content = "a\nB\n", .stats = .{ .lines_changed = 1, .files_changed = 1 } },
         .{ .content = "a\nB\nC\n", .stats = .{ .lines_added = 1, .bytes_added = 2, .files_changed = 1 } },
         .{ .content = "a\n", .stats = .{ .lines_removed = 2, .bytes_removed = 4, .files_changed = 1 } },
@@ -292,7 +286,7 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
     var root_oid: [hash.hexLen(opts.hash)]u8 = undefined;
     var last_oid: [hash.hexLen(opts.hash)]u8 = undefined;
     for (cases, 0..) |case, i| {
-        errdefer std.debug.print("commit count and stats: {s}, case {d}\n", .{ @tagName(opts.hash), i });
+        errdefer std.debug.print("commit stats: {s}, case {d}\n", .{ @tagName(opts.hash), i });
         if (case.content) |content| {
             try addFile(.xit, opts, &repo, io, allocator, "f", content);
         } else {
@@ -302,28 +296,26 @@ fn testCommitCountAndStats(comptime opts: rp.RepoOpts(.xit)) !void {
         if (i == 0) root_oid = last_oid;
         // indexed queries need no allocations, even for the large root commit.
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-        try std.testing.expectEqual(@as(u64, i + 1), try repo.commitCount(io, failing.allocator(), .{ .oid = &last_oid }));
         try std.testing.expectEqual(null, try repo.commitStats(io, allocator, .{ .oid = &last_oid }));
         try repo.patchAll(io, allocator, null);
-        try std.testing.expectEqualDeep(case.stats, (try repo.commitStats(io, failing.allocator(), .{ .oid = &last_oid })).?);
+        var expected = case.stats;
+        expected.first_parent_depth = i + 1;
+        try std.testing.expectEqualDeep(expected, (try repo.commitStats(io, failing.allocator(), .{ .oid = &last_oid })).?);
     }
 
     last_oid = try repo.commit(io, allocator, .{ .message = "empty", .allow_empty = true });
     try repo.patchAll(io, allocator, null);
-    try std.testing.expectEqual(cases.len + 1, try repo.commitCount(io, allocator, .{ .oid = &last_oid }));
-    try std.testing.expectEqualDeep(patch.CommitStats{}, (try repo.commitStats(io, allocator, .{ .oid = &last_oid })).?);
+    try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = cases.len + 1 }, (try repo.commitStats(io, allocator, .{ .oid = &last_oid })).?);
 
     // use the first parent of a merge, retaining growth and shrinkage separately.
     try addFile(.xit, opts, &repo, io, allocator, "copy", "a\n");
     const merge_oid = try repo.commit(io, allocator, .{ .message = "merge", .parent_oids = &.{ root_oid, last_oid } });
     try repo.patchAll(io, allocator, null);
-    const expected = patch.CommitStats{ .lines_changed = 1, .lines_removed = 2, .bytes_added = 2, .bytes_removed = 2, .files_changed = 2 };
+    const expected = patch.CommitStats{ .first_parent_depth = 2, .lines_changed = 1, .lines_removed = 2, .bytes_added = 2, .bytes_removed = 2, .files_changed = 2 };
     const tag_oid = try repo.addTag(io, allocator, .{ .name = "stats", .message = "stats" });
     for ([_]rf.RefOrOid(opts.hash){ .{ .oid = &merge_oid }, .{ .ref = .{ .kind = .head, .name = "master" } }, .{ .ref = .{ .kind = .tag, .name = "stats" } }, .{ .oid = &tag_oid } }) |target| {
-        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, target));
         try std.testing.expectEqualDeep(expected, (try repo.commitStats(io, allocator, target)).?);
     }
-    try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &root_oid }));
     try std.testing.expectEqualDeep(cases[0].stats, (try repo.commitStats(io, allocator, .{ .oid = &root_oid })).?);
 
     // a malformed summary is an error.
@@ -369,7 +361,7 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
     // create empty branch with no target, so it doesn't point to anything
     try repo.addBranch(io, .{ .name = "foo", .target = .none });
     if (repo_kind == .xit) {
-        try std.testing.expectEqual(0, try repo.commitCount(io, allocator, .{ .ref = .{ .kind = .head, .name = "foo" } }));
+        try std.testing.expectEqual(null, try repo.commitStats(io, allocator, .{ .ref = .{ .kind = .head, .name = "foo" } }));
     }
 
     // make an empty commit at foo without checking it out
@@ -400,8 +392,9 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
     // make another empty commit at foo without checking it out
     const commit_d = try repo.commitAtRef(io, allocator, .{ .message = "d" }, null, .{ .kind = .head, .name = "foo" });
     if (repo_kind == .xit) {
-        try std.testing.expectEqual(1, try repo.commitCount(io, allocator, .{ .oid = &commit_c }));
-        try std.testing.expectEqual(2, try repo.commitCount(io, allocator, .{ .oid = &commit_d }));
+        try repo.patchAll(io, allocator, null);
+        try std.testing.expectEqual(1, (try repo.commitStats(io, allocator, .{ .oid = &commit_c })).?.first_parent_depth);
+        try std.testing.expectEqual(2, (try repo.commitStats(io, allocator, .{ .oid = &commit_d })).?.first_parent_depth);
     }
 
     // foo points to d
@@ -831,7 +824,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             try repo.patchAll(io, allocator, null);
             const moment = try repo.core.latestMoment();
             const snapshots = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
-            try std.testing.expectEqualDeep(patch.CommitStats{ .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
+            try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
             const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
             const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
             const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{.{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } }};
@@ -1074,7 +1067,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
 
     if (case == .merge) {
         // missing cache data should allow a merge, but damaged patches must fail.
-        const Metadata = enum { depths, depth, invalid_depth, missing_patch, missing_edit };
+        const Metadata = enum { stats_map, stats, invalid_stats, missing_patch, missing_edit };
         const MergeCtx = struct {
             core: *rp.Repo(.xit, opts).Core,
             source_oid: [hash.hexLen(opts.hash)]u8,
@@ -1083,17 +1076,17 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 var moment = try DB.HashMap(.read_write).init(cursor.*);
                 const state: rp.Repo(.xit, opts).State(.read_write) = .{ .core = ctx.core, .extra = .{ .moment = &moment } };
-                const depth_key = hash.hashInt(opts.hash, obj.COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY);
+                const stats_key = hash.hashInt(opts.hash, patch.COMMIT_ID_TO_STATS_KEY);
                 switch (ctx.metadata) {
-                    .depths => {
-                        _ = try moment.remove(depth_key);
+                    .stats_map => {
+                        _ = try moment.remove(stats_key);
                     },
-                    .depth, .invalid_depth => {
-                        const depths = try DB.HashMap(.read_write).init(try moment.putCursor(depth_key));
+                    .stats, .invalid_stats => {
+                        const stats = try DB.HashMap(.read_write).init(try moment.putCursor(stats_key));
                         const id = try hash.hexToInt(opts.hash, &ctx.source_oid);
-                        if (ctx.metadata == .depth) {
-                            _ = try depths.remove(id);
-                        } else try depths.put(id, .{ .bytes = "bad" });
+                        if (ctx.metadata == .stats) {
+                            _ = try stats.remove(id);
+                        } else try stats.put(id, .{ .bytes = "bad" });
                     },
                     .missing_patch, .missing_edit => {
                         const entry = (try moment.cursor.readPath(void, &.{
@@ -1117,7 +1110,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 }
                 const result = mrg.Merge(.xit, opts).init(state, io, allocator, .{ .kind = .full, .action = .{ .new = .{ .algo = .patch, .source = &.{.{ .oid = &ctx.source_oid }} } } }, .{ .kind = .head, .name = "target" }, null);
                 switch (ctx.metadata) {
-                    .invalid_depth => try std.testing.expectError(error.UnexpectedTag, result),
+                    .invalid_stats => try std.testing.expectError(error.InvalidCommitStats, result),
                     .missing_patch => try std.testing.expectError(error.PatchNotFound, result),
                     .missing_edit => try std.testing.expectError(error.EditNotFound, result),
                     else => {
@@ -1138,7 +1131,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             }
         };
         const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
-        for ([_]Metadata{ .depths, .depth, .invalid_depth, .missing_patch, .missing_edit }) |metadata| {
+        for ([_]Metadata{ .stats_map, .stats, .invalid_stats, .missing_patch, .missing_edit }) |metadata| {
             errdefer std.debug.print("merge metadata: {s}\n", .{@tagName(metadata)});
             try std.testing.expectError(error.CancelTransaction, history.appendContext(.{ .slot = try history.getSlot(-1) }, MergeCtx{ .core = &repo.core, .source_oid = source_oid, .metadata = metadata }));
         }
@@ -1748,8 +1741,9 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     const commit_k = try repo.commit(io, allocator, .{ .message = "k" });
 
     if (repo_kind == .xit) {
-        try std.testing.expectEqual(4, try repo.commitCount(io, allocator, .{ .oid = &commit_j }));
-        try std.testing.expectEqual(5, try repo.commitCount(io, allocator, .{ .oid = &commit_k }));
+        try repo.patchAll(io, allocator, null);
+        try std.testing.expectEqual(4, (try repo.commitStats(io, allocator, .{ .oid = &commit_j })).?.first_parent_depth);
+        try std.testing.expectEqual(5, (try repo.commitStats(io, allocator, .{ .oid = &commit_k })).?.first_parent_depth);
     }
 
     // first-parent logs skip the merged branch.
@@ -1826,7 +1820,10 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         defer dest_commit_k.deinit();
 
         if (repo_kind == .xit) {
-            try std.testing.expectEqual(5, try dest_repo.commitCount(io, allocator, .{ .oid = &commit_k }));
+            try std.testing.expectEqual(null, try dest_repo.commitStats(io, allocator, .{ .oid = &commit_k }));
+            try dest_repo.resetAdd(io, .{ .oid = &commit_k });
+            try dest_repo.patchAll(io, allocator, null);
+            try std.testing.expectEqual(5, (try dest_repo.commitStats(io, allocator, .{ .oid = &commit_k })).?.first_parent_depth);
         }
     }
 }

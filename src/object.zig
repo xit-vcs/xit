@@ -326,59 +326,6 @@ pub fn CommitMetadata(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY = "commit-id->first-parent-depth";
-
-/// ensures that `commit_oid` and every missing commit on its first-parent
-/// chain have an indexed depth on the xit backend.
-fn ensureFirstParentDepth(
-    comptime repo_kind: rp.RepoKind,
-    comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-) !void {
-    switch (repo_kind) {
-        .git => {},
-        .xit => {
-            const DB = rp.Repo(.xit, repo_opts).DB;
-            const depths_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_FIRST_PARENT_DEPTH_KEY));
-            const depths = try DB.HashMap(.read_write).init(depths_cursor);
-
-            var missing: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
-            defer missing.deinit(allocator);
-
-            var current_oid = commit_oid.*;
-            var depth: u64 = while (true) {
-                const current_id = try hash.hexToInt(repo_opts.hash, &current_oid);
-                if (try depths.getCursor(current_id)) |depth_cursor| {
-                    break try depth_cursor.readUint();
-                }
-
-                try missing.append(allocator, current_oid);
-
-                var object = try Object(.xit, repo_opts).init(state.readOnly(), io, allocator, &current_oid);
-                defer object.deinit();
-                switch (object.content) {
-                    .commit => |commit| {
-                        if (commit.metadata.firstParent()) |parent_oid| {
-                            current_oid = parent_oid.*;
-                        } else {
-                            break 0;
-                        }
-                    },
-                    else => return error.CommitNotFound,
-                }
-            };
-
-            while (missing.pop()) |oid| {
-                depth = std.math.add(u64, depth, 1) catch return error.CommitDepthOverflow;
-                try depths.put(try hash.hexToInt(repo_opts.hash, &oid), .{ .uint = depth });
-            }
-        },
-    }
-}
-
 // write an unsigned commit around an existing tree without updating a ref
 pub fn writeCommitWithoutRef(
     comptime repo_kind: rp.RepoKind,
@@ -415,9 +362,7 @@ pub fn writeCommitWithoutRef(
     var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
     var reader = std.Io.Reader.fixed(commit_contents);
     try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &oid_bytes);
-    const oid = std.fmt.bytesToHex(oid_bytes, .lower);
-    try ensureFirstParentDepth(repo_kind, repo_opts, state, io, allocator, &oid);
-    return oid;
+    return std.fmt.bytesToHex(oid_bytes, .lower);
 }
 
 pub fn writeCommitAtHead(
@@ -549,10 +494,7 @@ pub fn writeCommit(
     var reader = std.Io.Reader.fixed(commit_contents);
     try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &commit_hash_bytes_buffer);
 
-    // index the commit before updating its ref so both changes are atomic on
-    // the xit backend.
     const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
-    try ensureFirstParentDepth(repo_kind, repo_opts, state, io, allocator, &commit_hash_hex);
 
     // write commit id to ref
     var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
@@ -1319,9 +1261,6 @@ pub fn copyFromObjectIterator(
     io: std.Io,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    var commit_oids: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
-    defer commit_oids.deinit(obj_iter.allocator);
-
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
             try progress_ctx.run(io, .{ .start = .{
@@ -1350,19 +1289,12 @@ pub fn copyFromObjectIterator(
             header,
             &oid,
         );
-        if (repo_kind == .xit and header.kind == .commit) {
-            try commit_oids.append(obj_iter.allocator, std.fmt.bytesToHex(oid, .lower));
-        }
 
         if (repo_opts.ProgressCtx != void) {
             if (progress_ctx_maybe) |progress_ctx| {
                 try progress_ctx.run(io, .{ .complete_one = .writing_object });
             }
         }
-    }
-
-    for (commit_oids.items) |*oid| {
-        try ensureFirstParentDepth(repo_kind, repo_opts, state, io, obj_iter.allocator, oid);
     }
 
     if (repo_opts.ProgressCtx != void) {
@@ -1381,9 +1313,6 @@ pub fn copyFromPackIterator(
     pack_iter: *pack.PackIterator(repo_kind, repo_opts),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    var commit_oids: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
-    defer commit_oids.deinit(allocator);
-
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
             try progress_ctx.run(io, .{ .start = .{
@@ -1431,9 +1360,6 @@ pub fn copyFromPackIterator(
         var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
         const header = pack_obj_rdr.header();
         try writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
-        if (repo_kind == .xit and header.kind == .commit) {
-            try commit_oids.append(allocator, std.fmt.bytesToHex(oid, .lower));
-        }
 
         try offset_to_oid.put(allocator, pack_iter.start_position, oid);
 
@@ -1442,10 +1368,6 @@ pub fn copyFromPackIterator(
                 try progress_ctx.run(io, .{ .complete_one = .writing_object_from_pack });
             }
         }
-    }
-
-    for (commit_oids.items) |*oid| {
-        try ensureFirstParentDepth(repo_kind, repo_opts, state, io, allocator, oid);
     }
 
     if (repo_opts.ProgressCtx != void) {
