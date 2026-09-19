@@ -12,14 +12,14 @@ const tr = @import("./tree.zig");
 const cfg = @import("./config.zig");
 
 // commit relationships and traversal shared by ancestry queries and merges.
-fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
+pub fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         const Self = @This();
         const Oid = [hash.hexLen(repo_opts.hash)]u8;
-        const one = 1;
-        const two = 2;
-        const both = one | two;
-        const stale = 4;
+        pub const one = 1;
+        pub const two = 2;
+        pub const both = one | two;
+        pub const stale = 4;
 
         const Node = struct {
             parents: []const Oid = &.{},
@@ -51,7 +51,7 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         pending: usize = 0,
         base_count: usize = 0,
 
-        fn init(
+        pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
@@ -66,7 +66,7 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             return self;
         }
 
-        fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self) void {
             self.queue.deinit(self.allocator);
             self.nodes.deinit(self.allocator);
             self.arena.deinit();
@@ -113,7 +113,7 @@ fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             }
         }
 
-        fn step(self: *Self) !bool {
+        pub fn step(self: *Self) !bool {
             const entry = self.queue.pop() orelse return false;
             const node = self.nodes.getPtr(entry.oid) orelse unreachable;
             node.queued = false;
