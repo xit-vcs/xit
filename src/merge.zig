@@ -127,6 +127,12 @@ pub fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             return true;
         }
 
+        // walk until every queued commit is stale, so each loaded node's flags
+        // are final: `one` or `two` alone means only that tip reaches it
+        pub fn finish(self: *Self) !void {
+            while (self.pending > 0) if (!try self.step()) break;
+        }
+
         fn tipIsCommon(self: *const Self, side: usize) bool {
             const node = self.nodes.get(self.tips[side]) orelse unreachable;
             return node.flags & both == both;
