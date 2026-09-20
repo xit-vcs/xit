@@ -8,7 +8,7 @@ const Focus = xitui.focus.Focus;
 const ui = @import("../ui.zig");
 const inp = @import("./input.zig");
 const rp = @import("../repo.zig");
-const hash = @import("../hash.zig");
+const un = @import("../undo.zig");
 
 const undo_label = " press enter to undo this ";
 const undo_all_label = " press enter to undo this and all above ";
@@ -137,23 +137,25 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             const tx_remain_count = self.tx_count - self.scroll.child.box.children.count();
             const tx_add_count = @min(tx_remain_count, max_txes);
 
+            var record_buffer: [repo_opts.max_read_size]u8 = undefined;
+            var label = std.Io.Writer.Allocating.init(allocator);
+            defer label.deinit();
             for (0..tx_add_count) |i| {
                 const ii = tx_remain_count - i - 1;
 
                 const moment_cursor = try history.getCursor(ii) orelse return error.TransactionNotFound;
                 const moment = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(moment_cursor);
 
-                const msg_value = if (try moment.getCursor(hash.hashInt(repo_opts.hash, "undo-message"))) |msg_cursor|
-                    try msg_cursor.readBytesAlloc(allocator, repo_opts.max_read_size)
-                else
-                    try allocator.dupe(u8, "(empty message)");
-                defer allocator.free(msg_value);
-
-                const msg = try std.fmt.allocPrint(allocator, "{} - {s}", .{ ii, msg_value });
-                defer allocator.free(msg);
+                label.clearRetainingCapacity();
+                try label.writer.print("{} - ", .{ii});
+                if (try un.read(repo_opts, moment, &record_buffer)) |record| {
+                    try un.format(repo_opts, &self.repo.core.db, allocator, record, &label.writer);
+                } else {
+                    try label.writer.writeAll("(empty description)");
+                }
 
                 const inner_box = &self.scroll.child.box;
-                var text_box = try wgt.TextBox.init(allocator, msg, .{ .border_style = .hidden, .wrap_kind = .none });
+                var text_box = try wgt.TextBox.init(allocator, label.written(), .{ .border_style = .hidden, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });

@@ -501,9 +501,9 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             const input = bch.AddBranchInput{ .name = name };
                             try bch.add(repo_kind, repo_opts, state, ctx.io, input);
                             try rf.replaceHead(repo_kind, repo_opts, state, ctx.io, .{ .ref = .{ .kind = .head, .name = name } });
-                            try un.writeMessage(repo_opts, state, .{ .branch = .{ .add = input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .branch = .{ .action = .{ .add = input } } });
                         } else {
-                            try un.writeMessage(repo_opts, state, .{ .config = .{ .add = bare_config } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .config = .{ .action = .{ .add = bare_config } } });
                         }
                     }
                 };
@@ -573,7 +573,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try obj.writeCommitAtHead(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata);
-                            try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .commit = try .init(ctx.metadata.message, ctx.result.*, repo_opts.max_read_size) });
                         }
                     };
 
@@ -617,7 +617,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try obj.writeCommit(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.metadata, ctx.tree_maybe, ctx.ref);
-                            try un.writeMessage(repo_opts, state, .{ .commit = ctx.metadata });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .commit = try .init(ctx.metadata.message, ctx.result.*, repo_opts.max_read_size) });
                         }
                     };
 
@@ -663,7 +663,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try tg.add(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .tag = .{ .add = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .tag = .{ .action = .{ .add = ctx.input } } });
                         }
                     };
 
@@ -694,7 +694,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try tg.remove(repo_kind, repo_opts, state, ctx.io, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .tag = .{ .remove = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .tag = .{ .action = .{ .remove = ctx.input } } });
                         }
                     };
 
@@ -743,7 +743,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try work.addPaths(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.paths);
-                            try un.writeMessage(repo_opts, state, .{ .add = .{ .paths = ctx.paths, .allocator = ctx.allocator } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .add = .{ .paths = ctx.paths } });
                         }
                     };
 
@@ -794,7 +794,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try work.unaddPaths(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.paths, ctx.opts);
-                            try un.writeMessage(repo_opts, state, .{ .unadd = .{ .paths = ctx.paths, .allocator = ctx.allocator } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .unadd = .{ .paths = ctx.paths } });
                         }
                     };
 
@@ -859,7 +859,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try work.removePaths(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.paths, ctx.opts);
-                            try un.writeMessage(repo_opts, state, .{ .rm = .{ .paths = ctx.paths, .opts = ctx.opts, .allocator = ctx.allocator } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .rm = .{ .paths = ctx.paths, .opts = ctx.opts } });
                         }
                     };
 
@@ -977,7 +977,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try bch.add(repo_kind, repo_opts, state, ctx.io, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .branch = .{ .add = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .branch = .{ .action = .{ .add = ctx.input } } });
                         }
                     };
 
@@ -1006,7 +1006,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try bch.remove(repo_kind, repo_opts, state, ctx.io, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .branch = .{ .remove = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .branch = .{ .action = .{ .remove = ctx.input } } });
                         }
                     };
 
@@ -1045,7 +1045,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             ctx.result.* = try work.Switch(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .switch_dir = ctx.input });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .switch_dir = ctx.input });
                         }
                     };
 
@@ -1111,7 +1111,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 .ref => try rf.replaceHead(repo_kind, repo_opts, state, ctx.io, ctx.target),
                                 .oid => |oid| try rf.updateHead(repo_kind, repo_opts, state, ctx.io, oid),
                             }
-                            try un.writeMessage(repo_opts, state, .{ .reset_add = ctx.target });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .reset_add = .{ .target = ctx.target } });
                         }
                     };
 
@@ -1211,16 +1211,23 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             ctx.merge_result.* = try mrg.Merge(repo_kind, repo_opts).init(state, ctx.io, ctx.allocator, ctx.input, ctx.ref_maybe, ctx.progress_ctx_maybe);
                             if (ctx.input.dry_run) return error.CancelTransaction;
 
-                            switch (ctx.merge_result.result) {
-                                .success => {},
+                            const oid: ?[hash.hexLen(repo_opts.hash)]u8 = switch (ctx.merge_result.result) {
+                                .success => |result| result.oid,
                                 // no need to make a new transaction if nothing was done
                                 .clean, .nothing => return error.CancelTransaction,
-                                .fast_forward => {},
+                                .fast_forward => if (ctx.ref_maybe) |ref|
+                                    try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })
+                                else
+                                    try rf.readHeadRecurMaybe(repo_kind, repo_opts, state.readOnly(), ctx.io),
                                 // mergeAtRef does not store conflict state
-                                .conflict => if (ctx.ref_maybe != null) return error.CancelTransaction,
-                            }
+                                .conflict => if (ctx.ref_maybe != null) return error.CancelTransaction else null,
+                            };
 
-                            try un.writeMessage(repo_opts, state, .{ .merge = .{ .input = ctx.input, .allocator = ctx.allocator } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .merge = .{
+                                .kind = ctx.input.kind,
+                                .action = ctx.input.action,
+                                .oid = oid,
+                            } });
                         }
                     };
 
@@ -1271,7 +1278,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try ctx.config.add(state, ctx.io, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .config = .{ .add = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .config = .{ .action = .{ .add = ctx.input } } });
                         }
                     };
 
@@ -1311,7 +1318,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try ctx.config.remove(state, ctx.io, ctx.input);
-                            try un.writeMessage(repo_opts, state, .{ .config = .{ .remove = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .config = .{ .action = .{ .remove = ctx.input } } });
                         }
                     };
 
@@ -1362,8 +1369,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     try config.add(state, ctx.io, .{ .name = "merge.algorithm", .value = merge_algo_str });
 
                     switch (ctx.merge_algo) {
-                        .diff3 => try un.writeMessage(repo_opts, state, .{ .patch = .off }),
-                        .patch => try un.writeMessage(repo_opts, state, .{ .patch = .on }),
+                        .diff3 => try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .patch = .{ .status = .off } }),
+                        .patch => try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .patch = .{ .status = .on } }),
                     }
                 }
             };
@@ -1420,7 +1427,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                     try patch.writePatches(repo_opts, state, ctx.io, ctx.allocator, &obj_iter, ctx.progress_ctx_maybe);
 
-                    try un.writeMessage(repo_opts, state, .{ .patch = .all });
+                    try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .patch = .{ .status = .all } });
                 }
             };
 
@@ -1477,7 +1484,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try net.Remote(repo_kind, repo_opts).addConfig(state, ctx.io, ctx.allocator, ctx.input.name, ctx.input.value, null);
-                            try un.writeMessage(repo_opts, state, .{ .remote = .{ .add = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .remote = .{ .action = .{ .add = ctx.input } } });
                         }
                     };
 
@@ -1524,7 +1531,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try net.Remote(repo_kind, repo_opts).removeConfig(state, ctx.io, ctx.allocator, ctx.input.name);
-                            try un.writeMessage(repo_opts, state, .{ .remote = .{ .remove = ctx.input } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .remote = .{ .action = .{ .remove = ctx.input } } });
                         }
                     };
 
@@ -1581,7 +1588,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 ctx.io,
                                 ctx.progress_ctx_maybe,
                             );
-                            try un.writeMessage(repo_opts, state, .copy_objects);
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .copy_objects = .{} });
                         }
                     };
 
@@ -1637,7 +1644,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var remote = try net.Remote(repo_kind, repo_opts).open(state.readOnly(), ctx.io, ctx.allocator, ctx.remote_name);
                             defer remote.deinit(ctx.io, ctx.allocator);
                             try net.fetch(repo_kind, repo_opts, state, ctx.io, ctx.allocator, &remote, ctx.opts);
-                            try un.writeMessage(repo_opts, state, .{ .fetch = .{ .remote_name = ctx.remote_name } });
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .fetch = .{ .remote_name = ctx.remote_name } });
                         }
                     };
 
@@ -1716,7 +1723,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                             try server_receive_pack.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.options);
-                            try un.writeMessage(repo_opts, state, .push);
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .receive_pack = .{} });
                         }
                     };
 
@@ -1762,7 +1769,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options);
                             // every non-push request returns CancelTransaction,
                             // so reaching this point means a push committed
-                            try un.writeMessage(repo_opts, state, .push);
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .receive_pack = .{} });
                         }
                     };
 
@@ -1787,12 +1794,13 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         pub fn undo(self: *Repo(.xit, repo_opts), io: std.Io, history_index: u64) !void {
             const Ctx = struct {
                 core: *Core,
-                history_index: u64,
+                timestamp: i64,
+                command: un.UndoCommand(repo_opts.hash),
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                    try un.writeMessage(repo_opts, state, .{ .undo = ctx.history_index });
+                    try un.write(repo_opts, state, ctx.timestamp, ctx.command);
                 }
             };
 
@@ -1800,9 +1808,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             defer self.core.db_file.unlock(io);
 
             const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
-            if (history_index == 0 or history_index >= try history.count()) return error.InvalidHistoryIndex;
+            const history_count = try history.count();
+            if (history_index == 0 or history_index >= history_count) return error.InvalidHistoryIndex;
             const slot = try history.getSlot(history_index - 1) orelse return error.TransactionNotFound;
-            try history.appendContext(.{ .slot = slot }, Ctx{ .core = &self.core, .history_index = history_index });
+            try history.appendContext(.{ .slot = slot }, Ctx{ .core = &self.core, .timestamp = std.Io.Timestamp.now(io, .real).toSeconds(), .command = .{ .undo = .{ .index = history_index, .last_index = history_count - 1 } } });
         }
 
         /// reclaims objects unreachable from repo state or `options.extra_roots`
@@ -1822,7 +1831,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                     try gc.prune(repo_opts, state, ctx.io, ctx.allocator, ctx.extra_roots);
-                    try un.writeMessage(repo_opts, state, .gc);
+                    try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .gc = .{} });
                 }
             };
 

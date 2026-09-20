@@ -655,7 +655,7 @@ fn cloneWithTransport(
                     try net_clone.cloneRemote(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.url, ctx.transport_opts, ctx.prepared);
 
                     const un = @import("./undo.zig");
-                    try un.writeMessage(repo_opts, state, .{ .clone = .{ .url = ctx.url } });
+                    try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .clone = .{ .url = ctx.url } });
                 }
             };
 
