@@ -405,6 +405,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
                     if (current_row == 0) {
                         const add_item = self.addItemPtr();
+                        add_item.nameInput().options.label = " name ";
                         const name = try add_item.nameInput().text(allocator);
                         defer allocator.free(name);
                         const value = try add_item.valueInput().text(allocator);
@@ -413,7 +414,13 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                         // ignore empty names — addConfig wants a "section.name" key
                         if (name.len == 0) return;
 
-                        try self.repo.addConfig(self.io, allocator, .{ .name = name, .value = value });
+                        self.repo.addConfig(self.io, allocator, .{ .name = name, .value = value }) catch |err| switch (err) {
+                            error.KeyDoesNotContainASection => {
+                                add_item.nameInput().options.label = " name (section required) ";
+                                return;
+                            },
+                            else => return err,
+                        };
                         add_item.clearInputs(allocator);
                     } else {
                         const item = self.configItemPtr(current_row - 1) orelse return;
