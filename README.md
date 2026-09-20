@@ -12,26 +12,24 @@
 You're looking at xit, a new version control system. It's pronounced like "zit" (or "shit" if you prefer). Here be dragons, as they say. This is new and unstable software, but the ambition is to make a worthy successor to git. Here are the main features:
 
 * git compatible
-  * supports the git networking protocol for push/fetch/clone
-  * status: complete (supports http, ssh, raw git protocol, and local remotes)
+  * uses the git networking protocol for push/fetch/clone
+  * supports http, ssh, raw git protocol, and local remotes
   * [read more](docs/compat.md) about git compatibility
 * combine snapshot-based and patch-based version control
   * merging and cherry-picking uses patches like Darcs and Pijul
   * restoring files and anything sent over the network uses snapshots like git
-  * status: complete
   * [read more](docs/patch.md) about snapshots vs patches
 * built-in TUI
-  * all functionality will be exposed via the TUI
-  * status: incomplete (only log and status is there right now...baby steps!)
+  * launch `xit` in the repo without any arguments to see the TUI
+  * currently shows log, status, config, and undo
   * [read more](docs/tui.md) about the TUI
 * store large/binary files efficiently
   * uses a modern chunking algorithm (FastCDC) to deltify large files
   * doesn't compress files that don't benefit from it
-  * status: complete
   * [read more](docs/chunk.md) about chunking
 * universal undo
-  * any change to the repo can be cleanly undone
-  * status: incomplete (the immutable database is done but the undo TUI isn't)
+  * any change to the repo can be cleanly undone from the TUI
+  * clear undo history to recover space with `xit gc`
   * [read more](docs/db.md) about the immutable database
 * clean implementation
   * uses *no* third-party libraries in production...all bugs are our bugs

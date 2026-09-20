@@ -1,6 +1,36 @@
 const xitui = @import("xitui");
 const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
+const Focus = xitui.focus.Focus;
+
+pub fn vertDirection(key: Key) enum { up, down, none } {
+    return switch (key) {
+        .arrow_up => .up,
+        .arrow_down => .down,
+        .mouse => |mouse| if (mouse.action == .scroll)
+            (if (mouse.action.scroll == .up) .up else .down)
+        else
+            .none,
+        else => .none,
+    };
+}
+
+pub fn activates(key: Key, target_id: usize, root_focus: *const Focus) bool {
+    return switch (key) {
+        .enter => true,
+        .mouse => |mouse| blk: {
+            if (mouse.action == .press and mouse.action.press == .left) {
+                if (root_focus.children.get(target_id)) |entry| {
+                    const rect = entry.rect;
+                    break :blk mouse.x >= rect.x and mouse.y >= rect.y and
+                        mouse.x < rect.x + rect.size.width and mouse.y < rect.y + rect.size.height;
+                }
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
 
 /// the new selection index for a navigation key press in a scrollable list.
 /// each list item is 3 rows tall, so page up/down moves by half the visible items.

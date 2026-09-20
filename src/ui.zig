@@ -15,6 +15,34 @@ const ui_undo = @import("./ui/undo.zig");
 const ui_config = @import("./ui/config.zig");
 const rp = @import("./repo.zig");
 
+// shared by the widgets and their host for the lifetime of the root widget.
+pub const Session = struct {
+    pending: ?Action = null,
+
+    pub const Action = union(enum) { gc, undo: u64 };
+
+    // widgets queue requests during input; the host applies them after rendering.
+    pub fn applyPending(
+        self: *Session,
+        comptime repo_kind: rp.RepoKind,
+        comptime repo_opts: rp.RepoOpts(repo_kind),
+        repo: *rp.Repo(repo_kind, repo_opts),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+    ) !void {
+        const action = self.pending orelse return;
+        defer self.pending = null;
+        switch (action) {
+            .gc => if (repo_kind == .xit) {
+                _ = try repo.garbageCollect(io, allocator, .{});
+            },
+            .undo => |history_index| if (repo_kind == .xit) {
+                try repo.undo(io, history_index);
+            },
+        }
+    }
+};
+
 pub fn Widget(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return union(enum) {
         text: wgt.Text,
@@ -97,9 +125,9 @@ pub fn rootWidget(
     // focus on the correct tab if sub command is provided
     if (cmd_kind_maybe) |cmd_kind| {
         const child_id_maybe = switch (cmd_kind) {
-            .status, .diff_dir, .diff_added => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.status) orelse return error.BareRepository,
-            .log => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.log),
-            .config => root.ui_root.box.children.values()[0].widget.ui_root_tabs.getChildFocusId(.config),
+            .status, .diff_dir, .diff_added => root.ui_root.getTabs().getChildFocusId(.status) orelse return error.BareRepository,
+            .log => root.ui_root.getTabs().getChildFocusId(.log),
+            .config => root.ui_root.getTabs().getChildFocusId(.config),
             else => null,
         };
         if (child_id_maybe) |child_id| {
@@ -194,14 +222,9 @@ pub fn start(
                         repo.deinit(io, allocator);
                         repo.* = new_repo;
 
-                        const tab_kind = root.ui_root.box.children.values()[0].widget.ui_root_tabs.getSelectedKind();
-                        const new_root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
-                        root.deinit(allocator);
-                        root = new_root;
-                        if (tab_kind) |kind| {
-                            const tabs = &root.ui_root.box.children.values()[0].widget.ui_root_tabs;
-                            if (tabs.getChildFocusId(kind)) |id| root.getFocus().setFocus(id);
-                        }
+                        try refreshRoot(repo_kind, repo_opts, &root, repo, io, allocator, terminal.size, .{
+                            .tab = root.ui_root.getTabs().getSelectedKind(),
+                        });
                     },
                     else => try root.input(allocator, key, root.getFocus()),
                 },
@@ -214,6 +237,19 @@ pub fn start(
                 },
                 else => try root.input(allocator, key, root.getFocus()),
             }
+            // render the action before processing more queued input, including
+            // double-clicks or a tab change that would hide the busy label.
+            if (root.ui_root.session.pending != null) break;
+        }
+
+        if (root.ui_root.session.pending != null) {
+            // show the busy label before applying long-running actions.
+            try root.build(allocator, .{
+                .min_size = .{ .width = null, .height = null },
+                .max_size = .{ .width = terminal.size.width, .height = terminal.size.height },
+            }, root.getFocus());
+            _ = try terminal.render(&root);
+            try applyPendingActions(repo_kind, repo_opts, &root, repo, io, allocator, terminal.size);
         }
 
         // rebuild widget
@@ -222,4 +258,61 @@ pub fn start(
             .max_size = .{ .width = terminal.size.width, .height = terminal.size.height },
         }, root.getFocus());
     }
+}
+
+// apply widget requests and refresh views whose database cursors are now stale.
+pub fn applyPendingActions(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    root: *Widget(repo_kind, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    size: layout.Size,
+) !void {
+    const session = root.ui_root.session;
+    const action = session.pending orelse return;
+    try session.applyPending(repo_kind, repo_opts, repo, io, allocator);
+    try refreshRoot(repo_kind, repo_opts, root, repo, io, allocator, size, switch (action) {
+        .gc => .undo_buttons,
+        .undo => .undo_list,
+    });
+}
+
+pub fn refreshRoot(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    root: *Widget(repo_kind, repo_opts),
+    repo: *rp.Repo(repo_kind, repo_opts),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    size: layout.Size,
+    focus: union(enum) { tab: ?ui_root.TabKind, undo_buttons, undo_list },
+) !void {
+    // rebuild all views to read the restored state after undo, or to replace
+    // database cursors invalidated by compaction.
+    var refreshed = Widget(repo_kind, repo_opts){ .ui_root = try ui_root.Root(Widget(repo_kind, repo_opts), repo_kind, repo_opts).init(io, allocator, repo) };
+    errdefer refreshed.deinit(allocator);
+    const tabs = refreshed.ui_root.getTabs();
+    const tab_kind = switch (focus) {
+        .tab => |kind| kind,
+        .undo_buttons, .undo_list => .undo,
+    };
+    if (tab_kind) |kind| {
+        if (tabs.getChildFocusId(kind)) |id| tabs.getFocus().child_id = id;
+    }
+    if (focus != .tab) {
+        const stack = refreshed.ui_root.getStack();
+        refreshed.getFocus().child_id = stack.getFocus().id;
+        if (focus == .undo_list) {
+            stack.children.values()[tabs.getSelectedIndex().?].ui_undo.focusList(refreshed.getFocus());
+        }
+    }
+    try refreshed.build(allocator, .{
+        .min_size = .{ .width = null, .height = null },
+        .max_size = .{ .width = size.width, .height = size.height },
+    }, refreshed.getFocus());
+
+    root.deinit(allocator);
+    root.* = refreshed;
 }

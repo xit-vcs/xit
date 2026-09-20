@@ -55,6 +55,7 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
         },
         copy_objects,
         gc,
+        undo: u64,
         push,
         custom: []const u8,
     };
@@ -153,6 +154,18 @@ pub fn writeMessage(
         .fetch => |fetch_cmd| bufPrint(&message_buffer, "fetch {s}", .{fetch_cmd.remote_name}),
         .copy_objects => bufPrint(&message_buffer, "copy objects", .{}),
         .gc => bufPrint(&message_buffer, "gc", .{}),
+        .undo => |history_index| blk: {
+            const DB = rp.Repo(.xit, repo_opts).DB;
+            const history = try DB.ArrayList(.read_only).init(state.core.db.rootCursor().readOnly());
+            const moment_cursor = try history.getCursor(history_index) orelse return error.TransactionNotFound;
+            const moment = try DB.HashMap(.read_only).init(moment_cursor);
+            var previous_message_buffer: [message_buffer.len]u8 = undefined;
+            const previous_message = if (try moment.getCursor(hash.hashInt(repo_opts.hash, "undo-message"))) |cursor|
+                try cursor.readBytes(&previous_message_buffer)
+            else
+                "(empty message)";
+            break :blk bufPrint(&message_buffer, "undo {} - {s}", .{ history_index, previous_message });
+        },
         .push => bufPrint(&message_buffer, "push", .{}),
         .custom => |custom_cmd| bufPrint(&message_buffer, "{s}", .{custom_cmd}),
     };

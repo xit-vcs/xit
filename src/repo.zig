@@ -292,12 +292,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         },
                     };
 
-                    try self.initBareConfig(io, allocator, opts.bare);
-
-                    if (opts.create_default_branch) |default_branch_name| {
-                        try self.addBranch(io, .{ .name = default_branch_name });
-                        try self.resetAdd(io, .{ .ref = .{ .kind = .head, .name = default_branch_name } });
-                    }
+                    try self.initState(io, allocator, opts);
 
                     return self;
                 },
@@ -331,12 +326,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         },
                     };
 
-                    try self.initBareConfig(io, allocator, opts.bare);
-
-                    if (opts.create_default_branch) |default_branch_name| {
-                        try self.addBranch(io, .{ .name = default_branch_name });
-                        try self.resetAdd(io, .{ .ref = .{ .kind = .head, .name = default_branch_name } });
-                    }
+                    try self.initState(io, allocator, opts);
 
                     return self;
                 },
@@ -482,29 +472,46 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
         }
 
-        fn initBareConfig(self: *@This(), io: std.Io, allocator: std.mem.Allocator, bare: bool) !void {
+        fn initState(self: *@This(), io: std.Io, allocator: std.mem.Allocator, opts: InitOpts) !void {
             if (repo_kind == .git) {
-                try self.addConfig(io, allocator, .{ .name = "core.bare", .value = if (bare) "true" else "false" });
+                try self.addConfig(io, allocator, .{ .name = "core.bare", .value = if (opts.bare) "true" else "false" });
                 if (repo_opts.hash == .sha256) {
                     try self.addConfig(io, allocator, .{ .name = "core.repositoryformatversion", .value = "1" });
                     try self.addConfig(io, allocator, .{ .name = "extensions.objectformat", .value = "sha256" });
+                }
+                if (opts.create_default_branch) |default_branch_name| {
+                    try self.addBranch(io, .{ .name = default_branch_name });
+                    try self.resetAdd(io, .{ .ref = .{ .kind = .head, .name = default_branch_name } });
                 }
             } else {
                 const Ctx = struct {
                     core: *Core,
                     io: std.Io,
                     allocator: std.mem.Allocator,
-                    bare: bool,
+                    opts: InitOpts,
                     pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                         var moment = try DB.HashMap(.read_write).init(cursor.*);
                         const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
                         var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator);
                         defer config.deinit();
-                        try config.add(state, ctx.io, .{ .name = "core.bare", .value = if (ctx.bare) "true" else "false" });
+                        const bare_config = cfg.AddConfigInput{ .name = "core.bare", .value = if (ctx.opts.bare) "true" else "false" };
+                        try config.add(state, ctx.io, bare_config);
+
+                        if (ctx.opts.create_default_branch) |name| {
+                            const input = bch.AddBranchInput{ .name = name };
+                            try bch.add(repo_kind, repo_opts, state, ctx.io, input);
+                            try rf.replaceHead(repo_kind, repo_opts, state, ctx.io, .{ .ref = .{ .kind = .head, .name = name } });
+                            try un.writeMessage(repo_opts, state, .{ .branch = .{ .add = input } });
+                        } else {
+                            try un.writeMessage(repo_opts, state, .{ .config = .{ .add = bare_config } });
+                        }
                     }
                 };
+                try self.core.db_file.lock(io, .exclusive);
+                defer self.core.db_file.unlock(io);
+
                 const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
-                try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .core = &self.core, .io = io, .allocator = allocator, .bare = bare });
+                try history.appendContext(.{ .slot = try history.getSlot(-1) }, Ctx{ .core = &self.core, .io = io, .allocator = allocator, .opts = opts });
             }
         }
 
@@ -1774,6 +1781,28 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             }
 
             try writer.flush();
+        }
+
+        /// appends the state before history_index, undoing that moment and all later ones.
+        pub fn undo(self: *Repo(.xit, repo_opts), io: std.Io, history_index: u64) !void {
+            const Ctx = struct {
+                core: *Core,
+                history_index: u64,
+
+                pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
+                    var moment = try DB.HashMap(.read_write).init(cursor.*);
+                    const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
+                    try un.writeMessage(repo_opts, state, .{ .undo = ctx.history_index });
+                }
+            };
+
+            try self.core.db_file.lock(io, .exclusive);
+            defer self.core.db_file.unlock(io);
+
+            const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
+            if (history_index == 0 or history_index >= try history.count()) return error.InvalidHistoryIndex;
+            const slot = try history.getSlot(history_index - 1) orelse return error.TransactionNotFound;
+            try history.appendContext(.{ .slot = slot }, Ctx{ .core = &self.core, .history_index = history_index });
         }
 
         /// reclaims objects unreachable from repo state or `options.extra_roots`

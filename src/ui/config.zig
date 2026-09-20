@@ -7,6 +7,7 @@ const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
 const rp = @import("../repo.zig");
 const cfg = @import("../config.zig");
+const inp = @import("./input.zig");
 
 pub fn ConfigListItem(comptime Widget: type) type {
     return struct {
@@ -380,24 +381,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             const cell = self.currentCell(current_row) orelse return;
 
             if (cell.col == cell.action_index) {
-                const triggered = switch (key) {
-                    .enter => true,
-                    .mouse => |mouse| blk: {
-                        if (mouse.action == .press and mouse.action.press == .left) {
-                            if (root_focus.children.get(cell.child_id)) |entry| {
-                                const r = entry.rect;
-                                if (mouse.x >= r.x and mouse.y >= r.y and
-                                    mouse.x < r.x + r.size.width and mouse.y < r.y + r.size.height)
-                                {
-                                    break :blk true;
-                                }
-                            }
-                        }
-                        break :blk false;
-                    },
-                    else => false,
-                };
-                if (triggered) {
+                if (inp.activates(key, cell.child_id, root_focus)) {
                     // skip re-triggering until the pending refresh applies, so
                     // a queued double-click can't try to remove the same row
                     // twice (the widget tree still shows it until build runs).

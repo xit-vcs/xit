@@ -5,25 +5,27 @@ const layout = xitui.layout;
 const Key = xitui.input.Key;
 const Grid = xitui.grid.Grid;
 const Focus = xitui.focus.Focus;
+const ui = @import("../ui.zig");
 const ui_log = @import("./log.zig");
 const ui_status = @import("./status.zig");
 const ui_undo = @import("./undo.zig");
 const ui_config = @import("./config.zig");
 const rp = @import("../repo.zig");
+const inp = @import("./input.zig");
+
+pub const TabKind = enum { log, status, config, undo };
 
 pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
     return struct {
         box: wgt.Box(Widget),
-        focus_ids: std.EnumArray(FocusKind, ?usize),
-
-        const FocusKind = enum { log, status, config, undo };
+        focus_ids: std.EnumArray(TabKind, ?usize),
 
         pub fn init(allocator: std.mem.Allocator, is_bare: bool) !RootTabs(Widget, repo_kind) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
-            var focus_ids = std.EnumArray(FocusKind, ?usize).initFill(null);
+            var focus_ids = std.EnumArray(TabKind, ?usize).initFill(null);
 
-            for (std.enums.values(FocusKind)) |focus_kind| {
+            for (std.enums.values(TabKind)) |focus_kind| {
                 const name = switch (focus_kind) {
                     .log => "log",
                     .status => if (is_bare) continue else "status",
@@ -104,15 +106,15 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
             }
         }
 
-        pub fn getSelectedKind(self: RootTabs(Widget, repo_kind)) ?FocusKind {
+        pub fn getSelectedKind(self: RootTabs(Widget, repo_kind)) ?TabKind {
             const child_id = self.box.focus.child_id orelse return null;
-            for (std.enums.values(FocusKind)) |kind| {
+            for (std.enums.values(TabKind)) |kind| {
                 if (self.focus_ids.get(kind) == child_id) return kind;
             }
             return null;
         }
 
-        pub fn getChildFocusId(self: *RootTabs(Widget, repo_kind), focus_kind: FocusKind) ?usize {
+        pub fn getChildFocusId(self: *RootTabs(Widget, repo_kind), focus_kind: TabKind) ?usize {
             return self.focus_ids.get(focus_kind);
         }
     };
@@ -121,10 +123,15 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
 pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         box: wgt.Box(Widget),
+        session: *ui.Session,
 
         const FocusKind = enum { tabs, stack };
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Root(Widget, repo_kind, repo_opts) {
+            const session = try allocator.create(ui.Session);
+            errdefer allocator.destroy(session);
+            session.* = .{};
+
             const is_bare = try repo.isBare(io, allocator);
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
@@ -160,7 +167,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         }
 
                         if (repo_kind == .xit) {
-                            var undo = Widget{ .ui_undo = try ui_undo.Undo(Widget, repo_kind, repo_opts).init(allocator, repo) };
+                            var undo = Widget{ .ui_undo = try ui_undo.Undo(Widget, repo_kind, repo_opts).init(allocator, repo, session) };
                             errdefer undo.deinit(allocator);
                             try stack.children.put(allocator, undo.getFocus().id, undo);
                         }
@@ -172,6 +179,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
             var ui_root = Root(Widget, repo_kind, repo_opts){
                 .box = box,
+                .session = session,
             };
             ui_root.getFocus().child_id = box.children.keys()[0];
             return ui_root;
@@ -179,12 +187,13 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         pub fn deinit(self: *Root(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.box.deinit(allocator);
+            allocator.destroy(self.session);
         }
 
         pub fn build(self: *Root(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            const ui_root_tabs = &self.box.children.values()[@intFromEnum(FocusKind.tabs)].widget.ui_root_tabs;
-            const ui_root_stack = &self.box.children.values()[@intFromEnum(FocusKind.stack)].widget.stack;
+            const ui_root_tabs = self.getTabs();
+            const ui_root_stack = self.getStack();
             if (ui_root_tabs.getSelectedIndex()) |index| {
                 ui_root_stack.getFocus().child_id = ui_root_stack.children.keys()[index];
             }
@@ -197,20 +206,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     const child = &self.box.children.values()[current_index].widget;
                     var index = current_index;
 
-                    // scroll wheel moves the selection across tab/stack just
-                    // like arrow up/down does
-                    const Direction = enum { up, down, none };
-                    const direction: Direction = switch (key) {
-                        .arrow_up => .up,
-                        .arrow_down => .down,
-                        .mouse => |mouse| if (mouse.action == .scroll)
-                            (if (mouse.action.scroll == .up) .up else .down)
-                        else
-                            .none,
-                        else => .none,
-                    };
-
-                    switch (direction) {
+                    switch (inp.vertDirection(key)) {
                         .up => {
                             switch (child.*) {
                                 .ui_root_tabs => {
@@ -275,6 +271,14 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     }
                 }
             }
+        }
+
+        pub fn getTabs(self: *Root(Widget, repo_kind, repo_opts)) *RootTabs(Widget, repo_kind) {
+            return &self.box.children.values()[@intFromEnum(FocusKind.tabs)].widget.ui_root_tabs;
+        }
+
+        pub fn getStack(self: *Root(Widget, repo_kind, repo_opts)) *wgt.Stack(Widget) {
+            return &self.box.children.values()[@intFromEnum(FocusKind.stack)].widget.stack;
         }
 
         pub fn clearGrid(self: *Root(Widget, repo_kind, repo_opts)) void {
