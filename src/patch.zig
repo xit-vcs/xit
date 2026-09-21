@@ -279,7 +279,7 @@ pub fn writeAndApplyPatches(
                 for (0..text_count) |index| try expected.append(allocator, @bitCast(LineId(repo_opts.hash){ .edit_id = id, .line = @intCast(index) }));
                 // placement isn't part of the edit's identity
                 if (removed.len > 0 and text_count > 0) {
-                    const placement = try File(repo_opts).replacementPlacement(removed, @intCast(text_count), file.arena.allocator());
+                    const placement = try File(repo_opts).replacementPlacement(removed, id, @intCast(text_count), file.arena.allocator());
                     try writeLengthPrefixedBytes(&buffer.writer, placement.prefix);
                     try buffer.writer.writeInt(u64, placement.lo, .big);
                     try buffer.writer.writeInt(u64, placement.hi, .big);
@@ -974,12 +974,18 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             return .{ .prefix = prefix, .lo = lo, .hi = hi };
         }
 
-        // a one-line replacement keeps the removed line's position. several
-        // lines replacing one nest under it; otherwise they go strictly between
-        // the first and last removed lines, inside the edit's conflict range.
-        fn replacementPlacement(removed: []const Node, text_count: u32, allocator: std.mem.Allocator) !Placement {
-            if (removed.len == 1) return .{ .prefix = removed[0].position, .lo = 0, .hi = max_ordinal };
-            return placeBetween(removed[0].position, removed[removed.len - 1].position, text_count, allocator);
+        // the placement can't depend on the lines around it, because the record
+        // is written once and reused wherever the same change is made again.
+        fn replacementPlacement(removed: []const Node, id: Id, text_count: u32, allocator: std.mem.Allocator) !Placement {
+            // lines replacing several go strictly between the first and last
+            // removed lines, inside the edit's conflict range
+            if (removed.len > 1) return placeBetween(removed[0].position, removed[removed.len - 1].position, text_count, allocator);
+            // a one-line replacement keeps the removed line's position
+            if (text_count == 1) return .{ .prefix = removed[0].position, .lo = 0, .hi = max_ordinal };
+            // several lines replacing one nest under it. lines may already be
+            // nested there, and no ordinal is ever zero, so a zero pair with
+            // the edit's id gives them a space before all of those.
+            return .{ .prefix = try position(allocator, removed[0].position, 0, id), .lo = 0, .hi = max_ordinal };
         }
 
         // finds the shallowest level with room for the ordinals strictly between

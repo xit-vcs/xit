@@ -1279,6 +1279,73 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     }
 }
 
+test "replacing a line above nested lines" {
+    try testNestedLineOrder();
+}
+
+// lines inserted in a gap with no room nest under the line before them.
+// a later replacement of that line must be placed before those nested lines,
+// so the patch it belongs to produces the lines in the order the diff found.
+fn testNestedLineOrder() !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const opts: rp.RepoOpts(.xit) = .{ .is_test = true };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const work_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(work_path);
+    var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
+    defer repo.deinit(io, allocator);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(allocator);
+    try lines.appendSlice(allocator, &.{ "first", "last" });
+    {
+        const content = try std.mem.join(allocator, "\n", lines.items);
+        defer allocator.free(content);
+        try addFile(.xit, opts, &repo, io, allocator, "f.txt", content);
+        _ = try repo.commit(io, allocator, .{ .message = "root" });
+    }
+
+    // the first commit spaces the lines a stride apart, and each insertion
+    // after the first line divides the room left in its gap by sixteen. after
+    // eight rounds the first two lines have adjacent positions.
+    for (0..8) |round| {
+        for (0..15) |i| {
+            try lines.insert(allocator, 1, try std.fmt.allocPrint(arena.allocator(), "line {d}", .{round * 15 + i}));
+        }
+        const content = try std.mem.join(allocator, "\n", lines.items);
+        defer allocator.free(content);
+        try addFile(.xit, opts, &repo, io, allocator, "f.txt", content);
+        _ = try repo.commit(io, allocator, .{ .message = "fill the gap" });
+    }
+
+    // with no room left, these lines nest under the first line
+    {
+        try lines.insert(allocator, 1, "nested two");
+        try lines.insert(allocator, 1, "nested one");
+        const content = try std.mem.join(allocator, "\n", lines.items);
+        defer allocator.free(content);
+        try addFile(.xit, opts, &repo, io, allocator, "f.txt", content);
+        _ = try repo.commit(io, allocator, .{ .message = "nest lines" });
+    }
+
+    // the replacement must end up before the nested lines, not among them
+    {
+        lines.items[0] = "third";
+        try lines.insert(allocator, 0, "second");
+        try lines.insert(allocator, 0, "replaced");
+        const content = try std.mem.join(allocator, "\n", lines.items);
+        defer allocator.free(content);
+        try addFile(.xit, opts, &repo, io, allocator, "f.txt", content);
+        _ = try repo.commit(io, allocator, .{ .message = "replace the first line" });
+    }
+
+    try repo.patchAll(io, allocator, null);
+}
+
 const EditMergeCase = struct {
     name: []const u8,
     base: []const u8 = "a\nb\nc\nd\ne",
