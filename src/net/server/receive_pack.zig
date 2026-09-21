@@ -411,7 +411,13 @@ const ReceivePack = struct {
         ref_updates: []RefUpdate(repo_opts.hash),
         options: Options,
     ) !void {
-        if (!options.skip_connectivity_check) {
+        // a delete-only push has no new objects to check, and collecting the
+        // verified commits below is not free
+        const has_new_oids = for (ref_updates) |*update| {
+            if (!isNullOid(&update.new_oid) and !update.skip_update) break true;
+        } else false;
+
+        if (!options.skip_connectivity_check and has_new_oids) {
             const all_connected = blk: {
                 var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(
                     state.readOnly(),
@@ -420,6 +426,8 @@ const ReceivePack = struct {
                     .{ .kind = .all },
                 );
                 defer obj_iter.deinit();
+
+                try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter);
 
                 for (ref_updates) |*update| {
                     if (!isNullOid(&update.new_oid) and !update.skip_update) {
@@ -450,6 +458,8 @@ const ReceivePack = struct {
                             .{ .kind = .all },
                         );
                         defer obj_iter.deinit();
+
+                        try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter);
 
                         try obj_iter.include(&update.new_oid);
 
@@ -793,6 +803,48 @@ fn RefUpdate(comptime hash_kind: hash.HashKind) type {
 
 fn isNullOid(oid: []const u8) bool {
     return std.mem.allEqual(u8, oid, '0');
+}
+
+// every commit already reachable from a ref had its objects verified by the
+// push that brought it in, so a connectivity check can stop as soon as it
+// reaches one instead of walking the repo's whole history again. marking them
+// in the iterator's seen set is what makes it stop; `exclude` would descend
+// into each commit's whole subtree and cost as much as it saves. only commits
+// are walked here, which is an order of magnitude cheaper than walking every
+// tree and blob, and stopping at a commit skips its content anyway.
+fn markVerifiedCommits(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    obj_iter: *obj.ObjectIterator(repo_kind, repo_opts),
+) !void {
+    var commit_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
+    defer commit_iter.deinit();
+
+    for ([_]rf.RefKind{ .head, .tag }) |ref_kind| {
+        var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
+        defer iter.deinit();
+
+        while (try iter.next()) |ref| {
+            if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
+                try commit_iter.include(oid);
+            }
+        }
+    }
+
+    while (true) {
+        const commit = commit_iter.next(allocator) catch |err| switch (err) {
+            // an existing ref that can't be walked means the repo was already
+            // damaged before this push. that isn't this push's problem, so stop
+            // marking and let the caller walk everything as it used to.
+            error.ObjectNotFound, error.InvalidObject => break,
+            else => return err,
+        } orelse break;
+        defer commit.deinit();
+        try obj_iter.oid_excludes.put(commit.oid, {});
+    }
 }
 
 const deny_delete_current_msg =
