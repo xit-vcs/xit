@@ -144,6 +144,59 @@ pub const CountingReader = struct {
     }
 };
 
+// maps a pack offset to the oid of the object written at it, so an ofs_delta
+// can be rewritten as a ref_delta and read its base from the object store.
+// one entry per object in the pack would be hundreds of megabytes of heap for
+// a large push, so the entries are kept in a scratch database instead.
+pub fn OffsetToOid(comptime hash_kind: hash.HashKind) type {
+    return struct {
+        io: std.Io,
+        dir: std.Io.Dir,
+        file: std.Io.File,
+        db: DB,
+
+        // the offsets are already u64, so they are used as the keys directly
+        const DB = @import("xitdb").Database(.file, u64);
+        const oid_len = hash.byteLen(hash_kind);
+        const file_name = "temp.pack-offsets";
+
+        pub fn init(io: std.Io, dir: std.Io.Dir) !OffsetToOid(hash_kind) {
+            // a crash can leave the file behind, so always start from empty
+            const file = try dir.createFile(io, file_name, .{ .truncate = true, .read = true });
+            errdefer {
+                file.close(io);
+                dir.deleteFile(io, file_name) catch {};
+            }
+
+            return .{
+                .io = io,
+                .dir = dir,
+                .file = file,
+                .db = try DB.init(.{ .io = io, .file = file, .fsync = false }),
+            };
+        }
+
+        pub fn deinit(self: *OffsetToOid(hash_kind)) void {
+            self.file.close(self.io);
+            self.dir.deleteFile(self.io, file_name) catch {};
+        }
+
+        pub fn put(self: *OffsetToOid(hash_kind), offset: u64, oid: *const [oid_len]u8) !void {
+            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
+            try map.put(offset, .{ .bytes = oid });
+        }
+
+        pub fn get(self: *OffsetToOid(hash_kind), offset: u64) !?[oid_len]u8 {
+            const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
+            const cursor = (try map.getCursor(offset)) orelse return null;
+            var oid = [_]u8{0} ** oid_len;
+            const bytes = try cursor.readBytes(&oid);
+            if (bytes.len != oid_len) return error.InvalidOffsetEntry;
+            return oid;
+        }
+    };
+}
+
 pub fn PackIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         io: std.Io,
@@ -180,7 +233,7 @@ pub fn PackIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         pub fn next(
             self: *PackIterator(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            offset_to_oid_maybe: ?*std.AutoArrayHashMapUnmanaged(u64, [hash.byteLen(repo_opts.hash)]u8),
+            offset_to_oid_maybe: ?*OffsetToOid(repo_opts.hash),
         ) !?*PackObjectReader(repo_kind, repo_opts) {
             if (self.object_index == self.object_count) {
                 return null;
@@ -212,10 +265,10 @@ pub fn PackIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         // for stream-based PackReaders, because they can't seek, so
                         // reading it from a loose object is the easiest thing to do.
                         if (offset_to_oid_maybe) |offset_to_oid| {
-                            if (offset_to_oid.get(ofs.position)) |*oid| {
+                            if (try offset_to_oid.get(ofs.position)) |oid| {
                                 delta.init = .{
                                     .ref = .{
-                                        .oid_hex = std.fmt.bytesToHex(oid.*, .lower),
+                                        .oid_hex = std.fmt.bytesToHex(oid, .lower),
                                     },
                                 };
                             }

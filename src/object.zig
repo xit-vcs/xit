@@ -1322,8 +1322,8 @@ pub fn copyFromPackIterator(
         }
     }
 
-    var offset_to_oid: std.AutoArrayHashMapUnmanaged(u64, [hash.byteLen(repo_opts.hash)]u8) = .empty;
-    defer offset_to_oid.deinit(allocator);
+    var offset_to_oid = try pack.OffsetToOid(repo_opts.hash).init(io, state.core.repo_dir);
+    defer offset_to_oid.deinit();
 
     while (try pack_iter.next(state.readOnly(), &offset_to_oid)) |pack_obj_rdr| {
         defer pack_obj_rdr.deinit(io, allocator);
@@ -1361,7 +1361,7 @@ pub fn copyFromPackIterator(
         const header = pack_obj_rdr.header();
         try writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
 
-        try offset_to_oid.put(allocator, pack_iter.start_position, oid);
+        try offset_to_oid.put(pack_iter.start_position, &oid);
 
         if (repo_opts.ProgressCtx != void) {
             if (progress_ctx_maybe) |progress_ctx| {
