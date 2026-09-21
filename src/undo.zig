@@ -43,7 +43,7 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
         },
         copy_objects: struct {},
         gc: struct {},
-        undo: struct { index: u64, last_index: u64 },
+        undo: Undo,
         receive_pack: struct {},
         custom: struct {
             action: []const u8,
@@ -93,36 +93,16 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
             var parsed: ?std.json.Parsed(UndoCommand(hash_kind)) = null;
             defer if (parsed) |value| value.deinit();
             if (self == .undo) {
-                var target_index = self.undo.index;
-                var redo = false;
-                const DB = rp.Repo(.xit, repo_opts).DB;
-                const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
                 const record_buffer = try allocator.alloc(u8, repo_opts.max_read_size);
                 defer allocator.free(record_buffer);
-                var record: ?UndoRecord = null;
-                while (true) {
-                    const moment_cursor = try history.getCursor(target_index) orelse return error.TransactionNotFound;
-                    const moment = try DB.HashMap(.read_only).init(moment_cursor);
-                    record = try read(repo_opts, moment, record_buffer);
-                    const next = if (record) |value| try parseCommand(hash_kind, allocator, value) else null;
-                    if (parsed) |value| value.deinit();
-                    parsed = next;
-                    const value = next orelse break;
-                    current = value.value;
-                    if (current != .undo) break;
-                    redo = !redo;
-                    // undo follows the start of a range; redo restores its end.
-                    target_index = if (redo) current.undo.last_index else current.undo.index;
-                }
-                try writer.print("{s}: {} - ", .{ if (redo) "redo" else "undo", target_index });
-                if (parsed == null) {
-                    if (record) |value| {
-                        try writer.print("{s} {s}", .{ value.action, value.payload });
-                    } else {
-                        try writer.writeAll("(empty description)");
-                    }
-                    return;
-                }
+                const target = try undoneTarget(repo_opts, db, allocator, self.undo, record_buffer);
+                try writer.print("{s}: {} - ", .{ if (target.redo) "redo" else "undo", target.index });
+
+                // describe the transaction the chain ended on
+                const record = target.record orelse return writer.writeAll("(empty description)");
+                const next = try parseCommand(hash_kind, allocator, record) orelse return writer.print("{s} {s}", .{ record.action, record.payload });
+                parsed = next;
+                current = next.value;
             }
             switch (current) {
                 .patch => |patch_cmd| try writer.print("patch {s}", .{@tagName(patch_cmd.status)}),
@@ -172,6 +152,51 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
             }
         }
     };
+}
+
+pub const Undo = struct {
+    /// the transaction the undo restored
+    index: u64,
+    /// the last transaction it discarded, which a redo restores
+    last_index: u64,
+};
+
+/// where a chain of undos ends
+pub const UndoTarget = struct {
+    /// the transaction the chain restored
+    index: u64,
+    /// true when an undo of an undo made it a redo, which restores the end of
+    /// the range the inner one discarded
+    redo: bool,
+    /// the transaction at `index`, borrowing `record_buffer`
+    record: ?UndoRecord,
+};
+
+/// follows the transactions an undo points at, until one that is not itself
+/// an undo. a record that cannot be read or parsed ends the chain where it is
+pub fn undoneTarget(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    db: *rp.Repo(.xit, repo_opts).DB,
+    allocator: std.mem.Allocator,
+    undo: Undo,
+    record_buffer: []u8,
+) !UndoTarget {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
+    var target = UndoTarget{ .index = undo.index, .redo = false, .record = null };
+    while (true) {
+        const moment_cursor = try history.getCursor(target.index) orelse return error.TransactionNotFound;
+        const moment = try DB.HashMap(.read_only).init(moment_cursor);
+        target.record = try read(repo_opts, moment, record_buffer);
+        const record = target.record orelse break;
+        const parsed = try parseCommand(repo_opts.hash, allocator, record) orelse break;
+        defer parsed.deinit();
+        if (parsed.value != .undo) break;
+        target.redo = !target.redo;
+        // undo follows the start of a range; redo restores its end.
+        target.index = if (target.redo) parsed.value.undo.last_index else parsed.value.undo.index;
+    }
+    return target;
 }
 
 pub const UndoRecord = struct {
