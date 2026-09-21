@@ -1192,7 +1192,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         // so it lives in a temporary database rather than on the heap. a plain
         // file is used because each write outside a transaction is synced anyway.
         const TempDB = @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
-        const db_name = "temp.db";
+        const db_name = "temp.patches";
 
         repo_dir: std.Io.Dir,
         db_file: std.Io.File,

@@ -159,8 +159,8 @@ fn prunePatchData(
 
 // the new repo db, ready to be renamed over "db"
 const db_new_name = "db.gc";
-const offsets_name = "db.gc.offsets";
-const sets_name = "db.gc.sets";
+const offsets_name = "temp.gc-offsets";
+const sets_name = "temp.gc-sets";
 
 // removes dead objects, snapshots, patch data, and chunks from the moment being written.
 // their records still take up space until compactDatabase runs afterwards.
