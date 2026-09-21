@@ -527,6 +527,10 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             size: usize,
         };
 
+        // base objects larger than this (in bytes) will not be reconstructed
+        // into memory to serve a delta's copy instructions. see `initCache`.
+        const max_base_buffer_size = 50_000_000;
+
         pub fn init(
             io: std.Io,
             allocator: std.mem.Allocator,
@@ -977,6 +981,41 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
 
         fn initCache(self: *PackObjectReader(repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
             const delta_state = if (self.internal.delta.state) |*state| state else unreachable;
+
+            // a stream-only base reader can't seek backwards, so serving each
+            // copy_from_base chunk from it means resetting the base and
+            // re-materializing everything in front of the chunk, once per chunk.
+            // that is quadratic in the base object's size, and it happens at every
+            // level of the delta chain. reconstruct the base once up front instead
+            // and copy out of that.
+            const base_buffer: ?[]u8 = blk: {
+                // the xit backend's reader seeks in O(1) and decompresses only the
+                // chunk it needs, so it has no prefix to re-materialize
+                switch (delta_state.base_reader.*) {
+                    .git => {},
+                    .xit => break :blk null,
+                }
+
+                // a base too large to hold in memory uses the slow path below
+                const base_size = delta_state.base_reader.header().size;
+                if (base_size > max_base_buffer_size) break :blk null;
+
+                const buffer = try allocator.alloc(u8, @intCast(base_size));
+                errdefer allocator.free(buffer);
+
+                try delta_state.base_reader.reset();
+                var read_so_far: usize = 0;
+                while (read_so_far < buffer.len) {
+                    const read_size = try delta_state.base_reader.read(buffer[read_so_far..]);
+                    if (read_size == 0) break;
+                    read_so_far += read_size;
+                }
+                if (read_so_far != buffer.len) return error.UnexpectedEndOfStream;
+
+                break :blk buffer;
+            };
+            defer if (base_buffer) |buffer| allocator.free(buffer);
+
             const keys = delta_state.cache.keys();
             const values = delta_state.cache.values();
             for (keys, values, 0..) |location, *value, i| {
@@ -1001,12 +1040,17 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                     continue;
                 }
 
+                // the whole base object is in memory, so just copy out of it
+                if (base_buffer) |base| if (location.kind == .copy_from_base) {
+                    const end = location.offset + location.size;
+                    if (end > base.len) return error.UnexpectedEndOfStream;
+                    const buffer = try delta_state.cache_arena.allocator().alloc(u8, location.size);
+                    @memcpy(buffer, base[location.offset..end]);
+                    value.* = buffer;
+                    continue;
+                };
+
                 // seek the base reader to the correct position
-                // TODO: can we avoid calling reset if position <= location.offset?
-                // i tried that already but the cache was
-                // getting messed up in rare cases for some reason.
-                // currently, position is always 0 because we're always resetting,
-                // but maybe in the future i can make it reset only when necessary.
                 try delta_state.base_reader.reset();
                 const position = delta_state.base_reader.position();
                 const bytes_to_skip = location.offset - position;
