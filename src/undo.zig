@@ -8,8 +8,32 @@ const cfg = @import("./config.zig");
 const work = @import("./workdir.zig");
 const rf = @import("./ref.zig");
 
-pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
-    return union(enum) {
+/// the actions an undo record can name. a custom action is written under a
+/// name of its own, which must not be one of these
+pub const ActionKind = enum {
+    patch,
+    add,
+    unadd,
+    rm,
+    commit,
+    tag,
+    branch,
+    switch_dir,
+    reset_add,
+    merge,
+    config,
+    remote,
+    clone,
+    fetch,
+    copy_objects,
+    gc,
+    undo,
+    receive_pack,
+    custom,
+};
+
+pub fn Action(comptime hash_kind: hash.HashKind) type {
+    return union(ActionKind) {
         patch: struct {
             status: enum { on, off, all },
         },
@@ -46,7 +70,7 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
         undo: Undo,
         receive_pack: struct {},
         custom: struct {
-            action: []const u8,
+            action_kind: []const u8,
             payload: std.json.ObjectMap = .empty,
         },
 
@@ -83,24 +107,24 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
         };
 
         pub fn format(
-            self: UndoCommand(hash_kind),
+            self: Action(hash_kind),
             comptime repo_opts: rp.RepoOpts(.xit),
-            db: *rp.Repo(.xit, repo_opts).DB,
+            core: *rp.Repo(.xit, repo_opts).Core,
             allocator: std.mem.Allocator,
             writer: *std.Io.Writer,
         ) !void {
             var current = self;
-            var parsed: ?std.json.Parsed(UndoCommand(hash_kind)) = null;
+            var parsed: ?std.json.Parsed(Action(hash_kind)) = null;
             defer if (parsed) |value| value.deinit();
             if (self == .undo) {
                 const record_buffer = try allocator.alloc(u8, repo_opts.max_read_size);
                 defer allocator.free(record_buffer);
-                const target = try undoneTarget(repo_opts, db, allocator, self.undo, record_buffer);
+                const target = try undoneTarget(repo_opts, core, allocator, self.undo, record_buffer);
                 try writer.print("{s}: {} - ", .{ if (target.redo) "redo" else "undo", target.index });
 
                 // describe the transaction the chain ended on
                 const record = target.record orelse return writer.writeAll("(empty description)");
-                const next = try parseCommand(hash_kind, allocator, record) orelse return writer.print("{s} {s}", .{ record.action, record.payload });
+                const next = try parseAction(hash_kind, allocator, record) orelse return writer.print("{s} {s}", .{ record.action_kind, record.payload });
                 parsed = next;
                 current = next.value;
             }
@@ -146,7 +170,7 @@ pub fn UndoCommand(comptime hash_kind: hash.HashKind) type {
                 .undo => unreachable,
                 .receive_pack => try writer.writeAll("receive-pack"),
                 .custom => |custom| {
-                    try writer.print("{s} ", .{custom.action});
+                    try writer.print("{s} ", .{custom.action_kind});
                     try std.json.Stringify.value(std.json.Value{ .object = custom.payload }, .{}, writer);
                 },
             }
@@ -162,34 +186,31 @@ pub const Undo = struct {
 };
 
 /// where a chain of undos ends
-pub const UndoTarget = struct {
+pub const Target = struct {
     /// the transaction the chain restored
     index: u64,
     /// true when an undo of an undo made it a redo, which restores the end of
     /// the range the inner one discarded
     redo: bool,
     /// the transaction at `index`, borrowing `record_buffer`
-    record: ?UndoRecord,
+    record: ?Record,
 };
 
 /// follows the transactions an undo points at, until one that is not itself
 /// an undo. a record that cannot be read or parsed ends the chain where it is
 pub fn undoneTarget(
     comptime repo_opts: rp.RepoOpts(.xit),
-    db: *rp.Repo(.xit, repo_opts).DB,
+    core: *rp.Repo(.xit, repo_opts).Core,
     allocator: std.mem.Allocator,
     undo: Undo,
     record_buffer: []u8,
-) !UndoTarget {
-    const DB = rp.Repo(.xit, repo_opts).DB;
-    const history = try DB.ArrayList(.read_only).init(db.rootCursor().readOnly());
-    var target = UndoTarget{ .index = undo.index, .redo = false, .record = null };
+) !Target {
+    var target = Target{ .index = undo.index, .redo = false, .record = null };
     while (true) {
-        const moment_cursor = try history.getCursor(target.index) orelse return error.TransactionNotFound;
-        const moment = try DB.HashMap(.read_only).init(moment_cursor);
+        const moment = try core.momentAt(target.index);
         target.record = try read(repo_opts, moment, record_buffer);
         const record = target.record orelse break;
-        const parsed = try parseCommand(repo_opts.hash, allocator, record) orelse break;
+        const parsed = try parseAction(repo_opts.hash, allocator, record) orelse break;
         defer parsed.deinit();
         if (parsed.value != .undo) break;
         target.redo = !target.redo;
@@ -199,20 +220,20 @@ pub fn undoneTarget(
     return target;
 }
 
-pub const UndoRecord = struct {
+pub const Record = struct {
     timestamp: i64,
-    action: []const u8,
+    action_kind: []const u8,
     payload: []const u8,
 
-    // the action and payload borrow their bytes from data.
-    pub fn decode(data: []const u8) !UndoRecord {
+    // the action kind and payload borrow their bytes from data.
+    pub fn decode(data: []const u8) !Record {
         if (data.len < 8) return error.InvalidUndoRecord;
-        const action_end = std.mem.indexOfScalarPos(u8, data, 8, 0) orelse return error.InvalidUndoRecord;
-        if (action_end == 8) return error.InvalidUndoRecord;
+        const kind_end = std.mem.indexOfScalarPos(u8, data, 8, 0) orelse return error.InvalidUndoRecord;
+        if (kind_end == 8) return error.InvalidUndoRecord;
         return .{
             .timestamp = std.mem.readInt(i64, data[0..8], .big),
-            .action = data[8..action_end],
-            .payload = data[action_end + 1 ..],
+            .action_kind = data[8..kind_end],
+            .payload = data[kind_end + 1 ..],
         };
     }
 };
@@ -222,32 +243,34 @@ pub fn read(
     comptime repo_opts: rp.RepoOpts(.xit),
     moment: rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
     buffer: []u8,
-) !?UndoRecord {
+) !?Record {
     const cursor = try moment.getCursor(hash.hashInt(repo_opts.hash, "undo")) orelse return null;
-    return try UndoRecord.decode(try cursor.readBytes(buffer));
+    return try Record.decode(try cursor.readBytes(buffer));
 }
 
 pub fn write(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     timestamp: i64,
-    command: UndoCommand(repo_opts.hash),
+    action: Action(repo_opts.hash),
 ) !void {
-    const action = switch (command) {
+    const action_kind = switch (action) {
         .custom => |custom| blk: {
-            if (!std.unicode.utf8ValidateSlice(custom.action)) return error.InvalidUtf8;
-            if (custom.action.len == 0 or std.mem.indexOfScalar(u8, custom.action, 0) != null) return error.InvalidUndoAction;
+            if (!std.unicode.utf8ValidateSlice(custom.action_kind)) return error.InvalidUtf8;
+            if (custom.action_kind.len == 0 or std.mem.indexOfScalar(u8, custom.action_kind, 0) != null) return error.InvalidUndoActionKind;
+            // otherwise the record reads back as the action of that name
+            if (std.meta.stringToEnum(ActionKind, custom.action_kind) != null) return error.ReservedUndoActionKind;
             try validateJsonUtf8(.{ .object = custom.payload });
-            break :blk custom.action;
+            break :blk custom.action_kind;
         },
-        else => @tagName(command),
+        else => @tagName(action),
     };
     var buffer: [repo_opts.max_read_size]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     writer.writeInt(i64, timestamp, .big) catch return error.UndoRecordTooLarge;
-    writer.writeAll(action) catch return error.UndoRecordTooLarge;
+    writer.writeAll(action_kind) catch return error.UndoRecordTooLarge;
     writer.writeByte(0) catch return error.UndoRecordTooLarge;
-    (switch (command) {
+    (switch (action) {
         .custom => |custom| std.json.Stringify.value(std.json.Value{ .object = custom.payload }, .{}, &writer),
         inline else => |payload| std.json.Stringify.value(payload, .{}, &writer),
     }) catch return error.UndoRecordTooLarge;
@@ -272,25 +295,25 @@ fn validateJsonUtf8(value: std.json.Value) error{InvalidUtf8}!void {
 
 pub fn format(
     comptime repo_opts: rp.RepoOpts(.xit),
-    db: *rp.Repo(.xit, repo_opts).DB,
+    core: *rp.Repo(.xit, repo_opts).Core,
     allocator: std.mem.Allocator,
-    record: UndoRecord,
+    record: Record,
     writer: *std.Io.Writer,
 ) !void {
-    const parsed = try parseCommand(repo_opts.hash, allocator, record) orelse
-        return writer.print("{s} {s}", .{ record.action, record.payload });
+    const parsed = try parseAction(repo_opts.hash, allocator, record) orelse
+        return writer.print("{s} {s}", .{ record.action_kind, record.payload });
     defer parsed.deinit();
-    try parsed.value.format(repo_opts, db, allocator, writer);
+    try parsed.value.format(repo_opts, core, allocator, writer);
 }
 
-fn parseCommand(
+fn parseAction(
     comptime hash_kind: hash.HashKind,
     allocator: std.mem.Allocator,
-    record: UndoRecord,
-) !?std.json.Parsed(UndoCommand(hash_kind)) {
-    const Command = UndoCommand(hash_kind);
-    const action = std.meta.stringToEnum(std.meta.Tag(Command), record.action) orelse return null;
-    switch (action) {
+    record: Record,
+) !?std.json.Parsed(Action(hash_kind)) {
+    const Command = Action(hash_kind);
+    const action_kind = std.meta.stringToEnum(ActionKind, record.action_kind) orelse return null;
+    switch (action_kind) {
         .custom => return null,
         inline else => |tag| {
             const Payload = @FieldType(Command, @tagName(tag));

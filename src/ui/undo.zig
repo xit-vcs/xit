@@ -132,8 +132,6 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
         fn addTransactions(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, max_txes: usize) !void {
             if (repo_kind != .xit) return;
 
-            const history = try rp.Repo(repo_kind, repo_opts).DB.ArrayList(.read_only).init(self.repo.core.db.rootCursor().readOnly());
-
             const tx_remain_count = self.tx_count - self.scroll.child.box.children.count();
             const tx_add_count = @min(tx_remain_count, max_txes);
 
@@ -143,13 +141,12 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             for (0..tx_add_count) |i| {
                 const ii = tx_remain_count - i - 1;
 
-                const moment_cursor = try history.getCursor(ii) orelse return error.TransactionNotFound;
-                const moment = try rp.Repo(repo_kind, repo_opts).DB.HashMap(.read_only).init(moment_cursor);
+                const moment = try self.repo.core.momentAt(ii);
 
                 label.clearRetainingCapacity();
                 try label.writer.print("{} - ", .{ii});
                 if (try un.read(repo_opts, moment, &record_buffer)) |record| {
-                    try un.format(repo_opts, &self.repo.core.db, allocator, record, &label.writer);
+                    try un.format(repo_opts, &self.repo.core, allocator, record, &label.writer);
                 } else {
                     try label.writer.writeAll("(empty description)");
                 }

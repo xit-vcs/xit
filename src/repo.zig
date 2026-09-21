@@ -158,13 +158,19 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
                 /// used by read-only fns to get a moment without starting a transaction
                 pub fn latestMoment(self: *@This()) !DB.HashMap(.read_only) {
+                    return self.momentAt(-1) catch |err| switch (err) {
+                        error.TransactionNotFound => error.DatabaseIsEmpty,
+                        else => err,
+                    };
+                }
+
+                /// the moment at `index` in the history. negative indices count
+                /// back from the end, so -1 is the latest
+                pub fn momentAt(self: *@This(), index: i65) !DB.HashMap(.read_only) {
                     if (self.db.tx_start != null) return error.NotMeantToRunInTransaction;
                     const history = try DB.ArrayList(.read_only).init(self.db.rootCursor().readOnly());
-                    if (try history.getCursor(-1)) |cursor| {
-                        return try DB.HashMap(.read_only).init(cursor);
-                    } else {
-                        return error.DatabaseIsEmpty;
-                    }
+                    const cursor = try history.getCursor(index) orelse return error.TransactionNotFound;
+                    return try DB.HashMap(.read_only).init(cursor);
                 }
             },
         };
@@ -1795,12 +1801,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             const Ctx = struct {
                 core: *Core,
                 timestamp: i64,
-                command: un.UndoCommand(repo_opts.hash),
+                action: un.Action(repo_opts.hash),
 
                 pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                     var moment = try DB.HashMap(.read_write).init(cursor.*);
                     const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                    try un.write(repo_opts, state, ctx.timestamp, ctx.command);
+                    try un.write(repo_opts, state, ctx.timestamp, ctx.action);
                 }
             };
 
@@ -1811,7 +1817,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             const history_count = try history.count();
             if (history_index == 0 or history_index >= history_count) return error.InvalidHistoryIndex;
             const slot = try history.getSlot(history_index - 1) orelse return error.TransactionNotFound;
-            try history.appendContext(.{ .slot = slot }, Ctx{ .core = &self.core, .timestamp = std.Io.Timestamp.now(io, .real).toSeconds(), .command = .{ .undo = .{ .index = history_index, .last_index = history_count - 1 } } });
+            try history.appendContext(.{ .slot = slot }, Ctx{ .core = &self.core, .timestamp = std.Io.Timestamp.now(io, .real).toSeconds(), .action = .{ .undo = .{ .index = history_index, .last_index = history_count - 1 } } });
         }
 
         /// reclaims objects unreachable from repo state or `options.extra_roots`
