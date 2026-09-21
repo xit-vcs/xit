@@ -15,9 +15,11 @@
 //!   their edit by index, and a line adds the u32 index of the line within that
 //!   edit, starting at zero. the last entry is the gap at the end of the file,
 //!   with no line.
-//!   stable positions choose blob boundaries (about 16 entries per blob, at
-//!   most 64), so a commit rewrites only the blobs it touches and snapshots
-//!   share the rest, along with unchanged tree nodes.
+//!   stable positions choose blob boundaries (about 64 entries per blob, at
+//!   most 256), so a commit rewrites only the blobs it touches and snapshots
+//!   share the rest, along with unchanged tree nodes. the blobs are large
+//!   because a write costs far more in copied tree nodes than in bytes
+//!   written, so fewer, larger blobs win despite rewriting more per change.
 //! - oid: the blob the lines describe. a binary commit keeps the last text
 //!   state, so its oid differs from the commit's blob.
 //! commit-id->stats stores nine u64s: first-parent depth, lines added/changed/removed,
@@ -604,9 +606,9 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
                     try buffer.writer.writeInt(u32, line.line, .big);
                 }
                 // stable positions let later chunks remain shared after an
-                // insertion or deletion. cap long runs at 64 entries.
+                // insertion or deletion. cap long runs at 256 entries.
                 const left = if (i == 0) "" else lines[i - 1].position;
-                if (i + 1 < gaps.len and i + 1 - start < 64 and std.hash.Wyhash.hash(0, left) & 15 != 0) continue;
+                if (i + 1 < gaps.len and i + 1 - start < 256 and std.hash.Wyhash.hash(0, left) & 63 != 0) continue;
                 const chunk_start = if (start == 0) "" else lines[start - 1].position;
                 while (old_index < before.len and std.mem.lessThan(u8, before[old_index].start, chunk_start)) {
                     try list.remove(@intCast(new_index));
