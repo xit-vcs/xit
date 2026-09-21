@@ -1,3 +1,55 @@
+//! the implementation of object storage, which splits objects into chunks so
+//! identical regions are stored once. object data lives in .xit/db, in maps
+//! within each database moment.
+//!
+//! object-id->content maps each object id to its content. the object kind name
+//! is stored as the readable key and the size comes from the value, so the
+//! git-style header is never stored: it is hashed when an object is written and
+//! rebuilt when one is read.
+//!
+//! an object that fits in a single chunk is stored inline: the value is a u32
+//! object size followed by that chunk's record, written with a format tag. xitdb
+//! records the tag's presence in the slot, so a reader tells an inline object
+//! from a chunked one without reading anything. such a chunk is never shared,
+//! because an object with the same content is the same object, and a chunk
+//! ending at the end of a file rarely matches another's.
+//!
+//! every other object is a list. its first element is a blob of entries, one per
+//! chunk: a u32 record size and the u64 offset just past that chunk. offsets are
+//! stored at the end rather than the start so the last one is the object's size,
+//! and so a binary search finds the chunk covering a position. the remaining
+//! elements are slots pointing at the chunk records, in order. an empty object
+//! has an empty entries blob and no slots.
+//!
+//! chunk-hash->record maps the hash of a chunk to its record, so an identical
+//! chunk anywhere in the repo is stored once. a record is a u8 compress kind, a
+//! u32 adler32 of the uncompressed chunk, then the payload, compressed with zlib
+//! only when that makes the record smaller. integers are big endian.
+//!
+//! a record is named by the position of its xitdb byte array, and its payload
+//! starts 8 bytes later, past the array's u64 length. reads seek straight to it,
+//! and garbage collection matches an object's slot to a chunk map entry by it,
+//! so a record is written through a writer rather than put: a short value is
+//! packed into its slot and has no position at all. no position is stored,
+//! though: objects reach their records through slots, which xitdb relocates when
+//! the database is compacted, while sizes and offsets never change.
+//!
+//! how objects are written: fastcdc chooses boundaries from the content, so an
+//! edit only disturbs the chunks around it. a gear hash rolls over the bytes and
+//! cuts where it shares no one bits with a mask whose log2(avg_size) one bits
+//! make a cut that likely per byte; normalization uses more one bits before
+//! avg_size and fewer after, and min_size and max_size bound the result. each
+//! chunk's record is written unless its hash is already there. the object id
+//! isn't known until the content ends, so entries and slots are held until then,
+//! which also keeps byte writers from interleaving. an object already in the map
+//! is left alone.
+//!
+//! how objects are read: the kind and size come from the key and from either the
+//! inline head or the last end offset, so reading a header touches no chunk. the
+//! first read of content pairs each entry with its record's position, then
+//! decompresses the chunk covering it into a one-chunk cache, checking size and
+//! checksum. later reads within that chunk, the common case, read nothing.
+
 const std = @import("std");
 const hash = @import("./hash.zig");
 const rp = @import("./repo.zig");
