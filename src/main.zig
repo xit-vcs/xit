@@ -699,7 +699,8 @@ fn runCommand(
             var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
             var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-            try repo.receivePack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options);
+            // stdout here is the wire protocol, not a terminal to draw on
+            try repo.receivePack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options, null);
         },
         .http_backend => {
             const environ_map = run_opts.environ_map;

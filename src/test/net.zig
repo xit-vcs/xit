@@ -195,7 +195,7 @@ test "xit server rejects incompatible object formats" {
                 try request.appendSlice(allocator, "0000");
                 var reader = std.Io.Reader.fixed(request.items);
                 var output = std.Io.Writer.Discarding.init(&.{});
-                try std.testing.expectError(error.ObjectFormatMismatch, repo.receivePack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }));
+                try std.testing.expectError(error.ObjectFormatMismatch, repo.receivePack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }, null));
                 try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .head, .name = "master" }));
 
                 // legacy fetch may omit the format, but explicit conflicts are rejected.

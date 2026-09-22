@@ -230,7 +230,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             switch (remote_repo.*) {
                 inline else => |*repo| repo.receivePack(io, allocator, &request.interface, &response.writer, .{
                     .is_stateless = true,
-                }) catch |err| return request.failure orelse err,
+                }, null) catch |err| return request.failure orelse err,
             }
             var status = std.Io.Writer.Allocating.init(allocator);
             defer status.deinit();

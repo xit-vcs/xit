@@ -99,6 +99,7 @@ pub fn run(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: Options,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // pkt-line writes are buffered, so make sure any error message
     // is sent before an error unwinds past this point
@@ -165,7 +166,7 @@ pub fn run(
 
                 var pack_iter = try pack.PackIterator(repo_kind, repo_opts).init(io, allocator, &pack_reader);
 
-                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, null);
+                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, progress_ctx_maybe);
             }
         }
 
