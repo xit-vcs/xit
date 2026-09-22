@@ -90,6 +90,18 @@ pub const AppliedRefUpdates = struct {
     }
 };
 
+fn reportProgress(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    io: std.Io,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+    event: rp.ProgressEvent,
+) !void {
+    if (repo_opts.ProgressCtx == void) return;
+    const progress_ctx = progress_ctx_maybe orelse return;
+    try progress_ctx.run(io, event);
+}
+
 pub fn run(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -170,7 +182,7 @@ pub fn run(
             }
         }
 
-        try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options);
+        try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options, progress_ctx_maybe);
 
         // an atomic push applies every ref update or none of them, so if any
         // of them failed, the rest must be reported as failed as well
@@ -411,6 +423,7 @@ const ReceivePack = struct {
         allocator: std.mem.Allocator,
         ref_updates: []RefUpdate(repo_opts.hash),
         options: Options,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
     ) !void {
         // a delete-only push has no new objects to check, and collecting the
         // verified commits below is not free
@@ -419,6 +432,8 @@ const ReceivePack = struct {
         } else false;
 
         if (!options.skip_connectivity_check and has_new_oids) {
+            // what a check walks is not known until it has walked it
+            try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .checking_object, .estimated_total_items = 0 } });
             const all_connected = blk: {
                 var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(
                     state.readOnly(),
@@ -428,7 +443,7 @@ const ReceivePack = struct {
                 );
                 defer obj_iter.deinit();
 
-                try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter);
+                try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter, progress_ctx_maybe);
 
                 for (ref_updates) |*update| {
                     if (!isNullOid(&update.new_oid) and !update.skip_update) {
@@ -443,9 +458,11 @@ const ReceivePack = struct {
                     };
                     const next_obj = maybe_obj orelse break;
                     next_obj.deinit();
+                    try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .complete_one = .checking_object });
                 }
                 break :blk true;
             };
+            try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .end = .checking_object });
 
             if (!all_connected) {
                 for (ref_updates) |*update| {
@@ -460,7 +477,7 @@ const ReceivePack = struct {
                         );
                         defer obj_iter.deinit();
 
-                        try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter);
+                        try markVerifiedCommits(repo_kind, repo_opts, state.readOnly(), io, allocator, &obj_iter, null);
 
                         try obj_iter.include(&update.new_oid);
 
@@ -820,6 +837,7 @@ fn markVerifiedCommits(
     io: std.Io,
     allocator: std.mem.Allocator,
     obj_iter: *obj.ObjectIterator(repo_kind, repo_opts),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     var commit_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .commit });
     defer commit_iter.deinit();
@@ -845,6 +863,7 @@ fn markVerifiedCommits(
         } orelse break;
         defer commit.deinit();
         try obj_iter.oid_excludes.put(commit.oid, {});
+        try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .complete_one = .checking_object });
     }
 }
 
