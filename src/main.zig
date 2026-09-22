@@ -69,6 +69,7 @@ const ProgressCtx = struct {
                     .enumerating_object => "Enumerating object",
                     .compressing_object => "Compressing object",
                     .checking_object => "Checking object",
+                    .walking_commit => "Walking commit",
                     .sending_bytes => "Sending bytes",
                     .receiving_bytes => "Receiving bytes",
                 };

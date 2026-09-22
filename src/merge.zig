@@ -133,8 +133,14 @@ pub fn Ancestry(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
         // `two` is then not proof that only that tip reaches it. stepping until
         // the queue is empty settles every flag, at the cost of the whole
         // shared history.
-        pub fn finish(self: *Self) !void {
-            while (self.pending > 0) if (!try self.step()) break;
+        // the caller brackets the phase, since it may walk further itself
+        pub fn finish(self: *Self, progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
+            while (self.pending > 0) {
+                if (!try self.step()) break;
+                if (repo_opts.ProgressCtx != void) {
+                    if (progress_ctx_maybe) |progress_ctx| try progress_ctx.run(self.io, .{ .complete_one = .walking_commit });
+                }
+            }
         }
 
         fn tipIsCommon(self: *const Self, side: usize) bool {
