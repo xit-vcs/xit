@@ -1590,6 +1590,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
         pub const InitOptions = struct {
             allow_ofs_delta: bool = false,
+            progress_ctx: ?repo_opts.ProgressCtx = null,
         };
 
         const Entry = struct {
@@ -1612,6 +1613,12 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         // stop finding new deltas once this many bytes of delta instructions
         // are cached in memory
         const max_delta_cache_size = 256 * 1024 * 1024;
+
+        fn reportProgress(io: std.Io, progress_ctx_maybe: ?repo_opts.ProgressCtx, event: rp.ProgressEvent) !void {
+            if (repo_opts.ProgressCtx == void) return;
+            const progress_ctx = progress_ctx_maybe orelse return;
+            try progress_ctx.run(io, event);
+        }
 
         pub fn init(
             allocator: std.mem.Allocator,
@@ -1636,8 +1643,12 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             };
             errdefer self.deinit();
 
+            // the walk is what decides how many objects there are, so it can
+            // only report what it has reached
+            try reportProgress(obj_iter.io, options.progress_ctx, .{ .start = .{ .kind = .enumerating_object, .estimated_total_items = 0 } });
             while (try obj_iter.next(allocator)) |object| {
                 defer object.deinit();
+                try reportProgress(obj_iter.io, options.progress_ctx, .{ .complete_one = .enumerating_object });
                 try self.entries.append(allocator, .{
                     .oid = object.oid,
                     .kind = object.content,
@@ -1648,6 +1659,8 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     .repr = .full,
                 });
             }
+
+            try reportProgress(obj_iter.io, options.progress_ctx, .{ .end = .enumerating_object });
 
             if (self.entries.items.len == 0) {
                 self.deinit();
@@ -1665,7 +1678,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 }
             }.lessThan);
 
-            try self.findDeltas();
+            try self.findDeltas(options.progress_ctx);
 
             _ = try self.out_bytes.writer.write("PACK");
             try self.out_bytes.writer.writeInt(u32, 2, .big); // version
@@ -1693,7 +1706,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
         // slide a window over the sorted entries, trying to represent each
         // one as a delta against a nearby earlier entry
-        fn findDeltas(self: *PackWriter(repo_kind, repo_opts)) !void {
+        fn findDeltas(self: *PackWriter(repo_kind, repo_opts), progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
             const window_size = repo_opts.delta_window_size;
             if (window_size == 0 or self.entries.items.len < 2) return;
 
@@ -1713,7 +1726,13 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
             var cache_size: usize = 0;
 
+            // an entry is counted as it is reached, so the ones too big to
+            // delta move the bar too
+            try reportProgress(self.io, progress_ctx_maybe, .{ .start = .{ .kind = .compressing_object, .estimated_total_items = self.entries.items.len } });
+            defer reportProgress(self.io, progress_ctx_maybe, .{ .end = .compressing_object }) catch {};
+
             for (self.entries.items, 0..) |*entry, i| {
+                try reportProgress(self.io, progress_ctx_maybe, .{ .complete_one = .compressing_object });
                 if (entry.size == 0 or entry.size > repo_opts.delta_big_file_threshold) continue;
                 if (cache_size > max_delta_cache_size) break;
 

@@ -24,6 +24,8 @@ pub const ProgressKind = enum {
     writing_object_from_pack,
     writing_object,
     writing_patch,
+    enumerating_object,
+    compressing_object,
     sending_bytes,
     receiving_bytes,
 };
@@ -1704,10 +1706,10 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             try net.push(repo_kind, repo_opts, state, io, allocator, &remote, new_opts);
         }
 
-        pub fn uploadPack(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_upload_pack.Options) !void {
+        pub fn uploadPack(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_upload_pack.Options, progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
             var moment = try self.core.latestMoment();
             const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
-            try server_upload_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options);
+            try server_upload_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, options, progress_ctx_maybe);
         }
 
         pub fn receivePack(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, options: server_receive_pack.Options, progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {

@@ -242,7 +242,7 @@ fn getInfoRefs(
             .protocol_version = options.protocol_version,
             .advertise_refs = true,
             .is_stateless = true,
-        });
+        }, null);
         // no need to make a new transaction
         return error.CancelTransaction;
     }
@@ -321,7 +321,7 @@ fn runService(
         try upload_pack.run(repo_kind, repo_opts, state.readOnly(), io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .is_stateless = true,
-        });
+        }, null);
         // no need to make a new transaction
         return error.CancelTransaction;
     } else {

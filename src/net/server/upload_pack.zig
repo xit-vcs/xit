@@ -24,6 +24,7 @@ pub fn run(
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     options: Options,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // pkt-line writes are buffered, so make sure any error message
     // is sent before an error unwinds past this point
@@ -74,10 +75,10 @@ pub fn run(
                 }
 
                 if (options.is_stateless) {
-                    _ = try processRequest(writer, repo_kind, repo_opts, state, io, allocator, &v2_config, reader);
+                    _ = try processRequest(writer, repo_kind, repo_opts, state, io, allocator, &v2_config, reader, progress_ctx_maybe);
                 } else {
                     while (true) {
-                        if (try processRequest(writer, repo_kind, repo_opts, state, io, allocator, &v2_config, reader)) break;
+                        if (try processRequest(writer, repo_kind, repo_opts, state, io, allocator, &v2_config, reader, progress_ctx_maybe)) break;
                     }
                 }
             }
@@ -87,10 +88,10 @@ pub fn run(
                 try pkt.writePktLineFmt(writer, "version 1\n", .{});
             }
 
-            try uploadPack(writer, repo_kind, repo_opts, state, io, allocator, options, reader);
+            try uploadPack(writer, repo_kind, repo_opts, state, io, allocator, options, reader, progress_ctx_maybe);
         },
         .v0 => {
-            try uploadPack(writer, repo_kind, repo_opts, state, io, allocator, options, reader);
+            try uploadPack(writer, repo_kind, repo_opts, state, io, allocator, options, reader, progress_ctx_maybe);
         },
     }
 
@@ -106,6 +107,7 @@ fn uploadPack(
     allocator: std.mem.Allocator,
     options: Options,
     stdin_reader: *std.Io.Reader,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const hex_len = comptime hash.hexLen(repo_opts.hash);
     var upload_pack = UploadPack.init(allocator);
@@ -201,13 +203,13 @@ fn uploadPack(
                 .eof => {},
                 .data => |line| {
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
                     }
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
                     }
                 },
                 .delim => return error.UnexpectedDelim,
@@ -227,6 +229,7 @@ fn writePack(
     want_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     have_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     use_ofs_delta: bool,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
     defer obj_iter.deinit();
@@ -239,7 +242,7 @@ fn writePack(
         try obj_iter.include(item);
     }
 
-    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = use_ofs_delta });
+    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = use_ofs_delta, .progress_ctx = progress_ctx_maybe });
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
@@ -1383,6 +1386,7 @@ fn uploadPackV2(
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const hex_len = comptime hash.hexLen(repo_opts.hash);
     var upload_pack = UploadPack.init(allocator);
@@ -1428,7 +1432,7 @@ fn uploadPackV2(
             try upload_pack.sendShallowInfo(hex_len, writer, repo_kind, repo_opts, state, io, allocator, &our_refs, &shallow_oids, &deepen_not, &want_obj);
 
             try writePktResponse(writer, upload_pack.writer_use_sideband, "packfile\n", .{});
-            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta);
+            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
             break :upload_pack;
         },
     }
@@ -1557,10 +1561,11 @@ const ProtocolCapability = enum {
         io: std.Io,
         allocator: std.mem.Allocator,
         reader: *std.Io.Reader,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
     ) !void {
         return switch (self) {
             .ls_refs => try lsRefs(writer, repo_kind, repo_opts, state, io, allocator, reader),
-            .fetch => try uploadPackV2(writer, repo_kind, repo_opts, state, io, allocator, reader),
+            .fetch => try uploadPackV2(writer, repo_kind, repo_opts, state, io, allocator, reader, progress_ctx_maybe),
             .object_info => try objectInfo(writer, repo_kind, repo_opts, state, io, allocator, reader),
             .bundle_uri => {
                 var line_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
@@ -1643,6 +1648,7 @@ fn processRequest(
     allocator: std.mem.Allocator,
     v2_config: *V2Config,
     stdin_reader: *std.Io.Reader,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !bool {
     var done = false;
     var seen_capability_or_command = false;
@@ -1681,7 +1687,7 @@ fn processRequest(
 
     if (v2_config.client_hash_algo != repo_opts.hash) return error.ObjectFormatMismatch;
 
-    try cmd.command(writer, repo_kind, repo_opts, state, io, allocator, stdin_reader);
+    try cmd.command(writer, repo_kind, repo_opts, state, io, allocator, stdin_reader, progress_ctx_maybe);
 
     return false;
 }

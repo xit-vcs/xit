@@ -204,7 +204,7 @@ test "xit server rejects incompatible object formats" {
                     try pkt.appendPktLine(allocator, &request, "want {s} object-format={s}\n", .{ &zero, name });
                     try request.appendSlice(allocator, "0000");
                     reader = .fixed(request.items);
-                    try std.testing.expectError(error.ObjectFormatMismatch, repo.uploadPack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }));
+                    try std.testing.expectError(error.ObjectFormatMismatch, repo.uploadPack(io, allocator, &reader, &output.writer, .{ .is_stateless = true }, null));
                 }
             }
         }

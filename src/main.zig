@@ -66,6 +66,8 @@ const ProgressCtx = struct {
                     .writing_object_from_pack => "Writing object from pack",
                     .writing_object => "Writing object",
                     .writing_patch => "Writing patch",
+                    .enumerating_object => "Enumerating object",
+                    .compressing_object => "Compressing object",
                     .sending_bytes => "Sending bytes",
                     .receiving_bytes => "Receiving bytes",
                 };
@@ -690,7 +692,8 @@ fn runCommand(
             var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
             var stdout_buf: [repo_opts.net_buffer_size]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-            try repo.uploadPack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options);
+            // stdout here is the wire protocol, not a terminal to draw on
+            try repo.uploadPack(io, allocator, &stdin_reader.interface, &stdout_writer.interface, options, null);
         },
         .receive_pack => |receive_pack_cmd| {
             var options = receive_pack_cmd.options;

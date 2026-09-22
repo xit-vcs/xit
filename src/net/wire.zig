@@ -382,7 +382,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             try stream.write(allocator, buffer.items.ptr, buffer.items.len);
 
             if (need_pack) {
-                var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &git_push.obj_iter, .{ .allow_ofs_delta = self.caps.ofs_delta });
+                var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &git_push.obj_iter, .{ .allow_ofs_delta = self.caps.ofs_delta, .progress_ctx = self.opts.progress_ctx });
                 if (pack_writer_maybe) |*pack_writer| {
                     defer pack_writer.deinit();
 
