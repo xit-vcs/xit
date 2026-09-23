@@ -124,7 +124,7 @@ fn prunePatchData(
                                 try patches.put(hash.bytesToInt(repo_opts.hash, &id), .{ .uint = 1 });
                             }
                         }
-                        if (try fields.getCursor(@intFromEnum(patch.FileField.edits))) |edit_cursor| {
+                        if (try fields.getCursor(@intFromEnum(patch.FileField.edit_set))) |edit_cursor| {
                             try pending.append(allocator, .{ .cursor = edit_cursor, .kind = .edits });
                         }
                     },

@@ -1215,7 +1215,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             }
             const membership = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.edits) },
+                .{ .array_list_get = @intFromEnum(patch.FileField.edit_set) },
                 .{ .hash_map_get = .{ .key = edit_id } },
             });
             try std.testing.expect(membership != null);
@@ -1492,7 +1492,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
             if (case.shared_edits) |expected| {
                 var edits: [2]DB.HashSet(.read_only) = undefined;
                 for (files, &edits) |fields, *set| {
-                    set.* = try DB.HashSet(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.edits))).?);
+                    set.* = try DB.HashSet(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.edit_set))).?);
                 }
                 var shared: usize = 0;
                 var edit_iter = try edits[0].iterator();

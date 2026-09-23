@@ -5,10 +5,16 @@
 //! its first parent and copied on write. path strings are stored as readable
 //! keys. each file's value is an array of five database slots (FileField):
 //! - patch: the last patch created for the file, inherited if unchanged;
-//! - edits: the set of all applied edit ids;
-//! - edit_ids: those ids again, in the order they were first applied, stored
-//!   32 to a blob. chunk entries name an edit by its u32 index here instead of
-//!   repeating the hash in every chunk that mentions it, so the list only grows;
+//! - oid: the blob the lines describe. a binary commit keeps the last text
+//!   state, so its oid differs from the commit's blob;
+//! - edit_set: the set of all applied edit ids;
+//! - edit_list: those ids again, in the order they were first applied, each with
+//!   its u32 removed and inserted line counts and its placement: u64 lo and hi
+//!   ordinals and a length-prefixed prefix, all zero for a pure deletion. 64 fit
+//!   in a blob. chunk entries name an edit by its u32 index here instead of
+//!   repeating the hash in every chunk that mentions it, so the list only grows,
+//!   and loading a file reads no edit records: every line's position follows
+//!   from its edit's entry;
 //! - lines: a persistent sequence of blobs holding the file's lines in order.
 //!   each entry is a gap, as a u32 count and the deletions that made its
 //!   neighbors adjacent, then the line after it. deletions and lines alike name
@@ -20,8 +26,6 @@
 //!   share the rest, along with unchanged tree nodes. the blobs are large
 //!   because a write costs far more in copied tree nodes than in bytes
 //!   written, so fewer, larger blobs win despite rewriting more per change.
-//! - oid: the blob the lines describe. a binary commit keeps the last text
-//!   state, so its oid differs from the commit's blob.
 //! commit-id->stats stores nine u64s: first-parent depth, lines added/changed/removed,
 //! bytes added/removed, then files added/changed/removed. paired removals and
 //! insertions within each edit count only as changed lines. bytes sum per-file
@@ -431,7 +435,7 @@ pub fn applyPatches(
     const base_edits: ?DB.HashSet(.read_only) = if (base_snapshot) |base| blk: {
         const cursor = (try base.readPath(void, &.{
             .{ .hash_map_get = .{ .value = path_hash } },
-            .{ .array_list_get = @intFromEnum(FileField.edits) },
+            .{ .array_list_get = @intFromEnum(FileField.edit_set) },
         })) orelse break :blk null;
         break :blk try DB.HashSet(.read_only).init(cursor);
     } else null;
@@ -460,7 +464,7 @@ fn applyPatchesToFile(
         var reader = try cursor.reader(&buffer);
         while (reader.logicalPos() < reader.size) {
             const id = try reader.interface.takeInt(Id, .big);
-            if (!try file.contains(id)) try pending.put(allocator, id, {});
+            if (!try file.contains(id)) try pending.put(allocator, id, .{});
         }
     }
     var removed: std.AutoHashMapUnmanaged(LineId(opts.hash).Int, void) = .empty;
@@ -468,11 +472,22 @@ fn applyPatchesToFile(
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
 
-    // validate dependencies and removals before changing the lines
-    for (pending.keys()) |id| {
+    // read each record once
+    const edits = try file.arena.allocator().alloc(File(opts).Edit, pending.count());
+    for (pending.keys(), edits) |id, *edit| edit.* = try file.readEdit(id, file.arena.allocator());
+
+    // validate dependencies and removals before changing the lines, keeping what
+    // a save stores for each edit. creation built its records from the loaded
+    // lines, so only the removed ids are needed.
+    for (edits, pending.values()) |edit, *entry| {
         _ = scratch.reset(.retain_capacity);
-        const edit = try file.readEdit(id, scratch.allocator());
-        if (kind == .merge) try File(opts).verify(edit);
+        entry.* = .{ .removed_count = edit.removed_count, .text_count = edit.text_count };
+        if (edit.text_count > 0) entry.where = try File(opts).placement(edit, file.arena.allocator());
+        if (kind == .create) {
+            for (try File(opts).removedIds(edit, scratch.allocator())) |line_id| try removed.put(allocator, line_id, {});
+            continue;
+        }
+        try File(opts).verify(edit);
         for (edit.gap.deps) |dep| {
             if (!pending.contains(dep) and !try file.contains(dep)) return error.MissingPatchDependency;
         }
@@ -496,13 +511,10 @@ fn applyPatchesToFile(
         count += 1;
     }
     file.lines.shrinkRetainingCapacity(count);
-    for (pending.keys()) |id| {
-        const edit = try file.readEdit(id, file.arena.allocator());
-        if (edit.text_count == 0) continue;
-        const where = try File(opts).placement(edit, file.arena.allocator());
-        for (0..edit.text_count) |ordinal| {
+    for (pending.keys(), pending.values()) |id, entry| {
+        for (0..entry.text_count) |ordinal| {
             const line: LineId(opts.hash).Int = @bitCast(LineId(opts.hash){ .edit_id = id, .line = @intCast(ordinal) });
-            if (!removed.contains(line)) try file.lines.append(file.arena.allocator(), try File(opts).nodeFromEdit(edit, where, ordinal, file.arena.allocator()));
+            if (!removed.contains(line)) try file.lines.append(file.arena.allocator(), try File(opts).nodeFromEdit(id, entry, ordinal, file.arena.allocator()));
         }
     }
     std.mem.sort(File(opts).Node, file.lines.items, {}, struct {
@@ -522,7 +534,7 @@ fn applyPatchesToFile(
     // without reading the file's entire history for each new edit.
     var concurrent: std.ArrayList(Id) = .empty;
     defer concurrent.deinit(allocator);
-    if (file.edits) |old_edits| {
+    if (file.edit_set) |old_edits| {
         var iter = try old_edits.iterator();
         while (try iter.next()) |entry| {
             const other_id = (try entry.readKeyValuePair()).hash;
@@ -560,7 +572,7 @@ const PatchApplicationKind = enum { create, merge };
 pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
     return struct {
         file: File(opts),
-        edits: std.AutoArrayHashMapUnmanaged(hash.HashInt(opts.hash), void),
+        edits: std.AutoArrayHashMapUnmanaged(hash.HashInt(opts.hash), File(opts).Stored),
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             self.file.deinit();
@@ -581,11 +593,11 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             try snapshot.putKey(path_hash, .{ .bytes = path });
             const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
             while (try fields.count() < @typeInfo(FileField).@"enum".fields.len) try fields.append(.{ .slot = null });
-            const set = try DB.HashSet(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edits)));
+            const set = try DB.HashSet(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edit_set)));
             for (self.edits.keys()) |id| try set.put(id, .{ .uint = 1 });
             // an edit applied for the first time takes the next index
-            const id_list = try DB.ArrayList(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edit_ids)));
-            try self.file.edit_ids.append(self.file.arena.allocator(), id_list, self.edits.keys());
+            const id_list = try DB.ArrayList(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edit_list)));
+            try self.file.edit_list.append(self.file.arena.allocator(), id_list, self.edits.keys(), self.edits.values());
 
             // update the chunk list in position order, keeping unchanged blobs
             const before = self.file.chunks;
@@ -599,10 +611,10 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             var start: usize = 0;
             for (gaps, 0..) |deps, i| {
                 try buffer.writer.writeInt(u32, @intCast(deps.len), .big);
-                for (deps) |dep| try buffer.writer.writeInt(u32, try self.file.edit_ids.indexOf(dep), .big);
+                for (deps) |dep| try buffer.writer.writeInt(u32, try self.file.edit_list.indexOf(dep), .big);
                 if (i < lines.len) {
                     const line: LineId(opts.hash) = @bitCast(lines[i].id);
-                    try buffer.writer.writeInt(u32, try self.file.edit_ids.indexOf(line.edit_id), .big);
+                    try buffer.writer.writeInt(u32, try self.file.edit_list.indexOf(line.edit_id), .big);
                     try buffer.writer.writeInt(u32, line.line, .big);
                 }
                 // stable positions let later chunks remain shared after an
@@ -651,100 +663,122 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         const Chunk = struct { first: usize, start: []const u8 = "", cursor: DB.Cursor(.read_only) };
         const Entries = struct { ids: []const Line, gaps: []const []const Id, chunks: []Chunk };
         const index_size = @sizeOf(u32);
-        const id_size = hash.byteLen(opts.hash);
-        // ids per stored blob. reading one costs no more than reading a single
-        // id, so a load resolves a blob per read rather than an edit per read,
-        // and the ids a patch adds usually rewrite only the last blob.
-        const id_batch = 32;
-        // the file's edit ids, which its chunk entries name by index. a blob is
-        // remembered whole on the way in, so writing the chunks back needs no
-        // reads and a new edit can take the next index.
-        const EditIds = struct {
+        // entries per stored blob. a blob costs about as much to read as one
+        // entry, so a load resolves a blob per read rather than an edit per
+        // read, and the entries a patch adds usually rewrite only the last blob.
+        const entry_batch = 64;
+        // what a file needs from an edit to place its lines, kept per file so
+        // a load never reads edit records: the line counts, and the placement
+        // its lines get. a pure deletion has no placement and stores zeros.
+        pub const Stored = struct { removed_count: u32 = 0, text_count: u32 = 0, where: Placement = .{ .prefix = "", .lo = 0, .hi = 0 } };
+        // the file's edits, which its chunk entries name by index. blobs are
+        // read whole, so writing chunks back needs no reads and a new edit can
+        // take the next index. entries point into their blobs, so everything
+        // is allocated from an arena that outlives the list.
+        const EditList = struct {
             list: ?DB.ArrayList(.read_only) = null,
             by_index: std.ArrayList(Entry) = .empty,
             by_id: std.AutoHashMapUnmanaged(Id, u32) = .empty,
 
-            // a resolved index, and whether the id map has it yet. an id of
-            // zero means the index has not been read from its blob
-            const Entry = struct { id: Id = 0, indexed: bool = false };
+            const Entry = struct { id: Id = 0, stored: Stored = .{}, loaded: bool = false };
 
-            fn init(snapshot: DB.Cursor(.read_only), path_hash: Id) !EditIds {
+            fn init(snapshot: DB.Cursor(.read_only), path_hash: Id) !EditList {
                 const cursor = (try snapshot.readPath(void, &.{
                     .{ .hash_map_get = .{ .value = path_hash } },
-                    .{ .array_list_get = @intFromEnum(FileField.edit_ids) },
+                    .{ .array_list_get = @intFromEnum(FileField.edit_list) },
                 })) orelse return .{};
                 if (cursor.slot().tag == .none) return .{};
                 return .{ .list = try DB.ArrayList(.read_only).init(cursor) };
             }
 
-            fn deinit(self: *EditIds, allocator: std.mem.Allocator) void {
-                self.by_index.deinit(allocator);
-                self.by_id.deinit(allocator);
-            }
-
-            fn get(self: *EditIds, allocator: std.mem.Allocator, index: u32) !Id {
-                if (index >= self.by_index.items.len or self.by_index.items[index].id == 0) {
+            // reads the entry's whole blob the first time any of its entries is needed
+            fn get(self: *EditList, arena: std.mem.Allocator, index: u32) !*const Entry {
+                if (index >= self.by_index.items.len or !self.by_index.items[index].loaded) {
                     const list = self.list orelse return error.InvalidLineList;
-                    var cursor = (try list.getCursor(index / id_batch)) orelse return error.InvalidLineList;
-                    var buffer: [id_batch * id_size]u8 = undefined;
-                    const bytes = try cursor.readBytes(&buffer);
-                    if (bytes.len == 0 or bytes.len % id_size != 0) return error.InvalidLineList;
-                    const first = (index / id_batch) * id_batch;
-                    const end = first + bytes.len / id_size;
-                    if (end > self.by_index.items.len) try self.by_index.appendNTimes(allocator, .{}, end - self.by_index.items.len);
-                    for (0..bytes.len / id_size) |i| {
-                        self.by_index.items[first + i].id = hash.bytesToInt(opts.hash, bytes[i * id_size ..][0..id_size]);
+                    const cursor = (try list.getCursor(index / entry_batch)) orelse return error.InvalidLineList;
+                    const bytes = try cursor.readBytesAlloc(arena, null);
+                    const first = (index / entry_batch) * entry_batch;
+                    if (first + entry_batch > self.by_index.items.len) try self.by_index.appendNTimes(arena, .{}, first + entry_batch - self.by_index.items.len);
+                    var reader = std.Io.Reader.fixed(bytes);
+                    var count: u32 = 0;
+                    while (reader.bufferedLen() > 0) : (count += 1) {
+                        if (count == entry_batch) return error.InvalidLineList;
+                        const entry = try readEntry(&reader);
+                        self.by_index.items[first + count] = entry;
+                        try self.by_id.put(arena, entry.id, first + count);
                     }
-                    if (index >= end) return error.InvalidLineList;
+                    if (count == 0 or index >= first + count) return error.InvalidLineList;
                 }
-                // the chunks name an edit once per line it inserted, so the id
-                // map is filled only for indexes the file turns out to use
-                const entry = &self.by_index.items[index];
-                if (!entry.indexed) {
-                    try self.by_id.put(allocator, entry.id, index);
-                    entry.indexed = true;
-                }
-                return entry.id;
+                return &self.by_index.items[index];
             }
 
-            fn indexOf(self: *const EditIds, id: Id) !u32 {
+            fn indexOf(self: *const EditList, id: Id) !u32 {
                 return self.by_id.get(id) orelse error.InvalidLineList;
             }
 
             // fills the last blob before starting new ones. ids already in the
             // list are skipped, keeping the index they were given.
-            fn append(self: *EditIds, allocator: std.mem.Allocator, list: DB.ArrayList(.read_write), ids: []const Id) !void {
-                var buffer: [id_batch * id_size]u8 = undefined;
+            fn append(self: *EditList, arena: std.mem.Allocator, list: DB.ArrayList(.read_write), ids: []const Id, entries: []const Stored) !void {
+                var buffer = std.Io.Writer.Allocating.init(arena);
                 var blob_index: u32 = @intCast(try list.count());
                 var filled: u32 = 0;
                 // the last blob is rewritten unless it is already full
                 if (blob_index > 0) {
-                    var cursor = (try list.getCursor(blob_index - 1)) orelse return error.InvalidLineList;
-                    const bytes = try cursor.readBytes(&buffer);
-                    if (bytes.len == 0 or bytes.len % id_size != 0) return error.InvalidLineList;
-                    if (bytes.len < buffer.len) {
-                        blob_index -= 1;
-                        filled = @intCast(bytes.len / id_size);
+                    const cursor = (try list.getCursor(blob_index - 1)) orelse return error.InvalidLineList;
+                    const bytes = try cursor.readBytesAlloc(arena, null);
+                    var reader = std.Io.Reader.fixed(bytes);
+                    while (reader.bufferedLen() > 0) : (filled += 1) {
+                        if (filled == entry_batch) return error.InvalidLineList;
+                        _ = try readEntry(&reader);
                     }
+                    if (filled == 0) return error.InvalidLineList;
+                    if (filled < entry_batch) {
+                        blob_index -= 1;
+                        try buffer.writer.writeAll(bytes);
+                    } else filled = 0;
                 }
                 var added = false;
-                for (ids) |id| {
+                for (ids, entries) |id, stored| {
                     if (self.by_id.contains(id)) continue;
-                    if (filled == id_batch) {
-                        try write(list, blob_index, &buffer);
+                    if (filled == entry_batch) {
+                        try write(list, blob_index, buffer.written());
                         blob_index += 1;
                         filled = 0;
+                        buffer.clearRetainingCapacity();
                     }
-                    std.mem.writeInt(Id, buffer[filled * id_size ..][0..id_size], id, .big);
-                    try self.by_id.put(allocator, id, blob_index * id_batch + filled);
+                    try writeEntry(&buffer.writer, id, stored);
+                    try self.by_id.put(arena, id, blob_index * entry_batch + filled);
                     filled += 1;
                     added = true;
                 }
-                if (added) try write(list, blob_index, buffer[0 .. filled * id_size]);
+                if (added) try write(list, blob_index, buffer.written());
             }
 
             fn write(list: DB.ArrayList(.read_write), index: u32, bytes: []const u8) !void {
                 if (index < try list.count()) try list.put(index, .{ .bytes = bytes }) else try list.append(.{ .bytes = bytes });
+            }
+
+            fn readEntry(reader: *std.Io.Reader) !Entry {
+                const id = try reader.takeInt(Id, .big);
+                const removed_count = try reader.takeInt(u32, .big);
+                const text_count = try reader.takeInt(u32, .big);
+                const lo = try reader.takeInt(u64, .big);
+                const hi = try reader.takeInt(u64, .big);
+                const prefix_len = try reader.takeInt(u32, .big);
+                if (prefix_len % pair_size != 0 or prefix_len > reader.bufferedLen()) return error.InvalidLineList;
+                const prefix = try reader.take(prefix_len);
+                if (text_count > 0 and (hi <= lo or hi - lo - 1 < text_count)) return error.InvalidLineList;
+                if (text_count == 0 and (lo != 0 or hi != 0 or prefix.len != 0)) return error.InvalidLineList;
+                return .{ .id = id, .stored = .{ .removed_count = removed_count, .text_count = text_count, .where = .{ .prefix = prefix, .lo = lo, .hi = hi } }, .loaded = true };
+            }
+
+            fn writeEntry(writer: *std.Io.Writer, id: Id, stored: Stored) !void {
+                try writer.writeInt(Id, id, .big);
+                try writer.writeInt(u32, stored.removed_count, .big);
+                try writer.writeInt(u32, stored.text_count, .big);
+                try writer.writeInt(u64, stored.where.lo, .big);
+                try writer.writeInt(u64, stored.where.hi, .big);
+                try writeLengthPrefixedBytes(writer, stored.where.prefix);
             }
         };
         // where an edit's lines go: under prefix, with ordinals strictly between lo and hi
@@ -773,13 +807,13 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
 
         arena: std.heap.ArenaAllocator,
         moment: DB.HashMap(.read_only),
-        edits: ?DB.HashSet(.read_only),
+        edit_set: ?DB.HashSet(.read_only),
         lines: std.ArrayList(Node) = .empty,
         // the deletions behind each gap, and the chunks they were loaded from. applying
         // patches changes the lines but not these, so a save can tell what changed.
         gaps: []const []const Id = &.{},
         chunks: []const Chunk = &.{},
-        edit_ids: EditIds = .{},
+        edit_list: EditList = .{},
         regions: std.ArrayList(Region) = .empty,
         // whether an edit descends from a deletion, memoized for one application
         lineage: std.AutoHashMapUnmanaged(Lineage, bool) = .empty,
@@ -787,29 +821,23 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         pub fn load(moment: *const DB.HashMap(.read_only), snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) !Self {
             const edit_cursor = try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(FileField.edits) },
+                .{ .array_list_get = @intFromEnum(FileField.edit_set) },
             });
             var self = Self{
                 .arena = std.heap.ArenaAllocator.init(allocator),
                 .moment = moment.*,
-                .edits = if (edit_cursor) |cursor| try DB.HashSet(.read_only).init(cursor) else null,
+                .edit_set = if (edit_cursor) |cursor| try DB.HashSet(.read_only).init(cursor) else null,
+                .edit_list = try EditList.init(snapshot, path_hash),
             };
             errdefer self.deinit();
-            self.edit_ids = try EditIds.init(snapshot, path_hash);
-            const entries = try readEntries(snapshot, path_hash, &self.edit_ids, allocator, self.arena.allocator());
+            const entries = try readEntries(snapshot, path_hash, &self.edit_list, allocator, self.arena.allocator());
             defer allocator.free(entries.ids);
-            // lines from the same edit share its header and placement,
-            // so only edits with live lines are read
-            var edits: std.AutoHashMapUnmanaged(Id, struct { edit: Edit, where: Placement }) = .empty;
-            defer edits.deinit(allocator);
+            // every line's position follows from its edit's entry, which the
+            // chunks already resolved, so no edit record is read
             for (entries.ids) |id| {
                 const line: LineId(opts.hash) = @bitCast(id);
-                const entry = try edits.getOrPut(allocator, line.edit_id);
-                if (!entry.found_existing) {
-                    const edit = try self.readEdit(line.edit_id, self.arena.allocator());
-                    entry.value_ptr.* = .{ .edit = edit, .where = try placement(edit, self.arena.allocator()) };
-                }
-                try self.lines.append(self.arena.allocator(), try nodeFromEdit(entry.value_ptr.edit, entry.value_ptr.where, line.line, self.arena.allocator()));
+                const entry = self.edit_list.by_index.items[try self.edit_list.indexOf(line.edit_id)];
+                try self.lines.append(self.arena.allocator(), try nodeFromEdit(line.edit_id, entry.stored, line.line, self.arena.allocator()));
             }
             for (entries.chunks) |*chunk| {
                 if (chunk.first > 0) chunk.start = self.lines.items[chunk.first - 1].position;
@@ -825,40 +853,34 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         }
 
         pub fn contains(self: *const Self, id: Id) !bool {
-            const edits = self.edits orelse return false;
+            const edits = self.edit_set orelse return false;
             return try edits.getSlot(id) != null;
         }
 
         // the ids alone, for finding a line's index in the blob the snapshot describes
         pub fn lineIds(snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) ![]const Line {
-            var edit_ids = try EditIds.init(snapshot, path_hash);
-            defer edit_ids.deinit(allocator);
-            const entries = try readEntries(snapshot, path_hash, &edit_ids, allocator, allocator);
-            for (entries.gaps) |deps| allocator.free(deps);
-            allocator.free(entries.gaps);
-            allocator.free(entries.chunks);
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            var edit_list = try EditList.init(snapshot, path_hash);
+            const entries = try readEntries(snapshot, path_hash, &edit_list, allocator, arena.allocator());
             return entries.ids;
         }
 
-        // a file that was never patched has no lines and one gap
-        fn readEntries(snapshot: DB.Cursor(.read_only), path_hash: Id, edit_ids: *EditIds, ids_allocator: std.mem.Allocator, allocator: std.mem.Allocator) !Entries {
+        // a file that was never patched has no lines and one gap. the ids are
+        // owned by the caller; the gaps, chunks, and edit entries live in the arena.
+        fn readEntries(snapshot: DB.Cursor(.read_only), path_hash: Id, edit_list: *EditList, ids_allocator: std.mem.Allocator, arena: std.mem.Allocator) !Entries {
             var ids: std.ArrayList(Line) = .empty;
             errdefer ids.deinit(ids_allocator);
             var gaps: std.ArrayList([]const Id) = .empty;
-            errdefer {
-                for (gaps.items) |deps| allocator.free(deps);
-                gaps.deinit(allocator);
-            }
             const cursor = (try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @intFromEnum(FileField.lines) },
             })) orelse {
-                try gaps.append(allocator, &.{});
-                return .{ .ids = &.{}, .gaps = try gaps.toOwnedSlice(allocator), .chunks = &.{} };
+                try gaps.append(arena, &.{});
+                return .{ .ids = &.{}, .gaps = try gaps.toOwnedSlice(arena), .chunks = &.{} };
             };
             const list = try DB.LinkedArrayList(.read_only).init(cursor);
-            const chunks = try allocator.alloc(Chunk, @intCast(try list.count()));
-            errdefer allocator.free(chunks);
+            const chunks = try arena.alloc(Chunk, @intCast(try list.count()));
             var iter = try list.iterator();
             // only the last entry of the last chunk has no line: the gap at the end
             var ended = false;
@@ -871,12 +893,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 while (reader.logicalPos() < reader.size) {
                     const dep_count = try reader.interface.takeInt(u32, .big);
                     if (dep_count > (reader.size -| reader.logicalPos()) / index_size) return error.InvalidLineList;
-                    const deps = try allocator.alloc(Id, dep_count);
-                    {
-                        errdefer allocator.free(deps);
-                        for (deps) |*dep| dep.* = try edit_ids.get(allocator, try reader.interface.takeInt(u32, .big));
-                        try gaps.append(allocator, deps);
-                    }
+                    const deps = try arena.alloc(Id, dep_count);
+                    for (deps) |*dep| dep.* = (try edit_list.get(arena, try reader.interface.takeInt(u32, .big))).id;
+                    try gaps.append(arena, deps);
                     if (reader.logicalPos() == reader.size) {
                         ended = true;
                         break;
@@ -884,14 +903,14 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                     if (2 * index_size > reader.size - reader.logicalPos()) return error.InvalidLineList;
                     const edit_index = try reader.interface.takeInt(u32, .big);
                     const line_num = try reader.interface.takeInt(u32, .big);
-                    try ids.append(ids_allocator, @bitCast(LineId(opts.hash){ .line = line_num, .edit_id = try edit_ids.get(allocator, edit_index) }));
+                    try ids.append(ids_allocator, @bitCast(LineId(opts.hash){ .line = line_num, .edit_id = (try edit_list.get(arena, edit_index)).id }));
                 }
             }
             if (!ended) return error.InvalidLineList;
             // once detached, the list's cleanup no longer covers the ids
             const owned_ids = try ids.toOwnedSlice(ids_allocator);
             errdefer ids_allocator.free(owned_ids);
-            return .{ .ids = owned_ids, .gaps = try gaps.toOwnedSlice(allocator), .chunks = chunks };
+            return .{ .ids = owned_ids, .gaps = try gaps.toOwnedSlice(arena), .chunks = chunks };
         }
 
         fn validateGaps(self: *const Self, gaps: []const []const Id) !void {
@@ -962,12 +981,12 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         // whether the edit put a surviving line strictly inside the deleted
         // range without descending from the deletion
         fn placedInside(self: *Self, edit: Edit, region: Region, deletion: Edit, allocator: std.mem.Allocator) !bool {
-            const where = try placement(edit, allocator);
-            const first = try nodeFromEdit(edit, where, 0, allocator);
+            const shape = storedFrom(edit, try placement(edit, allocator));
+            const first = try nodeFromEdit(edit.id, shape, 0, allocator);
             if (!less(region.start, first.position) or !less(first.position, region.end)) return false;
             if (try self.inLineage(edit, deletion.id, allocator)) return false;
             for (0..edit.text_count) |index| {
-                const line = try nodeFromEdit(edit, where, index, allocator);
+                const line = try nodeFromEdit(edit.id, shape, index, allocator);
                 if (region.contains(line.position) and self.survives(line)) return true;
             }
             return false;
@@ -1063,15 +1082,20 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         fn node(self: *const Self, id: Line, allocator: std.mem.Allocator) !Node {
             const line: LineId(opts.hash) = @bitCast(id);
             const edit = try self.readEdit(line.edit_id, allocator);
-            return nodeFromEdit(edit, try placement(edit, allocator), line.line, allocator);
+            return nodeFromEdit(edit.id, storedFrom(edit, try placement(edit, allocator)), line.line, allocator);
         }
 
-        fn nodeFromEdit(edit: Edit, where: Placement, ordinal: u64, allocator: std.mem.Allocator) !Node {
-            if (ordinal >= edit.text_count) return error.InvalidLineId;
+        fn nodeFromEdit(id: Id, stored: Stored, ordinal: u64, allocator: std.mem.Allocator) !Node {
+            if (ordinal >= stored.text_count) return error.InvalidLineId;
+            const where = stored.where;
             return .{
-                .id = @bitCast(LineId(opts.hash){ .edit_id = edit.id, .line = @intCast(ordinal) }),
-                .position = if (edit.removed_count == 1 and edit.text_count == 1) where.prefix else try position(allocator, where.prefix, ordinalAt(where, edit.text_count, ordinal, edit.removed_count > 0), edit.id),
+                .id = @bitCast(LineId(opts.hash){ .edit_id = id, .line = @intCast(ordinal) }),
+                .position = if (stored.removed_count == 1 and stored.text_count == 1) where.prefix else try position(allocator, where.prefix, ordinalAt(where, stored.text_count, ordinal, stored.removed_count > 0), id),
             };
+        }
+
+        fn storedFrom(edit: Edit, where: Placement) Stored {
+            return .{ .removed_count = edit.removed_count, .text_count = edit.text_count, .where = where };
         }
 
         fn placement(edit: Edit, allocator: std.mem.Allocator) !Placement {
@@ -1280,7 +1304,7 @@ pub fn LineId(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const FileField = enum(u8) { patch, edits, lines, oid, edit_ids };
+pub const FileField = enum(u8) { patch, oid, edit_set, edit_list, lines };
 
 fn writeLengthPrefixedBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeInt(u32, @intCast(bytes.len), .big);
