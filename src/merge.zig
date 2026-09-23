@@ -1244,7 +1244,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // Lazy patch generation
                     if (repo_kind == .xit and merge_algo == .patch) {
-                        try writePossiblePatches(repo_opts, state, io, allocator, &target_oid, &source_oid, progress_ctx_maybe);
+                        try patch.writePatches(repo_opts, state, io, allocator, &.{ source_oid, target_oid }, progress_ctx_maybe);
                     }
 
                     // diff the base ancestor with the target oid
@@ -1446,20 +1446,4 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             self.allocator.destroy(self.arena);
         }
     };
-}
-
-fn writePossiblePatches(
-    comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_write),
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    target_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    source_oid: *const [hash.hexLen(repo_opts.hash)]u8,
-    progress_ctx_maybe: ?repo_opts.ProgressCtx,
-) !void {
-    var iter = try obj.ObjectIterator(.xit, repo_opts).init(state.readOnly(), io, allocator, .{ .kind = .commit });
-    defer iter.deinit();
-    try iter.include(source_oid);
-    try iter.include(target_oid);
-    try patch.writePatches(repo_opts, state, io, allocator, &iter, progress_ctx_maybe);
 }

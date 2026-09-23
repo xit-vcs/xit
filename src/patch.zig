@@ -627,9 +627,7 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
                     old_index += 1;
                 }
                 if (old_index < before.len and std.mem.eql(u8, before[old_index].start, chunk_start)) {
-                    const bytes = try before[old_index].cursor.readBytesAlloc(allocator, null);
-                    defer allocator.free(bytes);
-                    if (!std.mem.eql(u8, bytes, buffer.written())) try list.put(@intCast(new_index), .{ .bytes = buffer.written() });
+                    if (!std.mem.eql(u8, before[old_index].bytes, buffer.written())) try list.put(@intCast(new_index), .{ .bytes = buffer.written() });
                     old_index += 1;
                 } else if (old_index == before.len) {
                     try list.append(.{ .bytes = buffer.written() });
@@ -658,9 +656,10 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         const max_ordinal = std.math.maxInt(u64);
         const stride: u64 = 1 << 32;
         pub const Gap = struct { start: []const u8 = "", end: ?[]const u8 = null, deps: []const Id = &.{} };
-        // a stored blob of entries: the index of its first entry, and once the
-        // lines are known, the position to its left, which identifies it
-        const Chunk = struct { first: usize, start: []const u8 = "", cursor: DB.Cursor(.read_only) };
+        // a stored blob of entries: the index of its first entry, its bytes for a
+        // save to compare against, and once the lines are known, the position
+        // to its left, which identifies it
+        const Chunk = struct { first: usize, start: []const u8 = "", bytes: []const u8 };
         const Entries = struct { ids: []const Line, gaps: []const []const Id, chunks: []Chunk };
         const index_size = @sizeOf(u32);
         // entries per stored blob. a blob costs about as much to read as one
@@ -886,23 +885,23 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             var ended = false;
             for (chunks) |*chunk| {
                 var entry = (try iter.next()) orelse return error.InvalidLineList;
-                var buffer: [opts.buffer_size]u8 = undefined;
-                var reader = try entry.reader(&buffer);
-                if (ended or reader.size == 0) return error.InvalidLineList;
-                chunk.* = .{ .first = gaps.items.len, .cursor = entry };
-                while (reader.logicalPos() < reader.size) {
-                    const dep_count = try reader.interface.takeInt(u32, .big);
-                    if (dep_count > (reader.size -| reader.logicalPos()) / index_size) return error.InvalidLineList;
+                const bytes = try entry.readBytesAlloc(arena, null);
+                if (ended or bytes.len == 0) return error.InvalidLineList;
+                chunk.* = .{ .first = gaps.items.len, .bytes = bytes };
+                var reader = std.Io.Reader.fixed(bytes);
+                while (reader.bufferedLen() > 0) {
+                    const dep_count = try reader.takeInt(u32, .big);
+                    if (dep_count > reader.bufferedLen() / index_size) return error.InvalidLineList;
                     const deps = try arena.alloc(Id, dep_count);
-                    for (deps) |*dep| dep.* = (try edit_list.get(arena, try reader.interface.takeInt(u32, .big))).id;
+                    for (deps) |*dep| dep.* = (try edit_list.get(arena, try reader.takeInt(u32, .big))).id;
                     try gaps.append(arena, deps);
-                    if (reader.logicalPos() == reader.size) {
+                    if (reader.bufferedLen() == 0) {
                         ended = true;
                         break;
                     }
-                    if (2 * index_size > reader.size - reader.logicalPos()) return error.InvalidLineList;
-                    const edit_index = try reader.interface.takeInt(u32, .big);
-                    const line_num = try reader.interface.takeInt(u32, .big);
+                    if (2 * index_size > reader.bufferedLen()) return error.InvalidLineList;
+                    const edit_index = try reader.takeInt(u32, .big);
+                    const line_num = try reader.takeInt(u32, .big);
                     try ids.append(ids_allocator, @bitCast(LineId(opts.hash){ .line = line_num, .edit_id = (try edit_list.get(arena, edit_index)).id }));
                 }
             }
@@ -1316,17 +1315,19 @@ pub fn writePatches(
     state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
-    iter: *obj.ObjectIterator(.xit, repo_opts),
+    tips: []const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     var patch_writer = try PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
     defer patch_writer.deinit(io, allocator);
 
-    while (try iter.next(allocator)) |commit_object| {
-        defer commit_object.deinit();
-        const oid = try hash.hexToBytes(repo_opts.hash, commit_object.oid);
-        try patch_writer.add(state.readOnly(), io, allocator, &oid);
-    }
+    // a commit with patches has them for its whole ancestry, because each run
+    // covers every ancestor of its tips in one transaction. so the walk stops
+    // there, visiting only the commits that need patches and their parents.
+    var pending: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+    defer pending.deinit(allocator);
+    try pending.appendSlice(allocator, tips);
+    while (pending.pop()) |oid| try patch_writer.add(state.readOnly(), io, allocator, &oid, &pending);
 
     try patch_writer.write(state, io, allocator, progress_ctx_maybe);
 }
@@ -1334,9 +1335,10 @@ pub fn writePatches(
 pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         const DB = rp.Repo(.xit, repo_opts).DB;
-        // the map of commits waiting on their parent grows with the history,
-        // so it lives in a temporary database rather than on the heap. a plain
-        // file is used because each write outside a transaction is synced anyway.
+        // the map of commits waiting on their parent and the set of visited
+        // commits grow with the history, so they live in a temporary database
+        // rather than on the heap. a plain file is used because each write
+        // outside a transaction is synced anyway.
         const TempDB = @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
         const db_name = "temp.patches";
 
@@ -1344,6 +1346,9 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         db_file: std.Io.File,
         db: *TempDB,
         parent_to_children: TempDB.HashMap(.read_write),
+        visited: TempDB.HashSet(.read_write),
+        // the commits with patches, as of the start of the walk
+        snapshots: ?DB.HashMap(.read_only),
         oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
@@ -1363,12 +1368,19 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
             const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
+            const visited = try TempDB.HashSet(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, "visited")));
+            const snapshots: ?DB.HashMap(.read_only) = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |cursor|
+                try DB.HashMap(.read_only).init(cursor)
+            else
+                null;
 
             return .{
                 .repo_dir = state.core.repo_dir,
                 .db_file = db_file,
                 .db = db_ptr,
                 .parent_to_children = parent_to_children,
+                .visited = visited,
+                .snapshots = snapshots,
                 .oid_queue = std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void){},
                 .commit_count = 0,
             };
@@ -1381,55 +1393,57 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             self.oid_queue.deinit(allocator);
         }
 
+        // queues the commit for writing, or for waiting on its first parent, and
+        // pushes the parents to visit. a commit that already has patches needs
+        // neither, and nor do its ancestors.
         pub fn add(
             self: *PatchWriter(repo_opts),
             state: rp.Repo(.xit, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
-            oid: *const [hash.byteLen(repo_opts.hash)]u8,
+            oid: *const [hash.hexLen(repo_opts.hash)]u8,
+            pending: *std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
         ) !void {
-            if (self.oid_queue.contains(oid.*)) {
-                return;
+            const commit_id_int = try hash.hexToInt(repo_opts.hash, oid);
+
+            // several paths can lead here, but the commit is visited once
+            if (try self.visited.getSlot(commit_id_int) != null) return;
+            try self.visited.put(commit_id_int, .{ .uint = 1 });
+
+            if (self.snapshots) |snapshots| {
+                if (try snapshots.getCursor(commit_id_int) != null) return;
             }
 
-            const oid_hex = std.fmt.bytesToHex(oid, .lower);
-            const commit_id_int = try hash.hexToInt(repo_opts.hash, &oid_hex);
-
-            var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &oid_hex);
+            var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, oid);
             defer object.deinit();
+            const metadata = switch (object.content) {
+                .commit => |commit| commit.metadata,
+                // a tag ref points at the commit to visit
+                .tag => |tag| {
+                    try pending.append(allocator, tag.target);
+                    return;
+                },
+                else => return,
+            };
 
-            var is_base_oid = false;
-            if (object.content.commit.metadata.firstParent()) |parent_oid| {
+            // a commit whose first parent has patches can be written right away.
+            // the rest wait in the temp db until that parent has been written.
+            if (metadata.firstParent()) |parent_oid| {
                 const parent_commit_id_int = try hash.hexToInt(repo_opts.hash, parent_oid);
-
-                if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |commit_id_to_snapshot_cursor| {
-                    const commit_id_to_snapshot = try DB.HashMap(.read_only).init(commit_id_to_snapshot_cursor);
-
-                    // if the commit already has patches, there is nothing to do so exit early
-                    if (try commit_id_to_snapshot.getCursor(commit_id_int)) |_| {
-                        return;
-                    }
-                    // if the commit's parent already has patches, consider this a "base" commit
-                    // (i.e., a commit that is ready to have a patch generated right away)
-                    else if (try commit_id_to_snapshot.getCursor(parent_commit_id_int)) |_| {
-                        is_base_oid = true;
-                    }
-                }
-
-                if (!is_base_oid) {
+                const parent_has_patches = if (self.snapshots) |snapshots| try snapshots.getCursor(parent_commit_id_int) != null else false;
+                if (parent_has_patches) {
+                    try self.oid_queue.put(allocator, try hash.hexToBytes(repo_opts.hash, oid.*), {});
+                } else {
                     const children_cursor = try self.parent_to_children.putCursor(parent_commit_id_int);
                     const children = try TempDB.HashMap(.read_write).init(children_cursor);
                     _ = try children.putCursor(commit_id_int);
                 }
             } else {
-                is_base_oid = true;
+                try self.oid_queue.put(allocator, try hash.hexToBytes(repo_opts.hash, oid.*), {});
             }
-
-            if (is_base_oid) {
-                try self.oid_queue.put(allocator, oid.*, {});
-            }
-
             self.commit_count += 1;
+
+            try pending.appendSlice(allocator, metadata.parent_oids orelse &.{});
         }
 
         pub fn write(

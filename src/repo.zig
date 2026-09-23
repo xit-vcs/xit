@@ -1420,22 +1420,16 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         try config.add(state, ctx.io, .{ .name = "merge.algorithm", .value = "patch" });
                     }
 
-                    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.io, ctx.allocator, .{ .kind = .commit });
-                    defer obj_iter.deinit();
-
-                    // add refs
-                    {
-                        var ref_iter = try rf.AllRefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.allocator);
-                        defer ref_iter.deinit();
-
-                        while (try ref_iter.next()) |ref| {
-                            if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) |oid| {
-                                try obj_iter.include(&oid);
-                            }
-                        }
+                    // every ref is a tip
+                    var tips: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+                    defer tips.deinit(ctx.allocator);
+                    var ref_iter = try rf.AllRefIterator(repo_kind, repo_opts).init(state.readOnly(), ctx.allocator);
+                    defer ref_iter.deinit();
+                    while (try ref_iter.next()) |ref| {
+                        if (try rf.readRecur(repo_kind, repo_opts, state.readOnly(), ctx.io, .{ .ref = ref })) |oid| try tips.append(ctx.allocator, oid);
                     }
 
-                    try patch.writePatches(repo_opts, state, ctx.io, ctx.allocator, &obj_iter, ctx.progress_ctx_maybe);
+                    try patch.writePatches(repo_opts, state, ctx.io, ctx.allocator, tips.items, ctx.progress_ctx_maybe);
 
                     try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .patch = .{ .status = .all } });
                 }
