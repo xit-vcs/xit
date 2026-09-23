@@ -203,13 +203,13 @@ fn uploadPack(
                 .eof => {},
                 .data => |line| {
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
                     }
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
                     }
                 },
                 .delim => return error.UnexpectedDelim,
@@ -274,6 +274,7 @@ const UploadPack = struct {
     use_sideband: bool = false,
     writer_use_sideband: bool = false,
     use_ofs_delta: bool = false,
+    no_progress: bool = false,
     no_done: bool = false,
     is_stateless: bool = false,
     filter_capability_requested: bool = false,
@@ -712,7 +713,10 @@ const UploadPack = struct {
                         self.use_ofs_delta = true;
                         continue;
                     }
-                    if (std.mem.eql(u8, arg, "no-progress")) continue;
+                    if (std.mem.eql(u8, arg, "no-progress")) {
+                        self.no_progress = true;
+                        continue;
+                    }
                     if (std.mem.eql(u8, arg, "include-tag")) continue;
                     if (std.mem.eql(u8, arg, "done")) {
                         self.done = true;
@@ -964,6 +968,9 @@ const UploadPack = struct {
             }
             if (common.hasFeature(features, "ofs-delta")) {
                 self.use_ofs_delta = true;
+            }
+            if (common.hasFeature(features, "no-progress")) {
+                self.no_progress = true;
             }
             if (self.allow_filter and common.hasFeature(features, "filter")) {
                 self.filter_capability_requested = true;
@@ -1432,7 +1439,7 @@ fn uploadPackV2(
             try upload_pack.sendShallowInfo(hex_len, writer, repo_kind, repo_opts, state, io, allocator, &our_refs, &shallow_oids, &deepen_not, &want_obj);
 
             try writePktResponse(writer, upload_pack.writer_use_sideband, "packfile\n", .{});
-            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, progress_ctx_maybe);
+            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
             break :upload_pack;
         },
     }
