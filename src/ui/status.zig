@@ -82,6 +82,10 @@ pub fn StatusListItem(comptime Widget: type) type {
         pub fn setBorder(self: *StatusListItem(Widget), border_style: ?wgt.BorderStyle) void {
             self.box.children.values()[1].widget.text_box.options.border_style = border_style;
         }
+
+        pub fn setInverted(self: *StatusListItem(Widget), inverted: bool) void {
+            self.box.children.values()[1].widget.text_box.options.inverted = inverted;
+        }
     };
 }
 
@@ -122,10 +126,12 @@ pub fn StatusList(comptime Widget: type) type {
             self.clearGrid();
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *item| {
-                item.widget.ui_status_list_item.setBorder(if (self.getFocus().child_id == id)
+                const selected = self.getFocus().child_id == id;
+                item.widget.ui_status_list_item.setBorder(if (selected)
                     (if (root_focus.grandchild_id == id) .double else .single)
                 else
                     .hidden);
+                item.widget.ui_status_list_item.setInverted(selected);
             }
             try self.scroll.build(allocator, constraint, root_focus);
         }
@@ -223,7 +229,9 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         pub fn build(self: *StatusTabs(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
-                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
+                const selected = self.getFocus().child_id == id;
+                tab.widget.text_box.options.border_style = if (selected) .single else .hidden;
+                tab.widget.text_box.options.inverted = selected;
             }
             try self.box.build(allocator, constraint, root_focus);
         }

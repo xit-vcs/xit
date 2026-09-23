@@ -54,7 +54,9 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         pub fn build(self: *RootTabs(Widget, repo_kind), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
-                tab.widget.text_box.options.border_style = if (self.getFocus().child_id == id) .single else .hidden;
+                const selected = self.getFocus().child_id == id;
+                tab.widget.text_box.options.border_style = if (selected) .single else .hidden;
+                tab.widget.text_box.options.inverted = selected;
             }
             try self.box.build(allocator, constraint, root_focus);
         }

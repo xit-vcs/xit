@@ -234,7 +234,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             defer allocator.free(buf);
 
             // add new diff widget
-            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try diffTextBox(allocator, buf);
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -256,7 +256,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             defer allocator.free(buf);
 
             // add new diff widget
-            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none });
+            var text_box = try diffTextBox(allocator, buf);
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -273,4 +273,26 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             return self.box.children.values()[0].widget.scroll.child.box.children.count() == 0;
         }
     };
+}
+
+// a borderless text box for diff text, with added lines green and removed
+// lines red. the text box copies the text, so the spans only live until init.
+fn diffTextBox(allocator: std.mem.Allocator, text: []const u8) !wgt.TextBox {
+    var spans: std.ArrayList(wgt.Span) = .empty;
+    defer spans.deinit(allocator);
+    var start: usize = 0;
+    while (start < text.len) {
+        // each span keeps its trailing newline so the text box still breaks there
+        const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
+        const line = text[start..end];
+        const style: wgt.Style = if (std.mem.startsWith(u8, line, "+"))
+            .{ .fg = .{ .ansi = .green } }
+        else if (std.mem.startsWith(u8, line, "-"))
+            .{ .fg = .{ .ansi = .red } }
+        else
+            .{};
+        try spans.append(allocator, .{ .text = line, .style = style });
+        start = end;
+    }
+    return try wgt.TextBox.initSpans(allocator, spans.items, .{ .border_style = .hidden, .wrap_kind = .none });
 }
