@@ -56,7 +56,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
                 const selected = self.getFocus().child_id == id;
                 tab.widget.text_box.options.border_style = if (selected) .single else .hidden;
-                tab.widget.text_box.options.inverted = selected;
+                tab.widget.text_box.options.invert = selected;
             }
             try self.box.build(allocator, constraint, root_focus);
         }

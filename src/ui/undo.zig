@@ -58,7 +58,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             for (children.keys(), children.values(), 0..) |id, *item, index| {
                 const selected = self.getFocus().child_id == id;
                 item.widget.text_box.options.border_style = if (selected) .single else .hidden;
-                item.widget.text_box.options.inverted = selected;
+                item.widget.text_box.options.invert = selected;
                 item.widget.text_box.options.bottom_label = if (root_focus.grandchild_id != id or index + 1 == self.tx_count)
                     ""
                 else if (index == 0)

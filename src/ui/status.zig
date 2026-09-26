@@ -84,7 +84,7 @@ pub fn StatusListItem(comptime Widget: type) type {
         }
 
         pub fn setInverted(self: *StatusListItem(Widget), inverted: bool) void {
-            self.box.children.values()[1].widget.text_box.options.inverted = inverted;
+            self.box.children.values()[1].widget.text_box.options.invert = inverted;
         }
     };
 }
@@ -231,7 +231,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
                 const selected = self.getFocus().child_id == id;
                 tab.widget.text_box.options.border_style = if (selected) .single else .hidden;
-                tab.widget.text_box.options.inverted = selected;
+                tab.widget.text_box.options.invert = selected;
             }
             try self.box.build(allocator, constraint, root_focus);
         }
