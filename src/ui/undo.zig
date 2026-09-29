@@ -12,6 +12,7 @@ const un = @import("../undo.zig");
 
 const undo_label = " press enter to undo this ";
 const undo_all_label = " press enter to undo this and all above ";
+const undone_label = " (undone) ";
 
 pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
@@ -19,6 +20,10 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
         repo: *rp.Repo(repo_kind, repo_opts),
         session: *ui.Session,
         tx_count: usize,
+        // whether each row's transaction was discarded by a later undo
+        undone: std.ArrayList(bool),
+        // the oldest transaction discarded by the undos above the rows added so far
+        undone_from: ?u64,
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), session: *ui.Session) !UndoList(Widget, repo_kind, repo_opts) {
             const history = try rp.Repo(repo_kind, repo_opts).DB.ArrayList(.read_only).init(repo.core.db.rootCursor().readOnly());
@@ -36,6 +41,8 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                     .repo = repo,
                     .session = session,
                     .tx_count = tx_count,
+                    .undone = .empty,
+                    .undone_from = null,
                 };
             };
             errdefer self.deinit(allocator);
@@ -50,6 +57,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
 
         pub fn deinit(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator) void {
             self.scroll.deinit(allocator);
+            self.undone.deinit(allocator);
         }
 
         pub fn build(self: *UndoList(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
@@ -60,7 +68,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 item.widget.text_box.options.border_style = if (selected) .single else .hidden;
                 item.widget.text_box.options.invert = selected;
                 item.widget.text_box.options.bottom_label = if (root_focus.grandchild_id != id or index + 1 == self.tx_count)
-                    ""
+                    (if (self.undone.items[index]) undone_label else "")
                 else if (index == 0)
                     undo_label
                 else
@@ -145,10 +153,21 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
 
                 const moment = try self.repo.core.momentAt(ii);
 
+                const record = try un.read(repo_opts, moment, &record_buffer);
+
+                // an undo discards everything from the one it restored to down
+                // to the row below itself. a discarded undo discards nothing itself
+                const row_undone = if (self.undone_from) |from| ii >= from else false;
+                if (!row_undone) {
+                    if (try undoneFrom(allocator, record)) |from| self.undone_from = from;
+                }
+                try self.undone.append(allocator, row_undone);
+                errdefer _ = self.undone.pop();
+
                 label.clearRetainingCapacity();
                 try label.writer.print("{} - ", .{ii});
-                if (try un.read(repo_opts, moment, &record_buffer)) |record| {
-                    try un.format(repo_opts, &self.repo.core, allocator, record, &label.writer);
+                if (record) |value| {
+                    try un.format(repo_opts, &self.repo.core, allocator, value, &label.writer);
                 } else {
                     try label.writer.writeAll("(empty description)");
                 }
@@ -161,6 +180,18 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             }
         }
     };
+}
+
+// the oldest transaction `record` discarded, or null when it is not an undo
+fn undoneFrom(allocator: std.mem.Allocator, record: ?un.Record) !?u64 {
+    const value = record orelse return null;
+    if (!std.mem.eql(u8, value.action_kind, @tagName(un.ActionKind.undo))) return null;
+    const parsed = std.json.parseFromSlice(un.Undo, allocator, value.payload, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    };
+    defer parsed.deinit();
+    return parsed.value.index;
 }
 
 pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
