@@ -263,7 +263,6 @@ pub fn runPrint(
                 try cmd.printHelp(.init, run_opts.err);
                 return error.HandledError;
             },
-            error.BrokenPipe => return,
             error.BareRepository => "this operation requires a worktree and cannot run on a bare repository\n",
             error.UnsupportedRepoLayout => "this repository layout is not supported\n",
             error.UnsupportedOperationForSha256 => "the requested operation is not supported for this sha256 git repository\n",
@@ -871,6 +870,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     runPrint(.xit, .{ .ProgressCtx = ProgressCtx }, io, allocator, args.items, cwd_path, run_opts) catch |err| switch (err) {
         error.HandledError => return 1,
+        // the reader closed stdout early (like quitting `less`), so stop quietly
+        error.WriteFailed => if (stdout_writer.err) |write_err| switch (write_err) {
+            error.BrokenPipe => return 0,
+            else => return err,
+        } else return err,
         else => |e| return e,
     };
 
