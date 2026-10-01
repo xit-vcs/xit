@@ -1,4 +1,5 @@
 const std = @import("std");
+const xitui = @import("xitui");
 const rp = @import("./repo.zig");
 const work = @import("./workdir.zig");
 const hash = @import("./hash.zig");
@@ -1161,7 +1162,7 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             }
         }
 
-        pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer) !void {
+        pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer, color: bool) !void {
             const offsets = hunk.offsets();
             try writer.print("@@ -{},{} +{},{} @@\n", .{
                 offsets.del_start,
@@ -1170,12 +1171,15 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 offsets.ins_count,
             });
             for (hunk.edits.items) |edit| {
-                const line_iter, const line_num, const prefix = switch (edit) {
-                    .eql => |eql| .{ self.line_iter_b, eql.new_line.num, " " },
-                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+" },
-                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-" },
+                const line_iter, const line_num, const prefix, const style: ?xitui.widget.Style = switch (edit) {
+                    .eql => |eql| .{ self.line_iter_b, eql.new_line.num, " ", null },
+                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+", .{ .fg = .{ .ansi = .green } } },
+                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-", .{ .fg = .{ .ansi = .red } } },
                 };
-                try writer.print("{s} {s}\n", .{ prefix, try line_iter.get(line_num) });
+                if (color) if (style) |s| try xitui.terminal.writeStyle(writer, s);
+                try writer.print("{s} {s}", .{ prefix, try line_iter.get(line_num) });
+                if (color and style != null) try xitui.terminal.attributeReset(writer);
+                try writer.writeAll("\n");
             }
         }
 

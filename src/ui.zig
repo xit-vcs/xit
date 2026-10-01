@@ -177,6 +177,7 @@ pub fn start(
     io: std.Io,
     allocator: std.mem.Allocator,
     cmd_kind_maybe: ?cmd.CommandKind,
+    color: bool,
 ) !void {
     // init root widget
     var root = try rootWidget(repo_kind, repo_opts, repo, io, allocator, cmd_kind_maybe);
@@ -185,6 +186,7 @@ pub fn start(
     // init term
     var terminal = try term.Terminal.init(io, allocator);
     defer terminal.deinit(io);
+    terminal.render_state.no_color = !color;
 
     // set term as active so it will be properly cooked
     // when a panic/segfault happens

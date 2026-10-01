@@ -36,7 +36,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     var null_writer = std.Io.Writer.Discarding.init(&.{});
     var environ_map = std.process.Environ.Map.init(allocator);
     defer environ_map.deinit();
-    const run_opts = main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer, .environ_map = &environ_map };
+    const run_opts = main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer, .environ_map = &environ_map, .color = false };
 
     // start libgit
     if (repo_kind == .git) _ = c.git_libgit2_init();

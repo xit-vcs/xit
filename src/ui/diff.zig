@@ -233,8 +233,8 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             };
             defer allocator.free(buf);
 
-            // add new diff widget
-            var text_box = try diffTextBox(allocator, buf);
+            // add new diff widget with bold header lines
+            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none, .style = .{ .bold = true } });
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -249,7 +249,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 var writer = std.Io.Writer.Allocating.init(allocator);
                 errdefer writer.deinit();
 
-                try hunk_iter.writeHunk(hunk, &writer.writer);
+                try hunk_iter.writeHunk(hunk, &writer.writer, false);
 
                 break :blk try writer.toOwnedSlice();
             };

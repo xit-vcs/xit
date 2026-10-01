@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const run_opts = xit.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
+    const run_opts = xit.main.RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map, .color = false };
 
     {
         var git_repo = try rp.Repo(.git, .{}).open(io, allocator, .{ .path = temp_path });

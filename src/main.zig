@@ -35,6 +35,7 @@ pub const RunOpts = struct {
     out: *std.Io.Writer,
     err: *std.Io.Writer,
     environ_map: *std.process.Environ.Map,
+    color: bool,
 };
 
 // std.Progress.start can only be called once per process
@@ -142,16 +143,19 @@ pub fn run(
             },
         },
         .help => |cmd_kind_maybe| try cmd.printHelp(cmd_kind_maybe, run_opts.out),
-        .tui => |cmd_kind_maybe| if (any_repo_opts.hash) |hash_kind| {
-            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
-            defer repo.deinit(io, allocator);
-            try ui.start(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cmd_kind_maybe);
-        } else {
-            // if no hash was specified, use AnyRepo to detect the hash being used
-            var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
-            defer any_repo.deinit(io, allocator);
-            switch (any_repo) {
-                inline else => |*repo| try ui.start(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_kind_maybe),
+        .tui => |cmd_kind_maybe| {
+            const color = std.mem.eql(u8, run_opts.environ_map.get("NO_COLOR") orelse "", "");
+            if (any_repo_opts.hash) |hash_kind| {
+                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind)).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
+                defer repo.deinit(io, allocator);
+                try ui.start(repo_kind, any_repo_opts.toRepoOptsWithHash(hash_kind), &repo, io, allocator, cmd_kind_maybe, color);
+            } else {
+                // if no hash was specified, use AnyRepo to detect the hash being used
+                var any_repo = try rp.AnyRepo(repo_kind, any_repo_opts).open(io, allocator, .{ .path = cwd_path, .global_config_path = global_config_path });
+                defer any_repo.deinit(io, allocator);
+                switch (any_repo) {
+                    inline else => |*repo| try ui.start(repo.self_repo_kind, repo.self_repo_opts, repo, io, allocator, cmd_kind_maybe, color),
+                }
             }
         },
         .cli => |cli_cmd| switch (cli_cmd) {
@@ -484,12 +488,15 @@ fn runCommand(
                 var hunk_iter = try df.HunkIterator(repo_kind, repo_opts).init(allocator, &line_iter_pair.a, &line_iter_pair.b);
                 defer hunk_iter.deinit(allocator);
                 for (hunk_iter.header_lines.items) |header_line| {
-                    try run_opts.out.print("{s}\n", .{header_line});
+                    if (run_opts.color) try term.writeStyle(run_opts.out, .{ .bold = true });
+                    try run_opts.out.print("{s}", .{header_line});
+                    if (run_opts.color) try term.attributeReset(run_opts.out);
+                    try run_opts.out.writeAll("\n");
                 }
                 while (try hunk_iter.next(allocator)) |*hunk_ptr| {
                     var hunk = hunk_ptr.*;
                     defer hunk.deinit(allocator);
-                    try hunk_iter.writeHunk(&hunk, run_opts.out);
+                    try hunk_iter.writeHunk(&hunk, run_opts.out, run_opts.color);
                 }
             }
         },
@@ -852,7 +859,12 @@ pub fn main(init: std.process.Init) !u8 {
 
     var stdout_writer = std.Io.File.stdout().writer(io, &.{});
     var stderr_writer = std.Io.File.stderr().writer(io, &.{});
-    const run_opts = RunOpts{ .out = &stdout_writer.interface, .err = &stderr_writer.interface, .environ_map = init.environ_map };
+    const run_opts = RunOpts{
+        .out = &stdout_writer.interface,
+        .err = &stderr_writer.interface,
+        .environ_map = init.environ_map,
+        .color = std.mem.eql(u8, init.environ_map.get("NO_COLOR") orelse "", "") and try std.Io.File.stdout().isTty(io),
+    };
 
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
