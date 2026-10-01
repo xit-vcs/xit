@@ -1161,7 +1161,7 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             }
         }
 
-        pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer) !void {
+        pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer, comptime ansi: bool) !void {
             const offsets = hunk.offsets();
             try writer.print("@@ -{},{} +{},{} @@\n", .{
                 offsets.del_start,
@@ -1172,10 +1172,14 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             for (hunk.edits.items) |edit| {
                 const line_iter, const line_num, const prefix = switch (edit) {
                     .eql => |eql| .{ self.line_iter_b, eql.new_line.num, " " },
-                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+" },
-                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-" },
+                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, if (ansi) "\x1b[32m+" else "+" },
+                    .del => |del| .{ self.line_iter_a, del.old_line.num, if (ansi) "\x1b[31m-" else "-" },
                 };
-                try writer.print("{s} {s}\n", .{ prefix, try line_iter.get(line_num) });
+                try writer.print("{s} {s}{s}\n", .{
+                    prefix,
+                    try line_iter.get(line_num),
+                    if (ansi) "\x1b[0m" else "",
+                });
             }
         }
 

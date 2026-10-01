@@ -489,7 +489,7 @@ fn runCommand(
                 while (try hunk_iter.next(allocator)) |*hunk_ptr| {
                     var hunk = hunk_ptr.*;
                     defer hunk.deinit(allocator);
-                    try hunk_iter.writeHunk(&hunk, run_opts.out);
+                    try hunk_iter.writeHunk(&hunk, run_opts.out, true);
                 }
             }
         },

@@ -249,7 +249,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                 var writer = std.Io.Writer.Allocating.init(allocator);
                 errdefer writer.deinit();
 
-                try hunk_iter.writeHunk(hunk, &writer.writer);
+                try hunk_iter.writeHunk(hunk, &writer.writer, false);
 
                 break :blk try writer.toOwnedSlice();
             };
