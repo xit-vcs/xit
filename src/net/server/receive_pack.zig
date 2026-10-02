@@ -232,6 +232,60 @@ pub fn run(
     }
 }
 
+// advertise a repo that doesn't exist yet. the dummy line is sha1-width so
+// clients without object-format support still parse it, and listing every
+// hash kind lets a newer client name its own in its first command.
+pub fn advertiseUncreated(
+    comptime repo_kind: rp.RepoKind,
+    writer: *std.Io.Writer,
+    options: Options,
+) !void {
+    if (options.protocol_version == .v1) {
+        try pkt.writePktLineFmt(writer, "version 1\n", .{});
+    }
+
+    const defaults: ReceivePack = .{};
+    var line_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
+    var line: std.Io.Writer = .fixed(&line_buf);
+    try line.writeAll(&[_]u8{'0'} ** hash.hexLen(.sha1) ++ " capabilities^{}");
+    try line.writeByte(0);
+    try writeCapabilities(repo_kind, &line, defaults.prefer_ofs_delta);
+    try line.print(" object-format={s} object-format={s}\n", .{ common.hashName(.sha1), common.hashName(.sha256) });
+    try pkt.writePktLine(writer, line.buffered());
+    try pkt.writePktFlush(writer);
+}
+
+// peek the client's first command without consuming it and return the hash
+// kind it names (sha1 when it names none). null means the client sent no
+// commands, so nothing should be created.
+pub fn peekObjectFormat(reader: *std.Io.Reader) !?hash.HashKind {
+    const header = reader.peekArray(pkt.PKT_LEN_SIZE) catch |err| switch (err) {
+        error.EndOfStream => return null,
+        else => |e| return e,
+    };
+    const len = std.fmt.parseInt(usize, header, 16) catch return error.InvalidPktLineHeader;
+    if (len == 0) return null;
+    if (len < pkt.PKT_LEN_SIZE) return error.InvalidPktLineLength;
+    if (len > reader.buffer.len) return error.PktLineTooLong;
+
+    const line = (try reader.peek(len))[pkt.PKT_LEN_SIZE..];
+    const null_pos = std.mem.indexOfScalar(u8, line, 0) orelse return .sha1;
+    const features = std.mem.trim(u8, line[null_pos + 1 ..], " \r\n");
+    const format = common.getFeatureValue(features, "object-format") orelse return .sha1;
+    return std.meta.stringToEnum(hash.HashKind, format) orelse error.UnsupportedObjectFormat;
+}
+
+fn writeCapabilities(comptime repo_kind: rp.RepoKind, writer: *std.Io.Writer, prefer_ofs_delta: bool) !void {
+    try writer.writeAll("report-status report-status-v2 delete-refs side-band-64k quiet");
+    // only the xit backend can roll back a partially applied push
+    if (.xit == repo_kind) {
+        try writer.writeAll(" atomic");
+    }
+    if (prefer_ofs_delta) {
+        try writer.writeAll(" ofs-delta");
+    }
+}
+
 const ReceivePack = struct {
     // config
     prefer_ofs_delta: bool = true,
@@ -291,14 +345,7 @@ const ReceivePack = struct {
             var line: std.Io.Writer = .fixed(&line_buf);
             try line.print("{s} {s}", .{ oid, path });
             try line.writeByte(0);
-            try line.writeAll("report-status report-status-v2 delete-refs side-band-64k quiet");
-            // only the xit backend can roll back a partially applied push
-            if (.xit == repo_kind) {
-                try line.writeAll(" atomic");
-            }
-            if (self.prefer_ofs_delta) {
-                try line.writeAll(" ofs-delta");
-            }
+            try writeCapabilities(repo_kind, &line, self.prefer_ofs_delta);
             try line.print(" object-format={s}\n", .{common.hashName(repo_opts.hash)});
             try pkt.writePktLine(writer, line.buffered());
             self.sent_capabilities = true;

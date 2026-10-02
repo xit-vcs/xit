@@ -189,11 +189,22 @@ pub fn Pkt(comptime hash_kind: hash.HashKind) type {
 
         fn refPkt(allocator: std.mem.Allocator, content: []const u8, found_capabilities: *bool) !Pkt(hash_kind) {
             // the content looks like "<oid> <name>[\x00<capabilities>]"
+            var oid_len: usize = comptime hash.hexLen(hash_kind);
             if (!found_capabilities.*) {
                 const remote_hash = try refObjectFormat(content);
-                if (remote_hash != hash_kind) return error.ObjectFormatMismatch;
+                if (remote_hash != hash_kind) {
+                    // a server that can create a missing repo in any format lists
+                    // them all, on a dummy line whose oid is sized by the first
+                    if (!refListsObjectFormat(content, hash_kind)) return error.ObjectFormatMismatch;
+                    oid_len = switch (remote_hash) {
+                        inline else => |kind| hash.hexLen(kind),
+                    };
+                    const is_dummy = content.len >= oid_len and
+                        std.mem.indexOfNone(u8, content[0..oid_len], "0") == null and
+                        std.mem.startsWith(u8, content[oid_len..], " capabilities^{}\x00");
+                    if (!is_dummy) return error.ObjectFormatMismatch;
+                }
             }
-            const oid_len = comptime hash.hexLen(hash_kind);
             if (content.len < oid_len) {
                 return error.InvalidPacket;
             }
@@ -216,7 +227,10 @@ pub fn Pkt(comptime hash_kind: hash.HashKind) type {
             errdefer allocator.free(head_name);
 
             var head = net.RemoteHead(hash_kind).init(head_name);
-            head.oid = oid_hex.*;
+            // the dummy line's zero oid is already in place
+            if (oid_len == comptime hash.hexLen(hash_kind)) {
+                head.oid = oid_hex[0..comptime hash.hexLen(hash_kind)].*;
+            }
 
             var caps_maybe: ?[]const u8 = null;
             errdefer if (caps_maybe) |caps| allocator.free(caps);
@@ -239,19 +253,24 @@ pub fn Pkt(comptime hash_kind: hash.HashKind) type {
     };
 }
 
+// the first listed format, which sizes the advertised oids
 fn parseObjectFormat(caps: ?[]const u8) !hash.HashKind {
     var iter = std.mem.tokenizeAny(u8, caps orelse return .sha1, " \t\r\n");
-    var result: ?hash.HashKind = null;
     while (iter.next()) |cap| {
         if (std.mem.startsWith(u8, cap, "object-format=")) {
-            const kind = std.meta.stringToEnum(hash.HashKind, cap["object-format=".len..]) orelse return error.UnsupportedObjectFormat;
-            if (result) |previous| {
-                if (previous != kind) return error.UnsupportedObjectFormat;
-            }
-            result = kind;
+            return std.meta.stringToEnum(hash.HashKind, cap["object-format=".len..]) orelse error.UnsupportedObjectFormat;
         }
     }
-    return result orelse .sha1;
+    return .sha1;
+}
+
+fn refListsObjectFormat(content: []const u8, kind: hash.HashKind) bool {
+    const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else return false;
+    var iter = std.mem.tokenizeAny(u8, caps, " \t\r\n");
+    while (iter.next()) |cap| {
+        if (std.mem.startsWith(u8, cap, "object-format=") and std.mem.eql(u8, cap["object-format=".len..], @tagName(kind))) return true;
+    }
+    return false;
 }
 
 /// dupe the line with its trailing newline (if any) removed
