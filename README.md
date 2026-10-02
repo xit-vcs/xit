@@ -9,7 +9,7 @@
 ░██    ░██ ░██    ░████ 
                         </code></p>
 
-You're looking at xit, a new version control system. It's pronounced like "zit" (or "shit" if you prefer). Here be dragons, as they say. This is new and unstable software, but the ambition is to make a worthy successor to git. Here are the main features:
+You're looking at xit, a version control system. It's pronounced like "zit" (or "shit" if you prefer). You can use it from the command line, or you can use it as a library like [Haxy](https://github.com/xit-vcs/haxy) does. Here are the main features:
 
 * git compatible
   * uses the git networking protocol for push/fetch/clone
@@ -44,7 +44,7 @@ xit init test
 cd test
 echo hello > readme.md
 xit add readme.md
-xit commit -m "hello world!"
+xit commit -m "hello world"
 ```
 
 Yeah, that's pretty boring stuff. You can also create branches and perform merges:
@@ -55,7 +55,7 @@ xit branch list
 xit switch stuff
 echo goodbye > readme.md
 xit add readme.md
-xit commit -m "goodbye world!"
+xit commit -m "goodbye world"
 xit switch master
 xit merge stuff
 ```
@@ -141,56 +141,52 @@ http-backend  a CGI program forwarding receive-pack and upload-pack over HTTP.
 To launch the TUI, just run `xit` without arguments, and press escape to quit it. In the repo created above, it'll look like this:
 
 ```
-╔═══╗                                                               
-║log║ status                                                        
-╚═══╝                                                               
-┌──────────────┐    ┌─────────────────────────────────────────────┐ 
-│goodbye world!│    │                                             │ 
-└──────────────┘    │ diff --git a/readme.md b/readme.md          │ 
-                    │ index ce01362..dd7e1c6 100644               │ 
- hello world!       │ --- a/readme.md                             │ 
-                    │ +++ b/readme.md                             │ 
-                    │                                             │ 
-                    │                                             │ 
-                    │                                             │ 
-                    │ @@ -1,2 +1,2 @@                             │ 
-                    │ - hello                                     │ 
-                    │ + goodbye                                   │ 
-                    │                                             │ 
-                    │                                             │ 
-                    │                                             │ 
-                    └─────────────────────────────────────────────┘ 
-                                                                    
- 
+╔═══╗
+║log║ status  config  undo
+╚═══╝
+┌─────────────┐               ┌───────────────────────────────────────────────┐
+│goodbye world│               │                                               │
+└─────────────┘               │ diff --git a/readme.md b/readme.md            │
+                              │ index ce01362..dd7e1c6 100644                 │
+ hello world                  │ --- a/readme.md                               │
+                              │ +++ b/readme.md                               │
+                              │                                               │
+                              │                                               │
+                              │                                               │
+                              │ @@ -1,2 +1,2 @@                               │
+                              │ - hello                                       │
+                              │ + goodbye                                     │
+                              │                                               │
+                              │                                               │
+                              │                                               │
+                              └───────────────────────────────────────────────┘
 ```
 
 Here's what the status tab looks like after making a change to the file:
 
 ```
-     ╔══════╗                                                                
- log ║status║                                                                
-     ╚══════╝                                                                
-           ┌─────────────┐                                                   
- added (0) │not added (1)│ not tracked (0)                                   
-           └─────────────┘                                                   
-   ┌─────────┐      ┌─────────────────────────────────────────────┐          
- ± │readme.md│      │                                             │          
-   └─────────┘      │ diff --git a/readme.md b/readme.md          │          
-                    │ index dd7e1c6..68ce77a 100644               │          
-                    │ --- a/readme.md                             │          
-                    │ +++ b/readme.md                             │          
-                    │                                             │          
-                    │                                             │          
-                    │                                             │          
-                    │ @@ -1,2 +1,2 @@                             │          
-                    │ - goodbye                                   │          
-                    │ + bon voyage                                │          
-                    │                                             │          
-                    │                                             │          
-                    │                                             │          
-                    └─────────────────────────────────────────────┘          
-                                                                             
- 
+     ╔══════╗
+ log ║status║ config  undo
+     ╚══════╝
+           ┌─────────────┐
+ added (0) │not added (1)│ not tracked (0)
+           └─────────────┘
+   ┌─────────┐      ┌─────────────────────────────────────────────────────────┐
+ ± │readme.md│      │                                                         │
+   └─────────┘      │ diff --git a/readme.md b/readme.md                      │
+                    │ index dd7e1c6..68ce77a 100644                           │
+                    │ --- a/readme.md                                         │
+                    │ +++ b/readme.md                                         │
+                    │                                                         │
+                    │                                                         │
+                    │                                                         │
+                    │ @@ -1,2 +1,2 @@                                         │
+                    │ - goodbye                                               │
+                    │ + bon voyage                                            │
+                    │                                                         │
+                    │                                                         │
+                    │                                                         │
+                    └─────────────────────────────────────────────────────────┘
 ```
 
 If you're interested in working on this code, [read more](docs/dev.md) about contributing, running tests, and whatnot. As Willy Wonka said, we have so much time, and so little to do!
