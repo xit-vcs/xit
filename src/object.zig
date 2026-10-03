@@ -13,9 +13,9 @@ const tr = @import("./tree.zig");
 const mrg = @import("./merge.zig");
 
 fn compressZlib(comptime buffer_size: usize, io: std.Io, in: std.Io.File, out: std.Io.File) !void {
-    var rbuf = [_]u8{0} ** buffer_size;
-    var wbuf = [_]u8{0} ** buffer_size;
-    var dbuf = [_]u8{0} ** std.compress.flate.max_window_len;
+    var rbuf: [buffer_size]u8 = @splat(0);
+    var wbuf: [buffer_size]u8 = @splat(0);
+    var dbuf: [std.compress.flate.max_window_len]u8 = @splat(0);
     var r = in.reader(io, &rbuf);
     var w = out.writer(io, &wbuf);
     var d = try std.compress.flate.Compress.init(&w.interface, &dbuf, .zlib, .default);
@@ -35,13 +35,13 @@ pub fn writeObject(
     hash_bytes_buffer: *[hash.byteLen(repo_opts.hash)]u8,
 ) !void {
     // serialize object header
-    var header_bytes = [_]u8{0} ** 32;
+    var header_bytes: [32]u8 = @splat(0);
     const header_str = try header.write(&header_bytes);
 
     var hasher = hash.Hasher(repo_opts.hash).init(.{});
     hasher.update(header_str);
 
-    var hash_buffer = [_]u8{0} ** repo_opts.buffer_size;
+    var hash_buffer: [repo_opts.buffer_size]u8 = @splat(0);
     var hashed = reader.hashed(hasher, &hash_buffer);
 
     switch (repo_kind) {
@@ -51,7 +51,7 @@ pub fn writeObject(
             try temp_lock.lock_file.writeStreamingAll(io, header_str);
 
             // copy file into temp file
-            var read_buffer = [_]u8{0} ** repo_opts.read_size;
+            var read_buffer: [repo_opts.read_size]u8 = @splat(0);
             while (true) {
                 const size = try hashed.reader.readSliceShort(&read_buffer);
                 if (size == 0) {
@@ -94,7 +94,7 @@ pub fn writeObject(
 }
 
 pub const Tree = struct {
-    entries: std.StringArrayHashMapUnmanaged([]const u8),
+    entries: std.array_hash_map.String([]const u8),
     arena: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
 
@@ -129,14 +129,14 @@ pub const Tree = struct {
     }
 
     pub fn addBlobEntry(self: *Tree, mode: fs.Mode, name: []const u8, oid: []const u8) !void {
-        const entry = try std.fmt.allocPrint(self.arena.allocator(), "{s} {s}\x00{s}", .{ mode.toStr(), name, oid });
+        const entry = try self.arena.allocator().print("{s} {s}\x00{s}", .{ mode.toStr(), name, oid });
         try self.entries.put(self.arena.allocator(), try self.arena.allocator().dupe(u8, name), entry);
     }
 
     pub fn addTreeEntry(self: *Tree, name: []const u8, oid: []const u8) !void {
-        const entry = try std.fmt.allocPrint(self.arena.allocator(), "40000 {s}\x00{s}", .{ name, oid });
+        const entry = try self.arena.allocator().print("40000 {s}\x00{s}", .{ name, oid });
         // git sorts tree names as if they had a trailing slash
-        const sort_name = try std.fmt.allocPrint(self.arena.allocator(), "{s}/", .{name});
+        const sort_name = try self.arena.allocator().print("{s}/", .{name});
         try self.entries.put(self.arena.allocator(), sort_name, entry);
     }
 
@@ -172,7 +172,7 @@ pub const Tree = struct {
                     path,
                 );
 
-                var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                var tree_hash_bytes_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                 try writeTree(repo_kind, repo_opts, state, io, allocator, &subtree, &tree_hash_bytes_buffer);
 
                 try self.addTreeEntry(name, &tree_hash_bytes_buffer);
@@ -249,7 +249,7 @@ fn sign(
         .xit => ".xit",
     };
     const content_file_name = "xit_signing_buffer";
-    const content_file_path = try std.fs.path.join(allocator, &.{ state.core.work_path, repo_dir_name, content_file_name });
+    const content_file_path = try std.Io.Dir.path.join(allocator, &.{ state.core.work_path, repo_dir_name, content_file_name });
     defer allocator.free(content_file_path);
 
     // write the commit content to a file
@@ -282,7 +282,7 @@ fn sign(
             state.core.repo_dir.deleteFile(io, sig_file_name) catch {};
         }
 
-        var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+        var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
         var sig_file_reader = sig_file.reader(io, &reader_buffer);
         var sig_lines: std.ArrayList([]const u8) = .empty;
 
@@ -344,9 +344,9 @@ pub fn writeCommitWithoutRef(
     defer arena.deinit();
 
     var metadata_lines: std.ArrayList([]const u8) = .empty;
-    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tree {s}", .{tree_oid}));
+    try metadata_lines.append(arena.allocator(), try arena.allocator().print("tree {s}", .{tree_oid}));
     for (metadata.parent_oids orelse &.{}) |parent_oid| {
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "parent {s}", .{parent_oid}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("parent {s}", .{parent_oid}));
     }
 
     const author = metadata.author orelse return error.AuthorNotFound;
@@ -354,12 +354,12 @@ pub fn writeCommitWithoutRef(
     for ([_][]const u8{ "author", "committer" }, [_][]const u8{ author, metadata.committer orelse author }) |kind, identity| {
         try metadata_lines.append(arena.allocator(), try formatCommitIdentity(arena.allocator(), kind, identity, timestamp));
     }
-    try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
+    try metadata_lines.append(arena.allocator(), try arena.allocator().print("\n{s}", .{metadata.message}));
 
     const commit_contents = try std.mem.join(allocator, "\n", metadata_lines.items);
     defer allocator.free(commit_contents);
 
-    var oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
     var reader = std.Io.Reader.fixed(commit_contents);
     try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &oid_bytes);
     return std.fmt.bytesToHex(oid_bytes, .lower);
@@ -406,7 +406,7 @@ pub fn writeCommit(
 
     const tree_hash_hex = if (tree_maybe) |tree| blk: {
         // hash the tree
-        var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        var tree_hash_bytes_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
         try writeTree(repo_kind, repo_opts, state, io, allocator, tree, &tree_hash_bytes_buffer);
         const hash_hex = std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
 
@@ -430,7 +430,7 @@ pub fn writeCommit(
         // hash an empty tree
         var tree = try Tree.init(allocator);
         defer tree.deinit();
-        var tree_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        var tree_hash_bytes_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
         try writeTree(repo_kind, repo_opts, state, io, allocator, &tree, &tree_hash_bytes_buffer);
         break :blk std.fmt.bytesToHex(tree_hash_bytes_buffer, .lower);
     } else blk: {
@@ -450,9 +450,9 @@ pub fn writeCommit(
 
         var metadata_lines: std.ArrayList([]const u8) = .empty;
 
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tree {s}", .{tree_hash_hex}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("tree {s}", .{tree_hash_hex}));
         for (parent_oids) |parent_oid| {
-            try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "parent {s}", .{parent_oid}));
+            try metadata_lines.append(arena.allocator(), try arena.allocator().print("parent {s}", .{parent_oid}));
         }
 
         const ts: i64 = if (metadata.timestamp != 0)
@@ -464,7 +464,7 @@ pub fn writeCommit(
             try metadata_lines.append(arena.allocator(), try formatCommitIdentity(arena.allocator(), kind, identity, ts));
         }
 
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{metadata.message}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("\n{s}", .{metadata.message}));
 
         // sign if the config asks for it
         if (try signingKey(repo_kind, repo_opts, &config, "commit")) |signing_key| {
@@ -477,9 +477,9 @@ pub fn writeCommit(
             const message = metadata_lines.pop() orelse unreachable; // remove the message
             for (sig_lines, 0..) |line, i| {
                 const sig_line = if (i == 0)
-                    try std.fmt.allocPrint(arena.allocator(), "{s} {s}", .{ sig_header, line })
+                    try arena.allocator().print("{s} {s}", .{ sig_header, line })
                 else
-                    try std.fmt.allocPrint(arena.allocator(), " {s}", .{line});
+                    try arena.allocator().print(" {s}", .{line});
                 try metadata_lines.append(arena.allocator(), sig_line);
             }
 
@@ -490,14 +490,14 @@ pub fn writeCommit(
     };
     defer allocator.free(commit_contents);
 
-    var commit_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var commit_hash_bytes_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
     var reader = std.Io.Reader.fixed(commit_contents);
     try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .commit, .size = commit_contents.len }, &commit_hash_bytes_buffer);
 
     const commit_hash_hex = std.fmt.bytesToHex(commit_hash_bytes_buffer, .lower);
 
     // write commit id to ref
-    var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+    var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
     const ref_path = try ref.toPath(&ref_path_buffer);
     try rf.writeRecur(repo_kind, repo_opts, state, io, ref_path, &commit_hash_hex);
 
@@ -506,18 +506,18 @@ pub fn writeCommit(
 
 fn formatCommitIdentity(allocator: std.mem.Allocator, kind: []const u8, value: []const u8, timestamp: i64) ![]u8 {
     const identity = std.mem.trimEnd(u8, value, " \t");
-    if (identity.len == 0 or std.mem.indexOfAny(u8, identity, "\r\n") != null) return error.InvalidCommitIdentity;
-    if (std.mem.lastIndexOfScalar(u8, identity, '>')) |end| {
+    if (identity.len == 0 or std.mem.findAny(u8, identity, "\r\n") != null) return error.InvalidCommitIdentity;
+    if (std.mem.findScalarLast(u8, identity, '>')) |end| {
         var date = std.mem.tokenizeAny(u8, identity[end + 1 ..], " \t");
         if (date.next()) |seconds| {
             _ = std.fmt.parseInt(u64, seconds, 10) catch return error.InvalidCommitIdentity;
             const zone = date.next() orelse return error.InvalidCommitIdentity;
             if (date.next() != null or zone.len != 5 or (zone[0] != '+' and zone[0] != '-')) return error.InvalidCommitIdentity;
             for (zone[1..]) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidCommitIdentity;
-            return std.fmt.allocPrint(allocator, "{s} {s} {s} {s}", .{ kind, identity[0 .. end + 1], seconds, zone });
+            return allocator.print("{s} {s} {s} {s}", .{ kind, identity[0 .. end + 1], seconds, zone });
         }
     }
-    return std.fmt.allocPrint(allocator, "{s} {s} {} +0000", .{ kind, identity, timestamp });
+    return allocator.print("{s} {s} {} +0000", .{ kind, identity, timestamp });
 }
 
 pub fn userIdentity(
@@ -530,7 +530,7 @@ pub fn userIdentity(
     const user_section = config.sections.get("user") orelse return error.UserConfigNotFound;
     const name = user_section.get("name") orelse return error.UserConfigNotFound;
     const email = user_section.get("email") orelse return error.UserConfigNotFound;
-    return try std.fmt.allocPrint(allocator, "{s} <{s}>", .{ name, email });
+    return try allocator.print("{s} <{s}>", .{ name, email });
 }
 
 pub fn writeTag(
@@ -557,16 +557,16 @@ pub fn writeTag(
             break :kind_blk obj_rdr.header().kind;
         };
 
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "object {s}", .{target_oid}));
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "type {s}", .{kind.name()}));
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tag {s}", .{input.name}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("object {s}", .{target_oid}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("type {s}", .{kind.name()}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("tag {s}", .{input.name}));
 
         const ts = if (repo_opts.is_test) 0 else std.Io.Timestamp.now(io, .real).toSeconds();
 
         const tagger = input.tagger orelse try userIdentity(repo_kind, repo_opts, &config, arena.allocator());
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "tagger {s} {} +0000", .{ tagger, ts }));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("tagger {s} {} +0000", .{ tagger, ts }));
 
-        try metadata_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "\n{s}", .{input.message orelse ""}));
+        try metadata_lines.append(arena.allocator(), try arena.allocator().print("\n{s}", .{input.message orelse ""}));
 
         // sign if the config asks for it
         if (try signingKey(repo_kind, repo_opts, &config, "tag")) |signing_key| {
@@ -581,7 +581,7 @@ pub fn writeTag(
     };
     defer allocator.free(tag_contents);
 
-    var tag_hash_bytes_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var tag_hash_bytes_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
     var reader = std.Io.Reader.fixed(tag_contents);
     try writeObject(repo_kind, repo_opts, state, io, allocator, &reader, .{ .kind = .tag, .size = tag_contents.len }, &tag_hash_bytes_buffer);
 
@@ -685,14 +685,14 @@ pub const ObjectHeader = struct {
         const MAX_SIZE: usize = 16;
 
         // read the object kind
-        var object_kind_buf = [_]u8{0} ** MAX_SIZE;
+        var object_kind_buf: [MAX_SIZE]u8 = @splat(0);
         var object_kind_writer = std.Io.Writer.fixed(&object_kind_buf);
         const object_kind_size = try reader.streamDelimiter(&object_kind_writer, ' ');
         const object_kind = object_kind_buf[0..object_kind_size];
         reader.toss(1); // skip delimiter
 
         // read the length
-        var object_len_buf = [_]u8{0} ** MAX_SIZE;
+        var object_len_buf: [MAX_SIZE]u8 = @splat(0);
         var object_len_writer = std.Io.Writer.fixed(&object_len_buf);
         const object_len_size = try reader.streamDelimiter(&object_len_writer, 0);
         const object_len = try std.fmt.parseInt(u64, object_len_buf[0..object_len_size], 10);
@@ -707,7 +707,7 @@ pub const ObjectHeader = struct {
     pub fn write(self: ObjectHeader, buffer: []u8) ![]const u8 {
         const type_name = self.kind.name();
         const file_size = self.size;
-        return try std.fmt.bufPrint(buffer, "{s} {}\x00", .{ type_name, file_size });
+        return try std.mem.print(buffer, "{s} {}\x00", .{ type_name, file_size });
     }
 };
 
@@ -715,7 +715,7 @@ pub fn ObjectContent(comptime hash_kind: hash.HashKind) type {
     return union(ObjectKind) {
         blob,
         tree: struct {
-            entries: std.StringArrayHashMapUnmanaged(tr.TreeEntry(hash_kind)),
+            entries: std.array_hash_map.String(tr.TreeEntry(hash_kind)),
         },
         commit: struct {
             tree: [hash.hexLen(hash_kind)]u8,
@@ -772,10 +772,10 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                 .tree => {
                     if (header.size > repo_opts.max_tree_size) return error.TreeTooLarge;
 
-                    var entries: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
+                    var entries: std.array_hash_map.String(tr.TreeEntry(repo_opts.hash)) = .empty;
 
                     while (obj_rdr.interface.peekByte()) |_| {
-                        var entry_mode_buffer = [_]u8{0} ** 6;
+                        var entry_mode_buffer: [6]u8 = @splat(0);
                         var entry_mode_writer = std.Io.Writer.fixed(&entry_mode_buffer);
                         const entry_mode_size = try obj_rdr.interface.streamDelimiter(&entry_mode_writer, ' ');
                         obj_rdr.interface.toss(1); // skip delimiter
@@ -788,7 +788,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
                         const entry_name = entry_name_writer.written();
                         if (!validTreeEntryName(entry_name)) return error.InvalidObject;
-                        var entry_oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                        var entry_oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                         try obj_rdr.interface.readSliceAll(&entry_oid);
                         try entries.put(arena.allocator(), entry_name, .{ .oid = entry_oid, .mode = entry_mode });
                     } else |err| switch (err) {
@@ -820,7 +820,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     position += content_kind.len + 1;
 
                     // read the tree hash
-                    var tree_hash = [_]u8{0} ** hash.hexLen(repo_opts.hash);
+                    var tree_hash: [hash.hexLen(repo_opts.hash)]u8 = @splat(0);
                     var tree_hash_writer = std.Io.Writer.fixed(&tree_hash);
                     const tree_hash_size = try obj_rdr.interface.streamDelimiter(&tree_hash_writer, '\n');
                     obj_rdr.interface.toss(1); // skip delimiter
@@ -843,7 +843,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         if (line.len == 0) {
                             break;
                         }
-                        if (std.mem.indexOf(u8, line, " ")) |line_idx| {
+                        if (std.mem.find(u8, line, " ")) |line_idx| {
                             if (line_idx == line.len) {
                                 break;
                             }
@@ -905,7 +905,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     var position: u64 = 0;
 
                     // read the fields
-                    var fields: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
+                    var fields: std.array_hash_map.String([]const u8) = .empty;
                     defer fields.deinit(allocator);
                     while (true) {
                         var line_writer = std.Io.Writer.Allocating.init(arena.allocator());
@@ -917,7 +917,7 @@ pub fn Object(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                         if (line.len == 0) {
                             break;
                         }
-                        if (std.mem.indexOf(u8, line, " ")) |line_idx| {
+                        if (std.mem.find(u8, line, " ")) |line_idx| {
                             if (line_idx == line.len) {
                                 break;
                             }
@@ -1025,8 +1025,8 @@ fn validTreeEntryName(name: []const u8) bool {
 
     // a tree entry is one path component. backslash is a separator on
     // windows, but a valid filename byte elsewhere.
-    if (std.mem.indexOfScalar(u8, name, '/') != null) return false;
-    if (.windows == builtin.os.tag and std.mem.indexOfScalar(u8, name, '\\') != null) return false;
+    if (std.mem.findScalar(u8, name, '/') != null) return false;
+    if (.windows == builtin.target.os.tag and std.mem.findScalar(u8, name, '\\') != null) return false;
     return true;
 }
 
@@ -1036,7 +1036,7 @@ test "validate tree entry names" {
     for (&[_][]const u8{ "", ".", "..", "../outside" }) |name| {
         try std.testing.expect(!validTreeEntryName(name));
     }
-    try std.testing.expectEqual(.windows != builtin.os.tag, validTreeEntryName("..\\outside"));
+    try std.testing.expectEqual(.windows != builtin.target.os.tag, validTreeEntryName("..\\outside"));
 }
 
 pub fn LogOptions(comptime hash_kind: hash.HashKind) type {
@@ -1277,7 +1277,7 @@ pub fn copyFromObjectIterator(
         // so rewind it before streaming the object's content
         try object.object_reader.reset();
 
-        var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
         const header = object.object_reader.header();
         try writeObject(
             repo_kind,
@@ -1354,10 +1354,10 @@ pub fn copyFromPackIterator(
             }
         };
 
-        var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+        var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
         var stream = Stream.init(pack_obj_rdr, &reader_buffer);
 
-        var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+        var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
         const header = pack_obj_rdr.header();
         try writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
 

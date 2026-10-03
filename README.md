@@ -37,7 +37,7 @@ You're looking at xit, a version control system. It's pronounced like "zit" (or 
   * contains a reuseable git implementation in pure Zig
   * [read more](docs/lib.md) about xit's internals and using xit as a library
 
-To get started, install zig 0.16.0. In this repo, run `zig build` and you'll find the binary at `zig-out/bin/xit`. The CLI is similar to git:
+To get started, install zig 0.17.0. In this repo, run `zig build` and you'll find the binary at `zig-out/bin/xit`. The CLI is similar to git:
 
 ```
 xit init test

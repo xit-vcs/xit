@@ -33,7 +33,7 @@ pub fn add(
         return error.InvalidTagName;
     }
 
-    const ref_path = try std.fmt.allocPrint(allocator, "refs/tags/{s}", .{input.name});
+    const ref_path = try allocator.print("refs/tags/{s}", .{input.name});
     defer allocator.free(ref_path);
 
     const target = try rf.readHeadRecur(repo_kind, repo_opts, state.readOnly(), io);

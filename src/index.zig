@@ -10,11 +10,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     return struct {
         // TODO: maybe store pointers to save space,
         // since usually only the first slot is used
-        entries: std.StringArrayHashMapUnmanaged([4]?Entry),
+        entries: std.array_hash_map.String([4]?Entry),
         // immediate child names by directory; "" is the root
-        children: std.StringArrayHashMapUnmanaged(std.StringArrayHashMapUnmanaged(void)),
+        children: std.array_hash_map.String(std.array_hash_map.String(void)),
         // the .xit backend only writes paths changed since loading
-        changed_paths: std.StringArrayHashMapUnmanaged(void),
+        changed_paths: std.array_hash_map.String(void),
         allocator: std.mem.Allocator,
         arena: *std.heap.ArenaAllocator,
 
@@ -108,7 +108,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     };
                     defer index_file.close(io);
 
-                    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+                    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                     var reader = index_file.reader(io, &reader_buffer);
 
                     const signature = try reader.interface.takeArray(4);
@@ -285,12 +285,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             tree_entry_maybe: ?*const tr.TreeEntry(repo_opts.hash),
         ) !void {
             // remove entries that are parents of this path (directory replaces file)
-            var parent_path_maybe = std.fs.path.dirname(path);
+            var parent_path_maybe = std.Io.Dir.path.dirname(path);
             while (parent_path_maybe) |parent_path| {
                 if (self.entries.contains(parent_path)) {
                     try self.removePath(parent_path, null);
                 }
-                parent_path_maybe = std.fs.path.dirname(parent_path);
+                parent_path_maybe = std.Io.Dir.path.dirname(parent_path);
             }
 
             const meta = try fs.Metadata.init(io, state.core.work_dir, path);
@@ -304,11 +304,11 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     defer file.close(io);
 
                     // make reader
-                    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+                    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                     var reader = file.reader(io, &reader_buffer);
 
                     // write object
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     try obj.writeObject(repo_kind, repo_opts, state, io, self.allocator, &reader.interface, .{ .kind = .blob, .size = meta.size }, &oid);
 
                     // get the mode
@@ -318,7 +318,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     // is the same, use its mode.
                     // only if both are untrue should we use the mode from the disk.
                     var mode_maybe: ?fs.Mode = null;
-                    if (.windows == builtin.os.tag) {
+                    if (.windows == builtin.target.os.tag) {
                         if (tree_entry_maybe) |tree_entry| {
                             if (std.mem.eql(u8, &oid, &tree_entry.oid)) {
                                 mode_maybe = tree_entry.mode;
@@ -362,12 +362,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     try self.removeChildren(path, null);
 
                     // get the target path
-                    var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
+                    var target_path_buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
                     const target_path_size = try state.core.work_dir.readLink(io, path, &target_path_buffer);
                     const target_path = target_path_buffer[0..target_path_size];
 
                     // write object
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     var reader = std.Io.Reader.fixed(target_path);
                     try obj.writeObject(repo_kind, repo_opts, state, io, self.allocator, &reader, .{ .kind = .blob, .size = meta.size }, &oid);
 
@@ -401,12 +401,12 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
             var child_path = entry.path;
             while (true) {
-                const parent_path = std.fs.path.dirname(child_path) orelse "";
+                const parent_path = std.Io.Dir.path.dirname(child_path) orelse "";
                 const children = try self.children.getOrPut(self.allocator, parent_path);
                 if (!children.found_existing) {
                     children.value_ptr.* = .empty;
                 }
-                try children.value_ptr.put(self.allocator, std.fs.path.basename(child_path), {});
+                try children.value_ptr.put(self.allocator, std.Io.Dir.path.basename(child_path), {});
 
                 if (parent_path.len == 0) break;
                 child_path = parent_path;
@@ -492,7 +492,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         pub fn removePath(
             self: *Index(repo_kind, repo_opts),
             path: []const u8,
-            removed_paths_maybe: ?*std.StringArrayHashMapUnmanaged(void),
+            removed_paths_maybe: ?*std.array_hash_map.String(void),
         ) !void {
             if (!self.entries.orderedRemove(path)) return;
 
@@ -507,9 +507,9 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             // prune empty ancestors, preserving file/directory conflicts
             var child_path = path;
             while (!self.entries.contains(child_path) and !self.children.contains(child_path)) {
-                const parent_path = std.fs.path.dirname(child_path) orelse "";
+                const parent_path = std.Io.Dir.path.dirname(child_path) orelse "";
                 const children = self.children.getPtr(parent_path) orelse break;
-                _ = children.orderedRemove(std.fs.path.basename(child_path));
+                _ = children.orderedRemove(std.Io.Dir.path.basename(child_path));
                 if (children.count() != 0) break;
                 children.deinit(self.allocator);
                 _ = self.children.orderedRemove(parent_path);
@@ -522,7 +522,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         pub fn removeChildren(
             self: *Index(repo_kind, repo_opts),
             path: []const u8,
-            removed_paths_maybe: ?*std.StringArrayHashMapUnmanaged(void),
+            removed_paths_maybe: ?*std.array_hash_map.String(void),
         ) !void {
             if (!self.children.contains(path)) return;
 
@@ -550,7 +550,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             io: std.Io,
             path_parts: []const []const u8,
             action: enum { add, rm },
-            removed_paths_maybe: ?*std.StringArrayHashMapUnmanaged(void),
+            removed_paths_maybe: ?*std.array_hash_map.String(void),
         ) !void {
             const path = try fs.joinPath(self.arena.allocator(), path_parts);
 
@@ -614,7 +614,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
 
                     // write the header
                     const version: u32 = 2;
-                    const header = try std.fmt.allocPrint(allocator, "DIRC{s}{s}", .{
+                    const header = try allocator.print("DIRC{s}{s}", .{
                         std.mem.asBytes(&std.mem.nativeToBig(u32, version)),
                         std.mem.asBytes(&std.mem.nativeToBig(u32, entry_count)),
                     });

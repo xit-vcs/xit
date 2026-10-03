@@ -128,11 +128,11 @@ fn uploadPack(
     upload_pack.is_stateless = options.is_stateless;
 
     {
-        var head_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         if (try rf.readHead(repo_kind, repo_opts, state, io, &head_buf)) |head_ref_or_oid| {
             switch (head_ref_or_oid) {
                 .ref => |ref| {
-                    var target_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                    var target_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                     const target = try ref.toPath(&target_buf);
                     try upload_pack.symrefs.append(upload_pack.arena.allocator(), .{
                         .name = "HEAD",
@@ -160,7 +160,7 @@ fn uploadPack(
             defer iter.deinit();
             while (try iter.next()) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                    var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                    var path_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                     const ref_path = try ref.toPath(&path_buf);
                     try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, ref_path, oid);
                 }
@@ -168,7 +168,7 @@ fn uploadPack(
         }
 
         if (!upload_pack.sent_capabilities) {
-            try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, "capabilities^{}", &[_]u8{'0'} ** hash.hexLen(repo_opts.hash));
+            try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, "capabilities^{}", &@as([hash.hexLen(repo_opts.hash)]u8, @splat('0')));
         }
 
         try pkt.writePktFlush(writer);
@@ -246,7 +246,7 @@ fn writePack(
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
-        var read_buffer = [_]u8{0} ** repo_opts.read_size;
+        var read_buffer: [repo_opts.read_size]u8 = @splat(0);
 
         while (true) {
             const size = try pack_writer.read(&read_buffer);
@@ -938,7 +938,7 @@ const UploadPack = struct {
             // v1 want line: "want <hex_oid>[ <features>]"
             const after_want = line["want ".len..];
             if (after_want.len < hex_len) return error.ProtocolErrorExpectedOid;
-            const oid_end = std.mem.indexOfAny(u8, after_want, " \r\n") orelse after_want.len;
+            const oid_end = std.mem.findAny(u8, after_want, " \r\n") orelse after_want.len;
             const features = std.mem.trim(u8, after_want[oid_end..], " \r\n");
             if (wanted_oids.count() == 0) {
                 // git's v0 fetch client omits object-format even for sha-256.
@@ -1230,7 +1230,7 @@ fn lsRefs(
 
     // head (possibly unborn)
     {
-        var head_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var head_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         if (try rf.readHead(repo_kind, repo_opts, state, io, &head_buf)) |head_ref_or_oid| {
             switch (head_ref_or_oid) {
                 .oid => |oid| {
@@ -1242,12 +1242,12 @@ fn lsRefs(
                     // symref: resolve to oid
                     if (refMatch(prefixes.items, "HEAD")) {
                         if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                            var target_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                            var target_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                             const target = try ref.toPath(&target_buf);
                             try sendLsRef(hex_len, writer, "HEAD", oid, should_peel, should_symrefs, target, repo_kind, repo_opts, state, io, allocator);
                         } else if (should_unborn and should_symrefs) {
                             // unborn
-                            var target_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                            var target_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                             const target = try ref.toPath(&target_buf);
                             try pkt.writePktLineFmt(writer, "unborn {s} symref-target:{s}\n", .{ "HEAD", target });
                         }
@@ -1262,7 +1262,7 @@ fn lsRefs(
         var iter = try rf.RefIterator(repo_kind, repo_opts).init(state, io, allocator, ref_kind, .beginning);
         defer iter.deinit();
         while (try iter.next()) |ref| {
-            var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            var path_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
             const ref_path = try ref.toPath(&path_buf);
             if (!refMatch(prefixes.items, ref_path)) continue;
             if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {

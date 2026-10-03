@@ -80,8 +80,8 @@ const ProgressCtx = struct {
             .complete_total => |complete_total| if (self.node.*) |node| {
                 var buffer: [std.Progress.Node.max_name_len]u8 = undefined;
                 switch (complete_total.kind) {
-                    .sending_bytes => node.setName(try std.fmt.bufPrint(&buffer, "Sending bytes: {Bi:.2}", .{complete_total.count})),
-                    .receiving_bytes => node.setName(try std.fmt.bufPrint(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count})),
+                    .sending_bytes => node.setName(try std.mem.print(&buffer, "Sending bytes: {Bi:.2}", .{complete_total.count})),
+                    .receiving_bytes => node.setName(try std.mem.print(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count})),
                     else => node.setCompletedItems(complete_total.count),
                 }
             },
@@ -165,7 +165,7 @@ pub fn run(
                 else
                     // if no hash was specified, just use the default hash
                     any_repo_opts.toRepoOpts();
-                const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, init_cmd.dir });
+                const work_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, init_cmd.dir });
                 defer allocator.free(work_path);
                 var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .cwd_path = cwd_path, .path = work_path, .bare = init_cmd.bare, .global_config_path = global_config_path });
                 defer repo.deinit(io, allocator);
@@ -180,7 +180,7 @@ pub fn run(
                 , .{});
             },
             .clone => |clone_cmd| {
-                const work_path = try std.fs.path.resolve(allocator, &.{ cwd_path, clone_cmd.local_path });
+                const work_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, clone_cmd.local_path });
                 defer allocator.free(work_path);
                 var clear_line = false;
                 var progress_node: ?std.Progress.Node = null;
@@ -207,8 +207,8 @@ pub fn run(
             else => {
                 // some commands allow the path to be specified. for all others, just use the cwd path.
                 const work_path_maybe = switch (cli_cmd) {
-                    .upload_pack => |upload_pack| try std.fs.path.resolve(allocator, &.{ cwd_path, upload_pack.dir }),
-                    .receive_pack => |receive_pack| try std.fs.path.resolve(allocator, &.{ cwd_path, receive_pack.dir }),
+                    .upload_pack => |upload_pack| try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, upload_pack.dir }),
+                    .receive_pack => |receive_pack| try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, receive_pack.dir }),
                     .http_backend => server_http_backend.resolveDir(allocator, cwd_path, run_opts.environ_map) catch {
                         var http_stdout_buf: [any_repo_opts.buffer_size]u8 = undefined;
                         var http_stdout_writer = std.Io.File.stdout().writer(io, &http_stdout_buf);
@@ -379,7 +379,7 @@ fn runCommand(
             .remove => |rm_tag| try repo.removeTag(io, rm_tag),
         },
         .status => {
-            var head_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
             switch (try repo.head(io, &head_buffer)) {
                 .ref => |ref| try run_opts.out.print("on branch {s}\n\n", .{ref.name}),
                 .oid => |oid| try run_opts.out.print("HEAD detached at {s}\n\n", .{oid}),
@@ -502,7 +502,7 @@ fn runCommand(
         .branch => |branch_cmd| {
             switch (branch_cmd) {
                 .list => {
-                    var head_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                    var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                     const current_branch_name = switch (try repo.head(io, &head_buffer)) {
                         .ref => |ref| ref.name,
                         .oid => "",
@@ -558,7 +558,7 @@ fn runCommand(
                     .oid => |oid| oid.*,
                 };
                 const oid = oid_maybe orelse {
-                    var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                    var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                     try run_opts.err.print("invalid ref: {s}\n", .{switch (ref_or_oid) {
                         .oid => |oid| oid,
                         .ref => |ref| try ref.toPath(&ref_path_buffer),
@@ -833,10 +833,10 @@ fn printMergeResult(
 /// at least, not that i know of. i guess internally zig probably
 /// has an earlier entrypoint which is even mainier than this.
 pub fn main(init: std.process.Init) !u8 {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    const allocator = if (builtin.mode == .Debug) debug_allocator.allocator() else std.heap.smp_allocator;
-    defer if (builtin.mode == .Debug) {
-        _ = debug_allocator.deinit();
+    var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    const allocator = if (builtin.optimize == .debug) safe_allocator.allocator() else std.heap.smp_allocator;
+    defer if (builtin.optimize == .debug) {
+        _ = safe_allocator.deinit();
     };
 
     var threaded = std.Io.Threaded.init(allocator, .{

@@ -352,11 +352,11 @@ const ConflictMarkers = struct {
     const separate = "=======";
 
     fn init(allocator: std.mem.Allocator, base_oid: []const u8, target_name: []const u8, source_name: []const u8) !ConflictMarkers {
-        const target = try std.fmt.allocPrint(allocator, "<<<<<<< target ({s})", .{target_name});
+        const target = try allocator.print("<<<<<<< target ({s})", .{target_name});
         errdefer allocator.free(target);
-        const base = try std.fmt.allocPrint(allocator, "||||||| base ({s})", .{base_oid});
+        const base = try allocator.print("||||||| base ({s})", .{base_oid});
         errdefer allocator.free(base);
-        const source = try std.fmt.allocPrint(allocator, ">>>>>>> source ({s})", .{source_name});
+        const source = try allocator.print(">>>>>>> source ({s})", .{source_name});
         errdefer allocator.free(source);
         return .{ .target = target, .base = base, .source = source };
     }
@@ -537,7 +537,7 @@ fn writeBlobWithDiff3(
 
         pub fn count(self: *@This()) !usize {
             var n: usize = 0;
-            var read_buffer = [_]u8{0} ** repo_opts.read_size;
+            var read_buffer: [repo_opts.read_size]u8 = @splat(0);
             try self.reset();
             while (true) {
                 const size = try self.read(&read_buffer);
@@ -562,7 +562,7 @@ fn writeBlobWithDiff3(
     var markers = try ConflictMarkers.init(allocator, base_oid, target_name, source_name);
     defer markers.deinit(allocator);
 
-    var stream_buffer = [_]u8{0} ** repo_opts.buffer_size;
+    var stream_buffer: [repo_opts.buffer_size]u8 = @splat(0);
     var stream = Stream{
         .allocator = allocator,
         .markers = &markers,
@@ -585,7 +585,7 @@ fn writeBlobWithDiff3(
     has_conflict.* = stream.has_conflict;
     try stream.reset();
 
-    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
     try obj.writeObject(repo_kind, repo_opts, state, io, allocator, &stream.interface, header, &oid);
     return oid;
 }
@@ -612,7 +612,7 @@ fn writeBlobWithPatches(
 
     // the lines describe the recorded blob. a binary commit keeps its last text
     // state, so a different blob means binary or a stale snapshot. diff3 handles both.
-    const nothing = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+    const nothing: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
     const Check = struct { snapshot: rp.Repo(.xit, repo_opts).DB.Cursor(.read_only), oid: *const [hash.byteLen(repo_opts.hash)]u8 };
     for ([_]Check{
         .{ .snapshot = snapshots.base, .oid = base_file_oid_maybe orelse &nothing },
@@ -622,7 +622,7 @@ fn writeBlobWithPatches(
         var recorded = nothing;
         if (try check.snapshot.readPath(void, &.{
             .{ .hash_map_get = .{ .value = path_hash } },
-            .{ .array_list_get = @intFromEnum(patch.FileField.oid) },
+            .{ .array_list_get = @backingInt(patch.FileField.oid) },
         })) |cursor| {
             if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
         }
@@ -639,7 +639,7 @@ fn writeBlobWithPatches(
         const patch_id_maybe = blk: {
             const patch_id_cursor = (try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                .{ .array_list_get = @backingInt(patch.FileField.patch) },
             })) orelse break :blk null;
             var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try patch_id_cursor.readBytes(&patch_id_bytes);
@@ -713,7 +713,7 @@ fn writeBlobWithPatches(
             while (index < merged_file.lines.items.len and std.mem.order(u8, merged_file.lines.items[index].position, region.start) == .lt) : (index += 1) {
                 try lines.append(render_allocator, text.get(merged_file.lines.items[index].id) orelse return error.InvalidLineId);
             }
-            var ranges = [_]LineRange{.{ .lines = .empty }} ** 3;
+            var ranges: [3]LineRange = @splat(.{ .lines = .empty });
             for (files, iters, &ranges) |file, iter, *range| {
                 for (file.lines.items, 0..) |line, i| {
                     if (region.contains(line.position)) try range.lines.append(render_allocator, try iter.get(i));
@@ -867,14 +867,14 @@ fn fileDirConflict(
     diff: *tr.TreeDiff(repo_kind, repo_opts),
     diff_kind: enum { target, source },
     branch_name: []const u8,
-    conflicts: *std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)),
+    conflicts: *std.array_hash_map.String(MergeConflict(repo_opts.hash)),
     clean_diff: *tr.TreeDiff(repo_kind, repo_opts),
 ) !void {
-    var parent_path_maybe = std.fs.path.dirname(path);
+    var parent_path_maybe = std.Io.Dir.path.dirname(path);
     while (parent_path_maybe) |parent_path| {
         if (diff.changes.get(parent_path)) |change| {
             if (change.new) |new| {
-                const new_path = try std.fmt.allocPrint(arena.allocator(), "{s}~{s}", .{ parent_path, branch_name });
+                const new_path = try arena.allocator().print("{s}~{s}", .{ parent_path, branch_name });
                 switch (diff_kind) {
                     .target => {
                         // add the conflict
@@ -907,7 +907,7 @@ fn fileDirConflict(
                 }
             }
         }
-        parent_path_maybe = std.fs.path.dirname(parent_path);
+        parent_path_maybe = std.Io.Dir.path.dirname(parent_path);
     }
 }
 
@@ -918,7 +918,7 @@ fn migrateWorktree(
     io: std.Io,
     allocator: std.mem.Allocator,
     diff: tr.TreeDiff(repo_kind, repo_opts),
-    conflicts: std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)),
+    conflicts: std.array_hash_map.String(MergeConflict(repo_opts.hash)),
     dry_run: bool,
 ) !void {
     // release the index lock before the caller updates refs or writes a commit
@@ -1088,8 +1088,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     return struct {
         arena: *std.heap.ArenaAllocator,
         allocator: std.mem.Allocator,
-        changes: std.StringArrayHashMapUnmanaged(tr.Change(repo_opts.hash)),
-        auto_resolved_conflicts: std.StringArrayHashMapUnmanaged(void),
+        changes: std.array_hash_map.String(tr.Change(repo_opts.hash)),
+        auto_resolved_conflicts: std.array_hash_map.String(void),
         base_oid: [hash.hexLen(repo_opts.hash)]u8,
         target_name: []const u8,
         source_name: []const u8,
@@ -1101,7 +1101,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             nothing,
             fast_forward,
             conflict: struct {
-                conflicts: std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)),
+                conflicts: std.array_hash_map.String(MergeConflict(repo_opts.hash)),
             },
         },
 
@@ -1149,8 +1149,8 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
             // init the diff that we will use for the migration and the conflicts maps.
             // they're using the arena because they'll be included in the result.
             var clean_diff = tr.TreeDiff(repo_kind, repo_opts).init(arena.allocator());
-            var auto_resolved_conflicts: std.StringArrayHashMapUnmanaged(void) = .empty;
-            var conflicts: std.StringArrayHashMapUnmanaged(MergeConflict(repo_opts.hash)) = .empty;
+            var auto_resolved_conflicts: std.array_hash_map.String(void) = .empty;
+            var conflicts: std.array_hash_map.String(MergeConflict(repo_opts.hash)) = .empty;
 
             const merge_head_name = switch (merge_input.kind) {
                 .full => merge_head_names[0],
@@ -1219,7 +1219,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                             .allocator = allocator,
                             .changes = clean_diff.changes,
                             .auto_resolved_conflicts = auto_resolved_conflicts,
-                            .base_oid = [_]u8{0} ** hash.hexLen(repo_opts.hash),
+                            .base_oid = @splat(0),
                             .target_name = target_name,
                             .source_name = source_name,
                             .result = .fast_forward,
@@ -1295,7 +1295,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     var commit_metadata: obj.CommitMetadata(repo_opts.hash) = merge_input.commit_metadata orelse .{};
                     switch (merge_input.kind) {
                         .full => if (merge_input.commit_metadata == null) {
-                            commit_metadata.message = try std.fmt.allocPrint(arena.allocator(), "merge from {s}", .{source_name});
+                            commit_metadata.message = try arena.allocator().print("merge from {s}", .{source_name});
                         },
                         .pick => {
                             // preserve the author and message, with a new committer and date

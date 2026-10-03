@@ -32,7 +32,7 @@ fn copyDir(io: std.Io, src_dir: std.Io.Dir, dest_dir: std.Io.Dir) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    var gpa: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    const temp_path = try std.fs.path.join(allocator, &.{ cwd_path, temp_dir_name });
+    const temp_path = try std.Io.Dir.path.join(allocator, &.{ cwd_path, temp_dir_name });
     defer allocator.free(temp_path);
 
     {

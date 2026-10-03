@@ -58,13 +58,13 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     var file = try state.core.work_dir.openFile(io, path, .{ .mode = .read_only, .allow_directory = false });
                     defer file.close(io);
                     const file_size = try file.length(io);
-                    const header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{file_size});
+                    const header = try allocator.print("blob {}\x00", .{file_size});
                     defer allocator.free(header);
 
-                    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+                    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                     var reader = file.reader(io, &reader_buffer);
 
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader.interface, header, &oid) catch |err| switch (err) {
                         error.ReadFailed => |e| return reader.err orelse e,
                         else => |e| return e,
@@ -89,7 +89,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     return iter;
                 },
                 .symbolic_link => {
-                    var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
+                    var target_path_buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
                     const target_path_size = try state.core.work_dir.readLink(io, path, &target_path_buffer);
                     const target_path = target_path_buffer[0..target_path_size];
 
@@ -97,10 +97,10 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                     var reader = std.Io.Reader.fixed(target_path);
 
                     // create blob header
-                    var header_buffer = [_]u8{0} ** 256; // should be plenty of space
-                    const header = try std.fmt.bufPrint(&header_buffer, "blob {}\x00", .{target_path.len});
+                    var header_buffer: [256]u8 = @splat(0); // should be plenty of space
+                    const header = try std.mem.print(&header_buffer, "blob {}\x00", .{target_path.len});
 
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     try hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader, header, &oid);
 
                     return try initFromBuffer(allocator, path, &oid, mode, target_path);
@@ -113,8 +113,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             return .{
                 .allocator = allocator,
                 .path = path,
-                .oid = [_]u8{0} ** hash.byteLen(repo_opts.hash),
-                .oid_hex = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
+                .oid = @splat(0),
+                .oid_hex = @splat('0'),
                 .mode = null,
                 .size = 0,
                 .line_offsets = &.{},
@@ -230,7 +230,7 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             allocator: std.mem.Allocator,
             buffer: []const u8,
         ) !Self {
-            return try initFromBuffer(allocator, "", &[_]u8{0} ** hash.byteLen(repo_opts.hash), null, buffer);
+            return try initFromBuffer(allocator, "", &@as([hash.byteLen(repo_opts.hash)]u8, @splat(0)), null, buffer);
         }
 
         /// reads every line into memory, including the empty line after a final
@@ -1034,45 +1034,45 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
 
             var header_lines: std.ArrayList([]const u8) = .empty;
 
-            try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "diff --git a/{s} b/{s}", .{ line_iter_a.path, line_iter_b.path }));
+            try header_lines.append(arena.allocator(), try arena.allocator().print("diff --git a/{s} b/{s}", .{ line_iter_a.path, line_iter_b.path }));
 
             var mode_maybe: ?fs.Mode = null;
 
             if (line_iter_a.mode) |a_mode| {
                 if (line_iter_b.mode) |b_mode| {
                     if (!a_mode.eqlExact(b_mode)) {
-                        try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "old mode {s}", .{a_mode.toStr()}));
-                        try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "new mode {s}", .{b_mode.toStr()}));
+                        try header_lines.append(arena.allocator(), try arena.allocator().print("old mode {s}", .{a_mode.toStr()}));
+                        try header_lines.append(arena.allocator(), try arena.allocator().print("new mode {s}", .{b_mode.toStr()}));
                     } else {
                         mode_maybe = a_mode;
                     }
                 } else {
-                    try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "deleted file mode {s}", .{a_mode.toStr()}));
+                    try header_lines.append(arena.allocator(), try arena.allocator().print("deleted file mode {s}", .{a_mode.toStr()}));
                 }
             } else {
                 if (line_iter_b.mode) |b_mode| {
-                    try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "new file mode {s}", .{b_mode.toStr()}));
+                    try header_lines.append(arena.allocator(), try arena.allocator().print("new file mode {s}", .{b_mode.toStr()}));
                 }
             }
 
             if (!std.mem.eql(u8, &line_iter_a.oid, &line_iter_b.oid)) {
                 if (mode_maybe) |mode| {
-                    try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "index {s}..{s} {s}", .{
+                    try header_lines.append(arena.allocator(), try arena.allocator().print("index {s}..{s} {s}", .{
                         line_iter_a.oid_hex[0..7],
                         line_iter_b.oid_hex[0..7],
                         mode.toStr(),
                     }));
                 } else {
-                    try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "index {s}..{s}", .{
+                    try header_lines.append(arena.allocator(), try arena.allocator().print("index {s}..{s}", .{
                         line_iter_a.oid_hex[0..7],
                         line_iter_b.oid_hex[0..7],
                     }));
                 }
 
-                try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "--- a/{s}", .{line_iter_a.path}));
+                try header_lines.append(arena.allocator(), try arena.allocator().print("--- a/{s}", .{line_iter_a.path}));
 
                 if (line_iter_b.mode != null) {
-                    try header_lines.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "+++ b/{s}", .{line_iter_b.path}));
+                    try header_lines.append(arena.allocator(), try arena.allocator().print("+++ b/{s}", .{line_iter_b.path}));
                 } else {
                     try header_lines.append(arena.allocator(), "+++ /dev/null");
                 }

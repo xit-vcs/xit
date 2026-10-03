@@ -44,7 +44,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     try main.run(repo_kind, any_repo_opts, io, allocator, &.{ "init", "repo" }, temp_path, run_opts);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // get the work dir
@@ -154,7 +154,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         // 2. the cwd is docs_path, to make sure we can run commands in any sub dir.
         // 3. we're using runPrint instead of run, which prints user-friendly errors
         //    (no difference in the tests but I just want to make sure it works)
-        const docs_path = try std.fs.path.join(allocator, &.{ work_path, "docs" });
+        const docs_path = try std.Io.Dir.path.join(allocator, &.{ work_path, "docs" });
         defer allocator.free(docs_path);
         const repo_opts_no_hash = comptime ro_blk: {
             var ro = any_repo_opts;
@@ -181,14 +181,14 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                 // make sure we are hashing files the same way git does
                 {
                     const file_size = try readme.length(io);
-                    const header = try std.fmt.allocPrint(allocator, "blob {}\x00", .{file_size});
+                    const header = try allocator.print("blob {}\x00", .{file_size});
                     defer allocator.free(header);
 
-                    var reader_buffer = [_]u8{0} ** 1024;
+                    var reader_buffer: [1024]u8 = @splat(0);
                     var reader = readme.reader(io, &reader_buffer);
                     try reader.seekTo(0);
 
-                    var sha1_bytes_buffer = [_]u8{0} ** hash.byteLen(any_repo_opts.hash.?);
+                    var sha1_bytes_buffer: [hash.byteLen(any_repo_opts.hash.?)]u8 = @splat(0);
                     try hash.hashReader(any_repo_opts.hash.?, any_repo_opts.read_size, &reader.interface, header, &sha1_bytes_buffer);
                     const sha1_hex = std.fmt.bytesToHex(&sha1_bytes_buffer, .lower);
 
@@ -277,14 +277,14 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         try three_txt.writeStreamingAll(io, "one, two, three!");
 
         // make run.sh an executable
-        if (.windows != builtin.os.tag) {
+        if (.windows != builtin.target.os.tag) {
             const run_sh = try work_dir.openFile(io, "run.sh", .{ .mode = .read_write });
             defer run_sh.close(io);
             try run_sh.setPermissions(io, .executable_file);
         }
 
         // make symlink
-        switch (builtin.os.tag) {
+        switch (builtin.target.os.tag) {
             .windows => {
                 var fake_symlink = try work_dir.createFile(io, "three.txt", .{});
                 defer fake_symlink.close(io);
@@ -365,7 +365,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                 }
             }
 
-            switch (builtin.os.tag) {
+            switch (builtin.target.os.tag) {
                 // on windows, permissions can't be changed so run.sh doesn't show up as modified
                 .windows => try std.testing.expectEqual(2, file_iter.next_index),
                 else => try std.testing.expectEqual(3, file_iter.next_index),
@@ -418,7 +418,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                 }
             }
 
-            switch (builtin.os.tag) {
+            switch (builtin.target.os.tag) {
                 // on windows, permissions can't be changed so run.sh doesn't show up as modified
                 .windows => try std.testing.expectEqual(4, file_iter.next_index),
                 else => try std.testing.expectEqual(5, file_iter.next_index),
@@ -513,7 +513,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             } else if (std.mem.eql(u8, "three.txt", line_iter_pair.path)) {
                 try std.testing.expectEqualStrings("diff --git a/three.txt b/three.txt", hunk_iter.header_lines.items[0]);
                 // on windows, it is not a symlink
-                switch (builtin.os.tag) {
+                switch (builtin.target.os.tag) {
                     .windows => try std.testing.expectEqualStrings("new file mode 100644", hunk_iter.header_lines.items[1]),
                     else => try std.testing.expectEqualStrings("new file mode 120000", hunk_iter.header_lines.items[1]),
                 }
@@ -522,7 +522,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             }
         }
 
-        switch (builtin.os.tag) {
+        switch (builtin.target.os.tag) {
             // on windows, permissions can't be changed so run.sh doesn't show up as modified
             .windows => try std.testing.expectEqual(8, file_iter.next_index),
             else => try std.testing.expectEqual(9, file_iter.next_index),
@@ -1115,7 +1115,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     {
         var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
-        var current_branch_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var current_branch_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         const head = try repo.head(io, &current_branch_buffer);
         try std.testing.expectEqualStrings("stuff", head.ref.name);
     }
@@ -1176,7 +1176,7 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         defer repo.deinit(io, allocator);
         var ref_iter = try repo.listBranches(io, allocator, .beginning);
         defer ref_iter.deinit();
-        var names: std.StringArrayHashMapUnmanaged(void) = .empty;
+        var names: std.array_hash_map.String(void) = .empty;
         defer names.deinit(allocator);
         while (try ref_iter.next()) |ref| try names.put(allocator, ref.name, {});
         try std.testing.expectEqual(3, names.count());

@@ -178,8 +178,8 @@ pub fn PushSpec(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
         ) !PushSpec(repo_kind, repo_opts) {
             var self = PushSpec(repo_kind, repo_opts){
                 .refspec = undefined,
-                .loid = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
-                .roid = [_]u8{'0'} ** hash.hexLen(repo_opts.hash),
+                .loid = @splat('0'),
+                .roid = @splat('0'),
             };
 
             self.refspec = try net_refspec.RefSpec.init(allocator, str, .push);

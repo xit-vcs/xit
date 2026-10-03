@@ -138,8 +138,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
-            inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
-                const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
+            inline for (std.meta.tags(FocusKind)) |focus_kind| {
                 switch (focus_kind) {
                     .tabs => {
                         var ui_root_tabs = try RootTabs(Widget, repo_kind).init(allocator, is_bare);
@@ -219,28 +218,28 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                                         switch (selected_widget.*) {
                                             .ui_log => {
                                                 if (selected_widget.ui_log.scrolledToTop()) {
-                                                    index = @intFromEnum(FocusKind.tabs);
+                                                    index = @backingInt(FocusKind.tabs);
                                                 } else {
                                                     try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_status => {
                                                 if (selected_widget.ui_status.getSelectedIndex() == 0) {
-                                                    index = @intFromEnum(FocusKind.tabs);
+                                                    index = @backingInt(FocusKind.tabs);
                                                 } else {
                                                     try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_undo => {
                                                 if (selected_widget.ui_undo.scrolledToTop()) {
-                                                    index = @intFromEnum(FocusKind.tabs);
+                                                    index = @backingInt(FocusKind.tabs);
                                                 } else {
                                                     try child.input(allocator, key, root_focus);
                                                 }
                                             },
                                             .ui_config_list => {
                                                 if (selected_widget.ui_config_list.getSelectedIndex() == 0) {
-                                                    index = @intFromEnum(FocusKind.tabs);
+                                                    index = @backingInt(FocusKind.tabs);
                                                 } else {
                                                     try child.input(allocator, key, root_focus);
                                                 }
@@ -255,7 +254,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                         .down => {
                             switch (child.*) {
                                 .ui_root_tabs => {
-                                    index = @intFromEnum(FocusKind.stack);
+                                    index = @backingInt(FocusKind.stack);
                                 },
                                 .stack => {
                                     try child.input(allocator, key, root_focus);
@@ -276,11 +275,11 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         }
 
         pub fn getTabs(self: *Root(Widget, repo_kind, repo_opts)) *RootTabs(Widget, repo_kind) {
-            return &self.box.children.values()[@intFromEnum(FocusKind.tabs)].widget.ui_root_tabs;
+            return &self.box.children.values()[@backingInt(FocusKind.tabs)].widget.ui_root_tabs;
         }
 
         pub fn getStack(self: *Root(Widget, repo_kind, repo_opts)) *wgt.Stack(Widget) {
-            return &self.box.children.values()[@intFromEnum(FocusKind.stack)].widget.stack;
+            return &self.box.children.values()[@backingInt(FocusKind.stack)].widget.stack;
         }
 
         pub fn clearGrid(self: *Root(Widget, repo_kind, repo_opts)) void {

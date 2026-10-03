@@ -14,7 +14,7 @@ fn addFile(
     path: []const u8,
     content: []const u8,
 ) !void {
-    if (std.fs.path.dirname(path)) |parent_path| {
+    if (std.Io.Dir.path.dirname(path)) |parent_path| {
         try repo.core.work_dir.createDirPath(io, parent_path);
     }
     const file = try repo.core.work_dir.createFile(io, path, .{ .truncate = true });
@@ -35,7 +35,7 @@ test "gc" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -169,7 +169,7 @@ test "gc ignores stale temporary files" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -210,7 +210,7 @@ test "gc with patches" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -221,7 +221,7 @@ test "gc with patches" {
     //   `-- C [foo]
     //    \
     //     `-- D [trash] (deleted before gc)
-    const middle = "m\n" ** 128;
+    const middle = repeat("m\n", 128);
     try addFile(.xit, repo_opts, &repo, io, allocator, "f.txt", "a\nb\n" ++ middle ++ middle ++ "c\nd");
     _ = try repo.commit(io, allocator, .{ .message = "a" });
     try repo.addBranch(io, .{ .name = "foo" });
@@ -283,4 +283,12 @@ test "gc with patches" {
         defer allocator.free(f_txt_content);
         try std.testing.expectEqualStrings("a\nf\n" ++ middle ++ "Y\n" ++ middle ++ "e\nX\nd", f_txt_content);
     }
+}
+
+/// replacement for the removed `"str" ** n` syntax
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        const chunks: [n][s.len]u8 = @splat(s[0..s.len].*);
+        break :blk @ptrCast(&chunks);
+    };
 }

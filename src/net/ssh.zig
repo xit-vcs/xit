@@ -100,11 +100,11 @@ pub fn parseUri(str: []const u8) !std.Uri {
     return if (std.mem.startsWith(u8, str, "ssh://"))
         try std.Uri.parse(str)
     else blk: {
-        const colon_idx = std.mem.indexOfScalar(u8, str, ':') orelse return error.InvalidSshUrl;
+        const colon_idx = std.mem.findScalar(u8, str, ':') orelse return error.InvalidSshUrl;
         const user_and_host = str[0..colon_idx];
         const path = str[colon_idx + 1 ..];
 
-        const at_idx = std.mem.indexOfScalar(u8, user_and_host, '@') orelse return error.InvalidSshUrl;
+        const at_idx = std.mem.findScalar(u8, user_and_host, '@') orelse return error.InvalidSshUrl;
         const user = user_and_host[0..at_idx];
         const host = user_and_host[at_idx + 1 ..];
 
@@ -137,7 +137,7 @@ fn spawnSsh(
 
     if (uri.port) |port| {
         try args.append(wire_state.arena.allocator(), "-p");
-        try args.append(wire_state.arena.allocator(), try std.fmt.allocPrint(wire_state.arena.allocator(), "{}", .{port}));
+        try args.append(wire_state.arena.allocator(), try wire_state.arena.allocator().print("{}", .{port}));
     }
 
     if (uri.user) |user| {
@@ -150,7 +150,7 @@ fn spawnSsh(
                 .raw => |s| s,
                 .percent_encoded => |s| s,
             };
-            try args.append(wire_state.arena.allocator(), try std.fmt.allocPrint(wire_state.arena.allocator(), "{s}@{s}", .{ user_str, host_str }));
+            try args.append(wire_state.arena.allocator(), try wire_state.arena.allocator().print("{s}@{s}", .{ user_str, host_str }));
         }
     } else {
         if (uri.host) |host| {

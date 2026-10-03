@@ -38,14 +38,14 @@ pub const MergeConflictStatus = struct {
 
 pub fn Status(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        untracked: std.StringArrayHashMapUnmanaged(Entry),
-        work_dir_modified: std.StringArrayHashMapUnmanaged(Entry),
-        work_dir_deleted: std.StringArrayHashMapUnmanaged(void),
-        index_added: std.StringArrayHashMapUnmanaged(void),
-        index_modified: std.StringArrayHashMapUnmanaged(void),
-        index_deleted: std.StringArrayHashMapUnmanaged(void),
-        unresolved_conflicts: std.StringArrayHashMapUnmanaged(MergeConflictStatus),
-        resolved_conflicts: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)),
+        untracked: std.array_hash_map.String(Entry),
+        work_dir_modified: std.array_hash_map.String(Entry),
+        work_dir_deleted: std.array_hash_map.String(void),
+        index_added: std.array_hash_map.String(void),
+        index_modified: std.array_hash_map.String(void),
+        index_deleted: std.array_hash_map.String(void),
+        unresolved_conflicts: std.array_hash_map.String(MergeConflictStatus),
+        resolved_conflicts: std.array_hash_map.String(tr.TreeEntry(repo_opts.hash)),
         index: idx.Index(repo_kind, repo_opts),
         head_tree: tr.Tree(repo_kind, repo_opts),
         arena: *std.heap.ArenaAllocator,
@@ -60,28 +60,28 @@ pub fn Status(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !Status(repo_kind, repo_opts) {
-            var untracked = std.StringArrayHashMapUnmanaged(Entry){};
+            var untracked = std.array_hash_map.String(Entry){};
             errdefer untracked.deinit(allocator);
 
-            var work_dir_modified = std.StringArrayHashMapUnmanaged(Entry){};
+            var work_dir_modified = std.array_hash_map.String(Entry){};
             errdefer work_dir_modified.deinit(allocator);
 
-            var work_dir_deleted = std.StringArrayHashMapUnmanaged(void){};
+            var work_dir_deleted = std.array_hash_map.String(void){};
             errdefer work_dir_deleted.deinit(allocator);
 
-            var index_added = std.StringArrayHashMapUnmanaged(void){};
+            var index_added = std.array_hash_map.String(void){};
             errdefer index_added.deinit(allocator);
 
-            var index_modified = std.StringArrayHashMapUnmanaged(void){};
+            var index_modified = std.array_hash_map.String(void){};
             errdefer index_modified.deinit(allocator);
 
-            var index_deleted = std.StringArrayHashMapUnmanaged(void){};
+            var index_deleted = std.array_hash_map.String(void){};
             errdefer index_deleted.deinit(allocator);
 
-            var unresolved_conflicts = std.StringArrayHashMapUnmanaged(MergeConflictStatus){};
+            var unresolved_conflicts = std.array_hash_map.String(MergeConflictStatus){};
             errdefer unresolved_conflicts.deinit(allocator);
 
-            var resolved_conflicts = std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)){};
+            var resolved_conflicts = std.array_hash_map.String(tr.TreeEntry(repo_opts.hash)){};
             errdefer resolved_conflicts.deinit(allocator);
 
             const arena = try allocator.create(std.heap.ArenaAllocator);
@@ -186,8 +186,8 @@ pub fn Status(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             allocator: std.mem.Allocator,
             arena: *std.heap.ArenaAllocator,
-            untracked: *std.StringArrayHashMapUnmanaged(Status(repo_kind, repo_opts).Entry),
-            modified: *std.StringArrayHashMapUnmanaged(Status(repo_kind, repo_opts).Entry),
+            untracked: *std.array_hash_map.String(Status(repo_kind, repo_opts).Entry),
+            modified: *std.array_hash_map.String(Status(repo_kind, repo_opts).Entry),
             index: *const idx.Index(repo_kind, repo_opts),
             index_bools: *[]bool,
             work_dir: std.Io.Dir,
@@ -232,7 +232,7 @@ pub fn Status(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
                         const subpath = try fs.joinPath(arena.allocator(), &.{ path, entry.name });
 
-                        var grandchild_untracked = std.StringArrayHashMapUnmanaged(Status(repo_kind, repo_opts).Entry){};
+                        var grandchild_untracked = std.array_hash_map.String(Status(repo_kind, repo_opts).Entry){};
                         defer grandchild_untracked.deinit(allocator);
 
                         const is_file = try addEntries(io, allocator, arena, &grandchild_untracked, modified, index, index_bools, work_dir, subpath);
@@ -302,13 +302,13 @@ pub fn indexDiffersFromWorkDir(
                     defer file.close(io);
 
                     // create blob header
-                    var header_buffer = [_]u8{0} ** 256; // should be plenty of space
-                    const header = try std.fmt.bufPrint(&header_buffer, "blob {}\x00", .{meta.size});
+                    var header_buffer: [256]u8 = @splat(0); // should be plenty of space
+                    const header = try std.mem.print(&header_buffer, "blob {}\x00", .{meta.size});
 
-                    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+                    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                     var reader = file.reader(io, &reader_buffer);
 
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     try hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader.interface, header, &oid);
                     if (!std.mem.eql(u8, &entry.oid, &oid)) {
                         return true;
@@ -317,7 +317,7 @@ pub fn indexDiffersFromWorkDir(
             },
             .sym_link => {
                 // get the target path
-                var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
+                var target_path_buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
                 const target_path_size = try parent_dir.readLink(io, path, &target_path_buffer);
                 const target_path = target_path_buffer[0..target_path_size];
 
@@ -325,10 +325,10 @@ pub fn indexDiffersFromWorkDir(
                 var reader = std.Io.Reader.fixed(target_path);
 
                 // create blob header
-                var header_buffer = [_]u8{0} ** 256; // should be plenty of space
-                const header = try std.fmt.bufPrint(&header_buffer, "blob {}\x00", .{meta.size});
+                var header_buffer: [256]u8 = @splat(0); // should be plenty of space
+                const header = try std.mem.print(&header_buffer, "blob {}\x00", .{meta.size});
 
-                var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                 try hash.hashReader(repo_opts.hash, repo_opts.read_size, &reader, header, &oid);
                 if (!std.mem.eql(u8, &entry.oid, &oid)) {
                     return true;
@@ -404,7 +404,7 @@ pub fn removePaths(
     paths: []const []const u8,
     opts: RemoveOptions,
 ) !void {
-    var removed_paths: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var removed_paths: std.array_hash_map.String(void) = .empty;
     defer removed_paths.deinit(allocator);
 
     var index = try idx.Index(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
@@ -498,12 +498,12 @@ pub fn objectToFile(
             defer obj_rdr.deinit();
 
             // create parent dir(s)
-            if (std.fs.path.dirname(path)) |dir| {
+            if (std.Io.Dir.path.dirname(path)) |dir| {
                 try state.core.work_dir.createDirPath(io, dir);
             }
 
             // open the out file
-            const out_flags: std.Io.File.CreateFlags = switch (builtin.os.tag) {
+            const out_flags: std.Io.Dir.CreateFileOptions = switch (builtin.target.os.tag) {
                 .windows => .{ .truncate = true },
                 else => .{
                     .truncate = true,
@@ -515,7 +515,7 @@ pub fn objectToFile(
 
             // write the decompressed data to the output file
             var writer = out_file.writer(io, &.{});
-            var read_buffer = [_]u8{0} ** repo_opts.read_size;
+            var read_buffer: [repo_opts.read_size]u8 = @splat(0);
             while (true) {
                 const size = try obj_rdr.interface.readSliceShort(&read_buffer);
                 if (size == 0) break;
@@ -534,7 +534,7 @@ pub fn objectToFile(
                 try objectToFile(repo_kind, repo_opts, state, io, allocator, new_path, entry);
             }
         },
-        .symbolic_link => switch (builtin.os.tag) {
+        .symbolic_link => switch (builtin.target.os.tag) {
             .windows => {
                 var new_mode = tree_entry.mode;
                 new_mode.content.object_type = .regular_file;
@@ -552,13 +552,13 @@ pub fn objectToFile(
                 defer obj_rdr.deinit();
 
                 // get path from blob content
-                var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
+                var target_path_buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
                 var target_path_writer = std.Io.Writer.fixed(&target_path_buffer);
                 const size = try obj_rdr.interface.streamRemaining(&target_path_writer);
                 const target_path = target_path_buffer[0..size];
 
                 // create parent dir(s)
-                if (std.fs.path.dirname(path)) |dir| {
+                if (std.Io.Dir.path.dirname(path)) |dir| {
                     try state.core.work_dir.createDirPath(io, dir);
                 }
 
@@ -572,9 +572,9 @@ pub fn objectToFile(
 }
 
 fn validWorktreePath(path: []const u8) bool {
-    if (path.len == 0 or std.fs.path.isAbsolute(path)) return false;
+    if (path.len == 0 or std.Io.Dir.path.isAbsolute(path)) return false;
 
-    var parts = std.mem.splitAny(u8, path, if (.windows == builtin.os.tag) "/\\" else "/");
+    var parts = std.mem.splitAny(u8, path, if (.windows == builtin.target.os.tag) "/\\" else "/");
     while (parts.next()) |part| {
         if (part.len == 0 or
             std.mem.eql(u8, part, ".") or
@@ -654,7 +654,7 @@ fn untrackedParent(
     index: *const idx.Index(repo_kind, repo_opts),
 ) ?[]const u8 {
     var parent = path;
-    while (std.fs.path.dirname(parent)) |next_parent| {
+    while (std.Io.Dir.path.dirname(parent)) |next_parent| {
         parent = next_parent;
         const meta = fs.Metadata.init(io, work_dir, next_parent) catch continue;
         if (meta.kind != .file) continue;
@@ -708,9 +708,9 @@ pub fn migrate(
     dry_run: bool,
     switch_result_maybe: ?*Switch(repo_kind, repo_opts),
 ) !void {
-    var add_files: std.StringArrayHashMapUnmanaged(tr.TreeEntry(repo_opts.hash)) = .empty;
+    var add_files: std.array_hash_map.String(tr.TreeEntry(repo_opts.hash)) = .empty;
     defer add_files.deinit(allocator);
-    var remove_files: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var remove_files: std.array_hash_map.String(void) = .empty;
     defer remove_files.deinit(allocator);
 
     for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
@@ -891,10 +891,10 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         result: union(enum) {
             success,
             conflict: struct {
-                stale_files: std.StringArrayHashMapUnmanaged(void),
-                stale_dirs: std.StringArrayHashMapUnmanaged(void),
-                untracked_overwritten: std.StringArrayHashMapUnmanaged(void),
-                untracked_removed: std.StringArrayHashMapUnmanaged(void),
+                stale_files: std.array_hash_map.String(void),
+                stale_dirs: std.array_hash_map.String(void),
+                untracked_overwritten: std.array_hash_map.String(void),
+                untracked_removed: std.array_hash_map.String(void),
             },
         },
 
@@ -905,7 +905,7 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             input: SwitchInput(repo_opts.hash),
         ) !Switch(repo_kind, repo_opts) {
             // get the current oid
-            var head_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            var head_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
             const head_maybe = try rf.readHead(repo_kind, repo_opts, state.readOnly(), io, &head_buffer);
             const current_oid_maybe = if (head_maybe) |head| try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, head) else null;
 
@@ -959,8 +959,8 @@ pub fn Switch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
                     defer target_tree.deinit();
                     for (target_tree.entries.keys(), target_tree.entries.values()) |path, entry| {
                         // a conflict entry at a target directory only needs to leave the index
-                        var parent_maybe = std.fs.path.dirname(path);
-                        while (parent_maybe) |parent| : (parent_maybe = std.fs.path.dirname(parent)) {
+                        var parent_maybe = std.Io.Dir.path.dirname(path);
+                        while (parent_maybe) |parent| : (parent_maybe = std.Io.Dir.path.dirname(parent)) {
                             if (index.entries.get(parent)) |entries| {
                                 if (entries[0] == null) try index.removePath(parent, null);
                             }

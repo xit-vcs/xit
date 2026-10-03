@@ -29,7 +29,7 @@ pub fn Change(comptime hash_kind: hash.HashKind) type {
 
 pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        changes: std.StringArrayHashMapUnmanaged(Change(repo_opts.hash)),
+        changes: std.array_hash_map.String(Change(repo_opts.hash)),
         arena: std.heap.ArenaAllocator,
         allocator: std.mem.Allocator,
 
@@ -117,7 +117,7 @@ pub fn TreeDiff(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             oid_maybe: ?*const [hash.hexLen(repo_opts.hash)]u8,
-        ) !std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)) {
+        ) !std.array_hash_map.String(TreeEntry(repo_opts.hash)) {
             if (oid_maybe) |oid| {
                 var object = try obj.Object(repo_kind, repo_opts).init(state, io, self.arena.allocator(), oid);
                 // the content is fully parsed during init and lives in the arena,
@@ -186,7 +186,7 @@ pub fn headTreeEntry(
 
 pub fn Tree(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
-        entries: std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)),
+        entries: std.array_hash_map.String(TreeEntry(repo_opts.hash)),
         arena: *std.heap.ArenaAllocator,
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -249,7 +249,7 @@ pub fn TreeDir(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(
     return struct {
         // owns the entries' memory
         object: obj.Object(repo_kind, repo_opts),
-        entries: std.StringArrayHashMapUnmanaged(TreeEntry(repo_opts.hash)),
+        entries: std.array_hash_map.String(TreeEntry(repo_opts.hash)),
         file_name: ?[]const u8,
 
         pub fn init(

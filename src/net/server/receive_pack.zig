@@ -247,7 +247,7 @@ pub fn advertiseUncreated(
     const defaults: ReceivePack = .{};
     var line_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
     var line: std.Io.Writer = .fixed(&line_buf);
-    try line.writeAll(&[_]u8{'0'} ** hash.hexLen(.sha1) ++ " capabilities^{}");
+    try line.writeAll(&@as([hash.hexLen(.sha1)]u8, @splat('0')) ++ " capabilities^{}");
     try line.writeByte(0);
     try writeCapabilities(repo_kind, &line, defaults.prefer_ofs_delta);
     try line.print(" object-format={s} object-format={s}\n", .{ common.hashName(.sha1), common.hashName(.sha256) });
@@ -269,7 +269,7 @@ pub fn peekObjectFormat(reader: *std.Io.Reader) !?hash.HashKind {
     if (len > reader.buffer.len) return error.PktLineTooLong;
 
     const line = (try reader.peek(len))[pkt.PKT_LEN_SIZE..];
-    const null_pos = std.mem.indexOfScalar(u8, line, 0) orelse return .sha1;
+    const null_pos = std.mem.findScalar(u8, line, 0) orelse return .sha1;
     const features = std.mem.trim(u8, line[null_pos + 1 ..], " \r\n");
     const format = common.getFeatureValue(features, "object-format") orelse return .sha1;
     return std.meta.stringToEnum(hash.HashKind, format) orelse error.UnsupportedObjectFormat;
@@ -373,7 +373,7 @@ const ReceivePack = struct {
 
             while (try iter.next()) |ref| {
                 if (try rf.readRecur(repo_kind, repo_opts, state, io, .{ .ref = ref })) |*oid| {
-                    var path_buf = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                    var path_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                     const ref_path = try ref.toPath(&path_buf);
                     try self.advertiseRef(repo_kind, repo_opts, writer, ref_path, oid);
                 }
@@ -381,7 +381,7 @@ const ReceivePack = struct {
         }
 
         if (!self.sent_capabilities) {
-            try self.advertiseRef(repo_kind, repo_opts, writer, "capabilities^{}", &[_]u8{'0'} ** hash.hexLen(repo_opts.hash));
+            try self.advertiseRef(repo_kind, repo_opts, writer, "capabilities^{}", &@as([hash.hexLen(repo_opts.hash)]u8, @splat('0')));
         }
 
         try pkt.writePktFlush(writer);
@@ -407,7 +407,7 @@ const ReceivePack = struct {
                 .response_end => return error.UnexpectedResponseEnd,
             };
 
-            const null_pos = std.mem.indexOfScalar(u8, line, 0);
+            const null_pos = std.mem.findScalar(u8, line, 0);
             const line_data = if (null_pos) |pos| line[0..pos] else line;
 
             const features = if (null_pos) |pos| std.mem.trim(u8, line[pos + 1 ..], " \r\n") else "";
@@ -690,7 +690,7 @@ const ReceivePack = struct {
         const is_funny_ref = if (std.mem.startsWith(u8, name, "refs/")) blk: {
             const name_after_refs = name["refs/".len..];
             break :blk !rf.validateName(name_after_refs) or
-                (!isNullOid(&ref_update.new_oid) and std.mem.indexOfScalar(u8, name_after_refs, '/') == null) or
+                (!isNullOid(&ref_update.new_oid) and std.mem.findScalar(u8, name_after_refs, '/') == null) or
                 // a name that doesn't parse as a ref can't be read or written
                 rf.Ref.initFromPath(name, null) == null;
         } else true;
@@ -706,7 +706,7 @@ const ReceivePack = struct {
         {
             const ref = rf.Ref.initFromPath(name, null) orelse return "funny refname";
             const current_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref }) orelse
-                [_]u8{'0'} ** hash.hexLen(repo_opts.hash);
+                @as([hash.hexLen(repo_opts.hash)]u8, @splat('0'));
             if (!std.mem.eql(u8, &current_oid, &ref_update.old_oid)) {
                 if (isNullOid(&ref_update.old_oid)) {
                     try writeError(writer, "refusing to create '{s}', which already exists", .{name});
@@ -833,7 +833,7 @@ fn writeMessage(writer: *std.Io.Writer, comptime prefix: [:0]const u8, comptime 
     // the params can include client-supplied ref names, which are far
     // bigger than this buffer, so the message is truncated if it overflows.
     // the last byte is reserved so the newline can always be written.
-    var buffer = [_]u8{0} ** 4096;
+    var buffer: [4096]u8 = @splat(0);
     var fixed: std.Io.Writer = .fixed(buffer[0 .. buffer.len - 1]);
 
     fixed.print(prefix ++ err ++ "\n", params) catch {};

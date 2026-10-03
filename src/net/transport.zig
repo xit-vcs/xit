@@ -165,7 +165,7 @@ pub const TransportDefinition = union(TransportKind) {
 
     fn initWithUrl(url: []const u8) ?TransportDefinition {
         const scheme_suffix = "://";
-        if (std.mem.indexOf(u8, url, scheme_suffix)) |idx| {
+        if (std.mem.find(u8, url, scheme_suffix)) |idx| {
             if (transports.get(url[0 .. idx + scheme_suffix.len])) |def| {
                 return def;
             }

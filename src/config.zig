@@ -99,12 +99,12 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             input: AddConfigInput,
         ) !void {
-            const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
+            const last_dot_index = std.mem.findScalarLast(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             // extract the parts of the config name
             var section_name_orig = input.name[0..last_dot_index];
             var subsection_name_orig_maybe: ?[]const u8 = null;
-            if (std.mem.indexOfScalar(u8, section_name_orig, '.')) |dot_index| {
+            if (std.mem.findScalar(u8, section_name_orig, '.')) |dot_index| {
                 subsection_name_orig_maybe = section_name_orig[dot_index + 1 ..];
                 section_name_orig = section_name_orig[0..dot_index];
             }
@@ -123,7 +123,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
             const section_name_lower = try lowerAlloc(self.arena.allocator(), section_name_orig);
             const section_name = if (subsection_name_orig_maybe) |subsection_name|
-                try std.fmt.allocPrint(self.arena.allocator(), "{s}.{s}", .{ section_name_lower, subsection_name })
+                try self.arena.allocator().print("{s}.{s}", .{ section_name_lower, subsection_name })
             else
                 section_name_lower;
             const var_name = try lowerAlloc(self.arena.allocator(), var_name_orig);
@@ -173,7 +173,7 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             io: std.Io,
             input: RemoveConfigInput,
         ) !void {
-            const last_dot_index = std.mem.lastIndexOfScalar(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
+            const last_dot_index = std.mem.findScalarLast(u8, input.name, '.') orelse return error.KeyDoesNotContainASection;
 
             const section_name = try self.arena.allocator().dupe(u8, input.name[0..last_dot_index]);
             const var_name = try self.arena.allocator().dupe(u8, input.name[last_dot_index + 1 ..]);
@@ -226,16 +226,16 @@ pub fn Config(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
             for (self.local_sections.keys(), self.local_sections.values()) |section_name, variables| {
                 // if the section name has periods, put everything after the first period in quotes
-                const section_line = if (std.mem.indexOfScalar(u8, section_name, '.')) |index| blk: {
+                const section_line = if (std.mem.findScalar(u8, section_name, '.')) |index| blk: {
                     const subsection_name = try escapeStr(self.allocator, section_name[index + 1 ..]);
                     defer self.allocator.free(subsection_name);
-                    break :blk try std.fmt.allocPrint(self.allocator, "[{s} \"{s}\"]\n", .{ section_name[0..index], subsection_name });
-                } else try std.fmt.allocPrint(self.allocator, "[{s}]\n", .{section_name});
+                    break :blk try self.allocator.print("[{s} \"{s}\"]\n", .{ section_name[0..index], subsection_name });
+                } else try self.allocator.print("[{s}]\n", .{section_name});
                 defer self.allocator.free(section_line);
                 try lock_file.writeStreamingAll(io, section_line);
 
                 for (variables.keys(), variables.values()) |name, value| {
-                    const var_line = try std.fmt.allocPrint(self.allocator, "\t{s} = {s}\n", .{ name, value });
+                    const var_line = try self.allocator.print("\t{s} = {s}\n", .{ name, value });
                     defer self.allocator.free(var_line);
                     try lock_file.writeStreamingAll(io, var_line);
                 }
@@ -256,7 +256,7 @@ pub fn globalConfigPath(io: std.Io, allocator: std.mem.Allocator, environ_map: *
 
     // the home config takes precedence over the xdg one
     if (home_path_maybe) |home_path| {
-        const path = try std.fs.path.join(allocator, &.{ home_path, ".gitconfig" });
+        const path = try std.Io.Dir.path.join(allocator, &.{ home_path, ".gitconfig" });
         if (try fileExists(io, path)) return path;
         allocator.free(path);
     }
@@ -264,12 +264,12 @@ pub fn globalConfigPath(io: std.Io, allocator: std.mem.Allocator, environ_map: *
     const xdg_path = if (environ_map.get("XDG_CONFIG_HOME")) |xdg_path|
         try allocator.dupe(u8, xdg_path)
     else if (home_path_maybe) |home_path|
-        try std.fs.path.join(allocator, &.{ home_path, ".config" })
+        try std.Io.Dir.path.join(allocator, &.{ home_path, ".config" })
     else
         return null;
     defer allocator.free(xdg_path);
 
-    const path = try std.fs.path.join(allocator, &.{ xdg_path, "git", "config" });
+    const path = try std.Io.Dir.path.join(allocator, &.{ xdg_path, "git", "config" });
     if (try fileExists(io, path)) return path;
     allocator.free(path);
 
@@ -284,8 +284,8 @@ fn fileExists(io: std.Io, path: []const u8) !bool {
     return true;
 }
 
-pub const Variables = std.StringArrayHashMapUnmanaged([]const u8);
-pub const Sections = std.StringArrayHashMapUnmanaged(Variables);
+pub const Variables = std.array_hash_map.String([]const u8);
+pub const Sections = std.array_hash_map.String(Variables);
 
 pub fn parseBool(value: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(value, "true") or
@@ -365,7 +365,7 @@ const ParsedLine = union(enum) {
             defer allocator.free(subsection_name);
             const section_name = try lowerAlloc(allocator, tokens[1]);
             defer allocator.free(section_name);
-            return .{ .section_header = try std.fmt.allocPrint(arena_allocator, "{s}.{s}", .{ section_name, subsection_name }) };
+            return .{ .section_header = try arena_allocator.print("{s}.{s}", .{ section_name, subsection_name }) };
         } else if (std.mem.startsWith(CharKind, char_kinds, &variable_pattern)) {
             const name = try lowerAlloc(arena_allocator, tokens[0]);
             // variables can have multiple symbols after the equals,
@@ -419,12 +419,12 @@ fn parseFile(
     var current_section_name_maybe: ?[]const u8 = null;
     var current_variables = Variables.empty;
 
-    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
     var reader = config_file.reader(io, &reader_buffer);
 
     // for each line...
     while (reader.interface.peekByte()) |_| {
-        var line_buffer = [_]u8{0} ** repo_opts.max_read_size;
+        var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
         var line_writer = std.Io.Writer.fixed(&line_buffer);
         const size = try reader.interface.streamDelimiterEnding(&line_writer, '\n');
         const line = line_buffer[0..size];

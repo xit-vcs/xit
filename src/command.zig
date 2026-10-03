@@ -413,8 +413,8 @@ fn commandHelp(command_kind: CommandKind) Help {
 pub fn printHelp(cmd_kind_maybe: ?CommandKind, writer: *std.Io.Writer) !void {
     const print_indent = comptime blk: {
         var indent = 0;
-        for (0..@typeInfo(CommandKind).@"enum".fields.len) |i| {
-            indent = @max(commandHelp(@enumFromInt(i)).name.len, indent);
+        for (std.meta.tags(CommandKind)) |cmd_kind| {
+            indent = @max(commandHelp(cmd_kind).name.len, indent);
         }
         indent += 2;
         break :blk indent;
@@ -440,8 +440,8 @@ pub fn printHelp(cmd_kind_maybe: ?CommandKind, writer: *std.Io.Writer) !void {
         }
     } else {
         try writer.print("help: xit <command> [<args>]\n\n", .{});
-        inline for (@typeInfo(CommandKind).@"enum".fields) |field| {
-            const help = commandHelp(@enumFromInt(field.value));
+        inline for (std.meta.tags(CommandKind)) |cmd_kind| {
+            const help = commandHelp(cmd_kind);
             // name and description
             try writer.print("{s}", .{help.name});
             try writer.splatByteAll(' ', print_indent - help.name.len);
@@ -461,8 +461,8 @@ pub const CommandArgs = struct {
     command_kind: ?CommandKind,
     command_name: ?[]const u8,
     positional_args: []const []const u8,
-    map_args: std.StringArrayHashMapUnmanaged(?[]const u8),
-    unused_args: std.StringArrayHashMapUnmanaged(void),
+    map_args: std.array_hash_map.String(?[]const u8),
+    unused_args: std.array_hash_map.String(void),
 
     // flags that can have a value associated with them
     // must be included here
@@ -479,8 +479,8 @@ pub const CommandArgs = struct {
         }
 
         var positional_args: std.ArrayList([]const u8) = .empty;
-        var map_args: std.StringArrayHashMapUnmanaged(?[]const u8) = .empty;
-        var unused_args: std.StringArrayHashMapUnmanaged(void) = .empty;
+        var map_args: std.array_hash_map.String(?[]const u8) = .empty;
+        var unused_args: std.array_hash_map.String(void) = .empty;
 
         for (args) |arg| {
             if (arg.len > 1 and arg[0] == '-') {
@@ -520,9 +520,9 @@ pub const CommandArgs = struct {
             const command_name = args_slice[0];
             const extra_args = args_slice[1..];
 
-            const command_kind: ?CommandKind = inline for (0..@typeInfo(CommandKind).@"enum".fields.len) |i| {
-                if (std.mem.eql(u8, command_name, commandHelp(@enumFromInt(i)).name)) {
-                    break @enumFromInt(i);
+            const command_kind: ?CommandKind = inline for (std.meta.tags(CommandKind)) |cmd_kind| {
+                if (std.mem.eql(u8, command_name, commandHelp(cmd_kind).name)) {
+                    break cmd_kind;
                 }
             } else null;
 

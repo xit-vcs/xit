@@ -623,7 +623,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
         ) !void {
             for (config.sections.keys(), config.sections.values()) |section_name, variables| {
                 for (variables.keys(), variables.values()) |name, value| {
-                    const full_name = try std.fmt.allocPrint(config.arena.allocator(), "{s}.{s}", .{ section_name, name });
+                    const full_name = try config.arena.allocator().print("{s}.{s}", .{ section_name, name });
                     const is_global = if (config.local_sections.get(section_name)) |local_variables|
                         !local_variables.contains(name)
                     else

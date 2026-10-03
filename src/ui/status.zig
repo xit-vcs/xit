@@ -185,7 +185,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
     return struct {
         box: wgt.Box(Widget),
 
-        const tab_count = @typeInfo(work.IndexStatusKind).@"enum".fields.len;
+        const tab_count = @typeInfo(work.IndexStatusKind).@"enum".field_names.len;
 
         pub fn init(allocator: std.mem.Allocator, status: *work.Status(repo_kind, repo_opts)) !StatusTabs(Widget, repo_kind, repo_opts) {
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
@@ -199,8 +199,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             var selected_maybe: ?work.IndexStatusKind = null;
 
-            inline for (@typeInfo(work.IndexStatusKind).@"enum".fields, 0..) |field, i| {
-                const index_kind: work.IndexStatusKind = @enumFromInt(field.value);
+            inline for (std.meta.tags(work.IndexStatusKind), 0..) |index_kind, i| {
                 if (selected_maybe == null and counts[i] > 0) {
                     selected_maybe = index_kind;
                 }
@@ -210,7 +209,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                     .not_tracked => "not tracked",
                 };
                 var label_buf: [64]u8 = undefined;
-                const label = try std.fmt.bufPrint(&label_buf, "{s} ({})", .{ name, counts[i] });
+                const label = try std.mem.print(&label_buf, "{s} ({})", .{ name, counts[i] });
                 var text_box = try wgt.TextBox.init(allocator, label, .{ .border_style = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
@@ -218,7 +217,7 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             }
 
             var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){ .box = box };
-            ui_status_tabs.getFocus().child_id = box.children.keys()[@intFromEnum(selected_maybe orelse .added)];
+            ui_status_tabs.getFocus().child_id = box.children.keys()[@backingInt(selected_maybe orelse .added)];
             return ui_status_tabs;
         }
 
@@ -337,8 +336,7 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
-            inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
-                const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
+            inline for (std.meta.tags(FocusKind)) |focus_kind| {
                 switch (focus_kind) {
                     .status_list => {
                         var status_list = try StatusList(Widget).init(allocator, filtered_statuses.items);
@@ -394,8 +392,8 @@ pub fn StatusContent(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                         break :blk current_index;
                     };
 
-                    if (index == @intFromEnum(FocusKind.diff) and self.box.children.values()[@intFromEnum(FocusKind.diff)].widget.ui_diff.isEmpty()) {
-                        index = @intFromEnum(FocusKind.status_list);
+                    if (index == @backingInt(FocusKind.diff) and self.box.children.values()[@backingInt(FocusKind.diff)].widget.ui_diff.isEmpty()) {
+                        index = @backingInt(FocusKind.status_list);
                     }
 
                     if (index != current_index) {
@@ -491,8 +489,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
             var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
-            inline for (@typeInfo(FocusKind).@"enum".fields) |focus_kind_field| {
-                const focus_kind: FocusKind = @enumFromInt(focus_kind_field.value);
+            inline for (std.meta.tags(FocusKind)) |focus_kind| {
                 switch (focus_kind) {
                     .status_tabs => {
                         var status_tabs = try StatusTabs(Widget, repo_kind, repo_opts).init(allocator, status_ptr);
@@ -503,8 +500,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                         var stack = try wgt.Stack(Widget).init(allocator);
                         errdefer stack.deinit(allocator);
 
-                        inline for (@typeInfo(work.IndexStatusKind).@"enum".fields) |index_kind_field| {
-                            const index_kind: work.IndexStatusKind = @enumFromInt(index_kind_field.value);
+                        inline for (std.meta.tags(work.IndexStatusKind)) |index_kind| {
                             var status_content = try StatusContent(Widget, repo_kind, repo_opts).init(io, allocator, repo, status_ptr, index_kind);
                             errdefer status_content.deinit(allocator);
                             try stack.children.put(allocator, status_content.getFocus().id, .{ .ui_status_content = status_content });
@@ -531,8 +527,8 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
 
         pub fn build(self: *Status(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            const status_tabs = &self.box.children.values()[@intFromEnum(FocusKind.status_tabs)].widget.ui_status_tabs;
-            const stack = &self.box.children.values()[@intFromEnum(FocusKind.status_content)].widget.stack;
+            const status_tabs = &self.box.children.values()[@backingInt(FocusKind.status_tabs)].widget.ui_status_tabs;
+            const stack = &self.box.children.values()[@backingInt(FocusKind.status_content)].widget.stack;
             if (status_tabs.getSelectedIndex()) |index| {
                 stack.getFocus().child_id = stack.children.keys()[index];
             }
@@ -561,7 +557,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                         switch (child.*) {
                             .ui_status_tabs => |*child_ui_status_tabs| {
                                 if (direction == .down) {
-                                    break :blk @intFromEnum(FocusKind.status_content);
+                                    break :blk @backingInt(FocusKind.status_content);
                                 } else {
                                     try child_ui_status_tabs.input(allocator, key, root_focus);
                                 }
@@ -569,7 +565,7 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                             .stack => |*child_stack| {
                                 if (child_stack.getSelected()) |selected_widget| {
                                     if (direction == .up and selected_widget.ui_status_content.scrolledToTop()) {
-                                        break :blk @intFromEnum(FocusKind.status_tabs);
+                                        break :blk @backingInt(FocusKind.status_tabs);
                                     } else {
                                         try child_stack.input(allocator, key, root_focus);
                                     }
@@ -580,10 +576,10 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                         break :blk current_index;
                     };
 
-                    if (index == @intFromEnum(FocusKind.status_content)) {
-                        if (self.box.children.values()[@intFromEnum(FocusKind.status_content)].widget.stack.getSelected()) |selected_widget| {
+                    if (index == @backingInt(FocusKind.status_content)) {
+                        if (self.box.children.values()[@backingInt(FocusKind.status_content)].widget.stack.getSelected()) |selected_widget| {
                             if (selected_widget.ui_status_content.getGrid() == null) {
-                                index = @intFromEnum(FocusKind.status_tabs);
+                                index = @backingInt(FocusKind.status_tabs);
                             }
                         }
                     }

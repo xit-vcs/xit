@@ -71,7 +71,7 @@ pub fn resolveDir(
         }
     } else return error.NotFound;
 
-    return try std.fs.path.resolve(allocator, &.{ cwd_path, dir });
+    return try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, dir });
 }
 
 pub fn run(
@@ -300,7 +300,7 @@ fn runService(
 
     // validate content-type
     var expected_ct_buf: [64]u8 = undefined;
-    const expected_ct = std.fmt.bufPrint(&expected_ct_buf, "application/x-git-{s}-request", .{service}) catch return error.BadRequest;
+    const expected_ct = std.mem.print(&expected_ct_buf, "application/x-git-{s}-request", .{service}) catch return error.BadRequest;
     if (!std.mem.eql(u8, options.content_type, expected_ct)) {
         try httpStatus(response_kind, writer, 415, "Unsupported Media Type");
         try writeNocacheHeaders(writer);
@@ -310,7 +310,7 @@ fn runService(
 
     // response headers
     var result_ct_buf: [64]u8 = undefined;
-    const result_ct = std.fmt.bufPrint(&result_ct_buf, "application/x-git-{s}-result", .{service}) catch return error.BadRequest;
+    const result_ct = std.mem.print(&result_ct_buf, "application/x-git-{s}-result", .{service}) catch return error.BadRequest;
     try httpStatus(response_kind, writer, 200, "OK");
     try writeHeader(writer, "Content-Type", result_ct);
     try writeNocacheHeaders(writer);

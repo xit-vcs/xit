@@ -82,7 +82,7 @@ pub const RefSpec = struct {
             lhs = input[1..];
         }
 
-        const rhs_maybe = if (std.mem.lastIndexOfScalar(u8, lhs, ':')) |idx| lhs[idx + 1 ..] else null;
+        const rhs_maybe = if (std.mem.findScalarLast(u8, lhs, ':')) |idx| lhs[idx + 1 ..] else null;
         var is_glob = false;
 
         {
@@ -90,7 +90,7 @@ pub const RefSpec = struct {
 
             if (rhs_maybe) |rhs| {
                 if (rhs.len > 0 or .push == direction) {
-                    is_glob = (rhs.len > 0 and null != std.mem.indexOfScalar(u8, rhs, '*'));
+                    is_glob = (rhs.len > 0 and null != std.mem.findScalar(u8, rhs, '*'));
                     self.dst = try allocator.dupe(u8, rhs);
                     dst_set = true;
                 }
@@ -103,7 +103,7 @@ pub const RefSpec = struct {
         errdefer allocator.free(self.dst);
 
         const llen = if (rhs_maybe) |rhs| lhs.len - rhs.len - 1 else lhs.len;
-        if (llen > 0 and null != std.mem.indexOfScalar(u8, lhs[0..llen], '*')) {
+        if (llen > 0 and null != std.mem.findScalar(u8, lhs[0..llen], '*')) {
             if ((null != rhs_maybe and !is_glob) or (null == rhs_maybe and .fetch == direction)) {
                 return error.InvalidRefSpec;
             }
@@ -186,7 +186,7 @@ pub const RefSpec = struct {
             return error.InvalidRef;
         };
 
-        var src_ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var src_ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         const src_ref_path = if (src_ref_maybe) |src_ref| try src_ref.toPath(&src_ref_path_buffer) else "";
 
         const dst_ref_maybe = if (rf.Ref.initFromPath(self.dst, .head)) |ref| blk: {
@@ -199,10 +199,10 @@ pub const RefSpec = struct {
             return error.InvalidRef;
         };
 
-        var dst_ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var dst_ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         const dst_ref_path = if (dst_ref_maybe) |dst_ref| try dst_ref.toPath(&dst_ref_path_buffer) else "";
 
-        return try std.fmt.allocPrint(allocator, "{s}{s}:{s}", .{ if (self.is_force) "+" else "", src_ref_path, dst_ref_path });
+        return try allocator.print("{s}{s}:{s}", .{ if (self.is_force) "+" else "", src_ref_path, dst_ref_path });
     }
 };
 
@@ -215,8 +215,8 @@ pub fn transform(allocator: std.mem.Allocator, out: *std.ArrayList(u8), spec: *c
         const from = spec.src;
         const to = spec.dst;
 
-        const from_star_offset = std.mem.indexOfScalar(u8, from, '*') orelse return error.FromStarNotFound;
-        const to_star_offset = std.mem.indexOfScalar(u8, to, '*') orelse return error.ToStarNotFound;
+        const from_star_offset = std.mem.findScalar(u8, from, '*') orelse return error.FromStarNotFound;
+        const to_star_offset = std.mem.findScalar(u8, to, '*') orelse return error.ToStarNotFound;
 
         const to_start = to[0..to_star_offset];
         const to_end = to[to_star_offset + 1 ..];

@@ -104,11 +104,11 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         pub fn toRepoOptsWithHash(self: RepoOptsInternal(repo_kind, false), hash_kind: hash.HashKind) RepoOpts(repo_kind) {
             var repo_opts: RepoOpts(repo_kind) = .{};
             @setEvalBranchQuota(5000);
-            inline for (@typeInfo(RepoOptsInternal(repo_kind, hash_kind_known)).@"struct".fields) |field| {
-                if (std.mem.eql(u8, "hash", field.name)) {
+            inline for (@typeInfo(RepoOptsInternal(repo_kind, hash_kind_known)).@"struct".field_names) |field_name| {
+                if (std.mem.eql(u8, "hash", field_name)) {
                     continue;
                 }
-                @field(repo_opts, field.name) = @field(self, field.name);
+                @field(repo_opts, field_name) = @field(self, field_name);
             }
             repo_opts.hash = hash_kind;
             return repo_opts;
@@ -239,21 +239,21 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, opts: InitOpts) !Repo(repo_kind, repo_opts) {
             const cwd_path = opts.cwd_path orelse opts.path;
-            if (!std.fs.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
+            if (!std.Io.Dir.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
 
             const global_config_path = if (opts.global_config_path) |path| try allocator.dupe(u8, path) else null;
             errdefer if (global_config_path) |path| allocator.free(path);
 
             // resolve cwd path to ensure it is well-formed
-            const cwd_path_resolved = try std.fs.path.resolve(allocator, &.{ cwd_path, "." });
+            const cwd_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, "." });
             errdefer allocator.free(cwd_path_resolved);
 
             var cwd = try std.Io.Dir.cwd().createDirPathOpen(io, cwd_path_resolved, .{});
             errdefer cwd.close(io);
 
             // resolve work path to ensure it is well-formed
-            if (!std.fs.path.isAbsolute(opts.path)) return error.PathMustBeAbsolute;
-            const work_path_resolved = try std.fs.path.resolve(allocator, &.{ opts.path, "." });
+            if (!std.Io.Dir.path.isAbsolute(opts.path)) return error.PathMustBeAbsolute;
+            const work_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ opts.path, "." });
             errdefer allocator.free(work_path_resolved);
 
             var work_dir = try cwd.createDirPathOpen(io, work_path_resolved, .{ .open_options = .{ .iterate = opts.bare } });
@@ -345,13 +345,13 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
 
         pub fn open(io: std.Io, allocator: std.mem.Allocator, opts: InitOpts) !Repo(repo_kind, repo_opts) {
             const cwd_path = opts.cwd_path orelse opts.path;
-            if (!std.fs.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
+            if (!std.Io.Dir.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
 
             const global_config_path = if (opts.global_config_path) |path| try allocator.dupe(u8, path) else null;
             errdefer if (global_config_path) |path| allocator.free(path);
 
             // resolve cwd path to ensure it is well-formed
-            const cwd_path_resolved = try std.fs.path.resolve(allocator, &.{ cwd_path, "." });
+            const cwd_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, "." });
             errdefer allocator.free(cwd_path_resolved);
 
             var cwd = try std.Io.Dir.openDirAbsolute(io, cwd_path_resolved, .{});
@@ -377,8 +377,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     else => return err,
                 }
                 // an explicit .xit or .git path still belongs to its outer repo.
-                if (std.mem.eql(u8, std.fs.path.basename(dir_path), repo_dir_name)) {
-                    dir_path_maybe = std.fs.path.dirname(dir_path);
+                if (std.mem.eql(u8, std.Io.Dir.path.basename(dir_path), repo_dir_name)) {
+                    dir_path_maybe = std.Io.Dir.path.dirname(dir_path);
                     continue;
                 }
                 if (repo_kind == .git and try isGitDirectory(io, candidate)) {
@@ -386,12 +386,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     break;
                 }
                 if (opts.require_repo_root) return error.RepoNotFound;
-                dir_path_maybe = std.fs.path.dirname(dir_path);
+                dir_path_maybe = std.Io.Dir.path.dirname(dir_path);
             }
 
             const work_path = dir_path_maybe orelse return error.RepoNotFound;
-            if (!std.fs.path.isAbsolute(work_path)) return error.PathMustBeAbsolute;
-            const work_path_resolved = try std.fs.path.resolve(allocator, &.{ work_path, "." });
+            if (!std.Io.Dir.path.isAbsolute(work_path)) return error.PathMustBeAbsolute;
+            const work_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ work_path, "." });
             errdefer allocator.free(work_path_resolved);
             var work_dir = try std.Io.Dir.openDirAbsolute(io, work_path_resolved, .{});
             errdefer work_dir.close(io);
@@ -1889,7 +1889,7 @@ pub fn AnyRepo(comptime repo_kind: RepoKind, comptime any_repo_opts: AnyRepoOpts
                         var repo = try Repo(repo_kind, repo_opts).open(io, allocator, init_opts);
                         defer repo.deinit(io, allocator);
 
-                        var buffer = [_]u8{0} ** @sizeOf(xitdb.DatabaseHeader);
+                        var buffer: [@sizeOf(xitdb.DatabaseHeader)]u8 = @splat(0);
                         var reader = repo.core.db_file.reader(io, &buffer);
                         try reader.seekTo(0);
                         const header = try xitdb.DatabaseHeader.read(&reader.interface);

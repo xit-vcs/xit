@@ -20,7 +20,7 @@ pub const Frame = struct {
 };
 
 pub fn refObjectFormat(content: []const u8) !hash.HashKind {
-    const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else null;
+    const caps = if (std.mem.findScalar(u8, content, 0)) |pos| content[pos + 1 ..] else null;
     return parseObjectFormat(caps);
 }
 
@@ -200,7 +200,7 @@ pub fn Pkt(comptime hash_kind: hash.HashKind) type {
                         inline else => |kind| hash.hexLen(kind),
                     };
                     const is_dummy = content.len >= oid_len and
-                        std.mem.indexOfNone(u8, content[0..oid_len], "0") == null and
+                        std.mem.findNone(u8, content[0..oid_len], "0") == null and
                         std.mem.startsWith(u8, content[oid_len..], " capabilities^{}\x00");
                     if (!is_dummy) return error.ObjectFormatMismatch;
                 }
@@ -265,7 +265,7 @@ fn parseObjectFormat(caps: ?[]const u8) !hash.HashKind {
 }
 
 fn refListsObjectFormat(content: []const u8, kind: hash.HashKind) bool {
-    const caps = if (std.mem.indexOfScalar(u8, content, 0)) |pos| content[pos + 1 ..] else return false;
+    const caps = if (std.mem.findScalar(u8, content, 0)) |pos| content[pos + 1 ..] else return false;
     var iter = std.mem.tokenizeAny(u8, caps, " \t\r\n");
     while (iter.next()) |cap| {
         if (std.mem.startsWith(u8, cap, "object-format=") and std.mem.eql(u8, cap["object-format=".len..], @tagName(kind))) return true;
@@ -421,7 +421,7 @@ test "xit advertised object formats" {
     inline for (cases) |case| {
         var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(allocator);
-        const oid = [_]u8{'1'} ** hash.hexLen(case.remote_hash);
+        const oid: [hash.hexLen(case.remote_hash)]u8 = @splat('1');
         const caps = if (case.format) |name| "\x00object-format=" ++ name ++ "\n" else "\n";
         try appendPktLine(allocator, &buffer, "{s} refs/heads/main{s}", .{ &oid, caps });
         var found = false;
@@ -442,7 +442,7 @@ test "fragmented advertisement frames" {
     const allocator = std.testing.allocator;
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
-    const oid = [_]u8{'0'} ** 64;
+    const oid: [64]u8 = @splat('0');
     try appendPktLine(allocator, &buffer, "{s} capabilities^{{}}\x00object-format=sha256\n", .{&oid});
     const ref_len = buffer.items.len;
     try buffer.appendSlice(allocator, "0000");

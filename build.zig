@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) !void {
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
                 // default to ReleaseSafe unless an explicit -Doptimize is passed
-                .optimize = if (b.user_input_options.contains("optimize")) optimize else .ReleaseSafe,
+                .optimize = if (b.user_input_options.contains("optimize")) optimize else .safe,
             }),
             .use_llvm = true,
         });
@@ -68,9 +68,7 @@ pub fn build(b: *std.Build) !void {
 
         const run_cmd = b.addRunArtifact(exe);
         run_cmd.step.dependOn(&try_install.step);
-        if (b.args) |args| {
-            run_cmd.addArgs(args);
-        }
+        run_cmd.addPassthruArgs();
 
         const run_step = b.step("try", "Try the app");
         run_step.dependOn(&run_cmd.step);
@@ -83,7 +81,7 @@ pub fn build(b: *std.Build) !void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = target,
-                .optimize = .Debug,
+                .optimize = .debug,
             }),
             .use_llvm = true,
         });

@@ -117,14 +117,14 @@ fn prunePatchData(
                             continue;
                         }
                         const fields = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
-                        if (try fields.getCursor(@intFromEnum(patch.FileField.patch))) |patch_cursor| {
+                        if (try fields.getCursor(@backingInt(patch.FileField.patch))) |patch_cursor| {
                             if (patch_cursor.slot().tag != .none) {
                                 var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                                 _ = try patch_cursor.readBytes(&id);
                                 try patches.put(hash.bytesToInt(repo_opts.hash, &id), .{ .uint = 1 });
                             }
                         }
-                        if (try fields.getCursor(@intFromEnum(patch.FileField.edit_set))) |edit_cursor| {
+                        if (try fields.getCursor(@backingInt(patch.FileField.edit_set))) |edit_cursor| {
                             try pending.append(allocator, .{ .cursor = edit_cursor, .kind = .edits });
                         }
                     },

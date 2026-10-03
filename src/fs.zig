@@ -13,8 +13,8 @@ pub const LockFile = struct {
     const lock_name_buffer_size = 256;
 
     pub fn init(io: std.Io, dir: std.Io.Dir, file_name: []const u8) !LockFile {
-        var lock_name_buffer = [_]u8{0} ** lock_name_buffer_size;
-        const lock_name = try std.fmt.bufPrint(&lock_name_buffer, "{s}.lock", .{file_name});
+        var lock_name_buffer: [lock_name_buffer_size]u8 = @splat(0);
+        const lock_name = try std.mem.print(&lock_name_buffer, "{s}.lock", .{file_name});
         const lock_file = try dir.createFile(io, lock_name, .{ .truncate = true, .lock = .exclusive, .read = true });
         errdefer {
             lock_file.close(io);
@@ -46,7 +46,7 @@ pub const LockFile = struct {
 
 /// fsyncs a directory, making renames/creates/deletes of its entries durable
 pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
-    if (.windows == builtin.os.tag) return;
+    if (.windows == builtin.target.os.tag) return;
     const dir_file = try dir.openFile(io, ".", .{ .mode = .read_only, .allow_directory = true });
     defer dir_file.close(io);
     try dir_file.sync(io);
@@ -75,13 +75,13 @@ pub fn normalizePaths(
 
 /// delete any parent dirs of `path` that are now empty
 pub fn deleteEmptyParents(io: std.Io, parent_dir: std.Io.Dir, path: []const u8) !void {
-    var dir_path_maybe = std.fs.path.dirname(path);
+    var dir_path_maybe = std.Io.Dir.path.dirname(path);
     while (dir_path_maybe) |dir_path| {
         parent_dir.deleteDir(io, dir_path) catch |err| switch (err) {
             error.DirNotEmpty, error.FileNotFound => break,
             else => |e| return e,
         };
-        dir_path_maybe = std.fs.path.dirname(dir_path);
+        dir_path_maybe = std.Io.Dir.path.dirname(dir_path);
     }
 }
 
@@ -101,7 +101,7 @@ pub const Mode = packed struct(u32) {
     padding: u16 = 0,
 
     pub fn init(stat: std.Io.File.Stat) Mode {
-        const is_executable = @intFromEnum(stat.permissions) & 0o100 != 0;
+        const is_executable = @backingInt(stat.permissions) & 0o100 != 0;
         const obj_type: Mode.ObjectType = switch (stat.kind) {
             .sym_link => .symbolic_link,
             else => .regular_file,
@@ -127,7 +127,7 @@ pub const Mode = packed struct(u32) {
     }
 
     pub fn eql(self: Mode, other: Mode) bool {
-        return switch (builtin.os.tag) {
+        return switch (builtin.target.os.tag) {
             .windows => self.eqlFuzzy(other),
             else => self.eqlExact(other),
         };
@@ -187,7 +187,7 @@ pub const Stat = struct {
     gid: u32,
 
     pub fn init(fd: std.posix.fd_t) !Stat {
-        switch (builtin.os.tag) {
+        switch (builtin.target.os.tag) {
             .linux => {
                 var stat = std.mem.zeroInit(std.os.linux.Statx, .{});
                 switch (std.os.linux.errno(std.os.linux.statx(
@@ -245,8 +245,8 @@ pub const Metadata = struct {
 
     pub fn init(io: std.Io, parent_dir: std.Io.Dir, path: []const u8) !Metadata {
         // special handling for symlinks
-        if (.windows != builtin.os.tag) {
-            var target_path_buffer = [_]u8{0} ** std.fs.max_path_bytes;
+        if (.windows != builtin.target.os.tag) {
+            var target_path_buffer: [std.Io.Dir.max_path_bytes]u8 = @splat(0);
             if (parent_dir.readLink(io, path, &target_path_buffer)) |target_path_size| {
                 return .{
                     .kind = .sym_link,
@@ -319,10 +319,10 @@ pub fn joinPath(allocator: std.mem.Allocator, paths: []const []const u8) ![]u8 {
 pub fn relativePath(allocator: std.mem.Allocator, work_path: []const u8, cwd_path: []const u8, path: []const u8) ![]const u8 {
     // path must go through `resolve` to ensure it has the correct path separators
     const input_path =
-        if (std.fs.path.isAbsolute(path))
-            try std.fs.path.resolve(allocator, &.{ path, "." })
+        if (std.Io.Dir.path.isAbsolute(path))
+            try std.Io.Dir.path.resolveAlloc(allocator, &.{ path, "." })
         else
-            try std.fs.path.resolve(allocator, &.{ cwd_path, path });
+            try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, path });
     defer allocator.free(input_path);
 
     // make sure the input path is in the repo
@@ -331,13 +331,13 @@ pub fn relativePath(allocator: std.mem.Allocator, work_path: []const u8, cwd_pat
     }
 
     // compute the path relative to the repo path
-    return try std.fs.path.relative(allocator, ".", null, work_path, input_path);
+    return try std.Io.Dir.path.relativeAlloc(allocator, ".", null, work_path, input_path);
 }
 
 pub fn splitPath(allocator: std.mem.Allocator, path: []const u8) ![]const []const u8 {
     var path_parts: std.ArrayList([]const u8) = .empty;
     errdefer path_parts.deinit(allocator);
-    var path_iter = std.fs.path.componentIterator(path);
+    var path_iter = std.Io.Dir.path.componentIterator(path);
     while (path_iter.next()) |component| {
         try path_parts.append(allocator, component.name);
     }

@@ -228,7 +228,7 @@ pub const Record = struct {
     // the action kind and payload borrow their bytes from data.
     pub fn decode(data: []const u8) !Record {
         if (data.len < 8) return error.InvalidUndoRecord;
-        const kind_end = std.mem.indexOfScalarPos(u8, data, 8, 0) orelse return error.InvalidUndoRecord;
+        const kind_end = std.mem.findScalarPos(u8, data, 8, 0) orelse return error.InvalidUndoRecord;
         if (kind_end == 8) return error.InvalidUndoRecord;
         return .{
             .timestamp = std.mem.readInt(i64, data[0..8], .big),
@@ -257,7 +257,7 @@ pub fn write(
     const action_kind = switch (action) {
         .custom => |custom| blk: {
             if (!std.unicode.utf8ValidateSlice(custom.action_kind)) return error.InvalidUtf8;
-            if (custom.action_kind.len == 0 or std.mem.indexOfScalar(u8, custom.action_kind, 0) != null) return error.InvalidUndoActionKind;
+            if (custom.action_kind.len == 0 or std.mem.findScalar(u8, custom.action_kind, 0) != null) return error.InvalidUndoActionKind;
             // otherwise the record reads back as the action of that name
             if (std.meta.stringToEnum(ActionKind, custom.action_kind) != null) return error.ReservedUndoActionKind;
             try validateJsonUtf8(.{ .object = custom.payload });

@@ -188,10 +188,10 @@ pub fn writeAndApplyPatches(
         // create and store the patch. each run of insertions/deletions
         // becomes an edit with its own id and text.
         const patch_hash = blk: {
-            var recorded = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            var recorded: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
             if (try snapshot.cursor.readOnly().readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(FileField.oid) },
+                .{ .array_list_get = @backingInt(FileField.oid) },
             })) |cursor| {
                 if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
             }
@@ -315,7 +315,7 @@ pub fn writeAndApplyPatches(
                 if (text_count == 0) {
                     // a deletion joins the surrounding gaps, keeping every dependency
                     // so independent deletions can be combined in either order
-                    var joined: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+                    var joined: std.array_hash_map.Auto(Id, void) = .empty;
                     defer joined.deinit(allocator);
                     for (file.gaps[start .. old_index + 1]) |old| {
                         for (old) |dep| try joined.put(allocator, dep, {});
@@ -353,14 +353,14 @@ pub fn writeAndApplyPatches(
 
         // associate the patch hash and blob with path/commit
         const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
-        try fields.put(@intFromEnum(FileField.patch), .{ .bytes = &hash.intToBytes(Id, patch_hash) });
-        try fields.put(@intFromEnum(FileField.oid), .{ .bytes = &line_iter_pair.b.oid });
+        try fields.put(@backingInt(FileField.patch), .{ .bytes = &hash.intToBytes(Id, patch_hash) });
+        try fields.put(@backingInt(FileField.oid), .{ .bytes = &line_iter_pair.b.oid });
     }
 
     // save even zero totals, so an indexed commit differs from a missing summary.
     var stats_bytes: [CommitStats.byte_len]u8 = undefined;
-    inline for (std.meta.fields(CommitStats), 0..) |field, i| {
-        std.mem.writeInt(u64, stats_bytes[i * 8 ..][0..8], @field(stats, field.name), .big);
+    inline for (@typeInfo(CommitStats).@"struct".field_names, 0..) |field_name, i| {
+        std.mem.writeInt(u64, stats_bytes[i * 8 ..][0..8], @field(stats, field_name), .big);
     }
     const summaries = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
     try summaries.put(commit_id_int, .{ .bytes = &stats_bytes });
@@ -390,7 +390,7 @@ pub const CommitStats = struct {
     files_changed: u64 = 0,
     files_removed: u64 = 0,
 
-    const byte_len = std.meta.fields(@This()).len * @sizeOf(u64);
+    const byte_len = @typeInfo(@This()).@"struct".field_names.len * @sizeOf(u64);
 };
 
 pub fn readCommitStats(
@@ -405,8 +405,8 @@ pub fn readCommitStats(
     var bytes: [CommitStats.byte_len]u8 = undefined;
     if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
     var stats: CommitStats = undefined;
-    inline for (std.meta.fields(CommitStats), 0..) |field, i| {
-        @field(stats, field.name) = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .big);
+    inline for (@typeInfo(CommitStats).@"struct".field_names, 0..) |field_name, i| {
+        @field(stats, field_name) = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .big);
     }
     return stats;
 }
@@ -435,7 +435,7 @@ pub fn applyPatches(
     const base_edits: ?DB.HashSet(.read_only) = if (base_snapshot) |base| blk: {
         const cursor = (try base.readPath(void, &.{
             .{ .hash_map_get = .{ .value = path_hash } },
-            .{ .array_list_get = @intFromEnum(FileField.edit_set) },
+            .{ .array_list_get = @backingInt(FileField.edit_set) },
         })) orelse break :blk null;
         break :blk try DB.HashSet(.read_only).init(cursor);
     } else null;
@@ -572,7 +572,7 @@ const PatchApplicationKind = enum { create, merge };
 pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
     return struct {
         file: File(opts),
-        edits: std.AutoArrayHashMapUnmanaged(hash.HashInt(opts.hash), File(opts).Stored),
+        edits: std.array_hash_map.Auto(hash.HashInt(opts.hash), File(opts).Stored),
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             self.file.deinit();
@@ -592,17 +592,17 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             const path_hash = hash.hashInt(opts.hash, path);
             try snapshot.putKey(path_hash, .{ .bytes = path });
             const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
-            while (try fields.count() < @typeInfo(FileField).@"enum".fields.len) try fields.append(.{ .slot = null });
-            const set = try DB.HashSet(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edit_set)));
+            while (try fields.count() < @typeInfo(FileField).@"enum".field_names.len) try fields.append(.{ .slot = null });
+            const set = try DB.HashSet(.read_write).init(try fields.putCursor(@backingInt(FileField.edit_set)));
             for (self.edits.keys()) |id| try set.put(id, .{ .uint = 1 });
             // an edit applied for the first time takes the next index
-            const id_list = try DB.ArrayList(.read_write).init(try fields.putCursor(@intFromEnum(FileField.edit_list)));
+            const id_list = try DB.ArrayList(.read_write).init(try fields.putCursor(@backingInt(FileField.edit_list)));
             try self.file.edit_list.append(self.file.arena.allocator(), id_list, self.edits.keys(), self.edits.values());
 
             // update the chunk list in position order, keeping unchanged blobs
             const before = self.file.chunks;
             const lines = self.file.lines.items;
-            const list = try DB.LinkedArrayList(.read_write).init(try fields.putCursor(@intFromEnum(FileField.lines)));
+            const list = try DB.LinkedArrayList(.read_write).init(try fields.putCursor(@backingInt(FileField.lines)));
             if (try list.count() != before.len) return error.InvalidLineList;
             var buffer = std.Io.Writer.Allocating.init(allocator);
             defer buffer.deinit();
@@ -684,7 +684,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             fn init(snapshot: DB.Cursor(.read_only), path_hash: Id) !EditList {
                 const cursor = (try snapshot.readPath(void, &.{
                     .{ .hash_map_get = .{ .value = path_hash } },
-                    .{ .array_list_get = @intFromEnum(FileField.edit_list) },
+                    .{ .array_list_get = @backingInt(FileField.edit_list) },
                 })) orelse return .{};
                 if (cursor.slot().tag == .none) return .{};
                 return .{ .list = try DB.ArrayList(.read_only).init(cursor) };
@@ -820,7 +820,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         pub fn load(moment: *const DB.HashMap(.read_only), snapshot: DB.Cursor(.read_only), allocator: std.mem.Allocator, path_hash: Id) !Self {
             const edit_cursor = try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(FileField.edit_set) },
+                .{ .array_list_get = @backingInt(FileField.edit_set) },
             });
             var self = Self{
                 .arena = std.heap.ArenaAllocator.init(allocator),
@@ -873,7 +873,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             var gaps: std.ArrayList([]const Id) = .empty;
             const cursor = (try snapshot.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(FileField.lines) },
+                .{ .array_list_get = @backingInt(FileField.lines) },
             })) orelse {
                 try gaps.append(arena, &.{});
                 return .{ .ids = &.{}, .gaps = try gaps.toOwnedSlice(arena), .chunks = &.{} };
@@ -926,7 +926,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         // shares an id. a one-line replacement keeps its position, so the gap
         // identity survives it.
         fn gapDeps(self: *Self, allocator: std.mem.Allocator, index: usize, deletions: []const Id) ![]const Id {
-            var deps: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+            var deps: std.array_hash_map.Auto(Id, void) = .empty;
             defer deps.deinit(allocator);
             if (index > 0) try deps.put(allocator, positionId(self.lines.items[index - 1].position), {});
             if (index < self.lines.items.len) try deps.put(allocator, positionId(self.lines.items[index].position), {});
@@ -998,7 +998,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
         fn inLineage(self: *Self, edit: Edit, id: Id, allocator: std.mem.Allocator) !bool {
             const key = Lineage{ .edit = edit.id, .deletion = id };
             if (self.lineage.get(key)) |found| return found;
-            var deps: std.AutoArrayHashMapUnmanaged(Id, void) = .empty;
+            var deps: std.array_hash_map.Auto(Id, void) = .empty;
             defer deps.deinit(allocator);
             if (edit.removed_count > 0) {
                 for (try removedIds(edit, allocator)) |line| try deps.put(allocator, @as(LineId(opts.hash), @bitCast(line)).edit_id, {});
@@ -1144,7 +1144,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 if (hi > lo and hi - lo - 1 >= text_count) {
                     return .{ .prefix = try allocator.dupe(u8, prefix.items), .lo = lo, .hi = hi };
                 }
-                const pair = a_pair orelse &([_]u8{0} ** pair_size);
+                const pair = a_pair orelse &@as([pair_size]u8, @splat(0));
                 try prefix.appendSlice(allocator, pair);
                 b_active = if (b_pair) |other| std.mem.eql(u8, pair, other) else false;
             }
@@ -1349,7 +1349,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         visited: TempDB.HashSet(.read_write),
         // the commits with patches, as of the start of the walk
         snapshots: ?DB.HashMap(.read_only),
-        oid_queue: std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void),
+        oid_queue: std.array_hash_map.Auto([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
         pub fn init(state: rp.Repo(.xit, repo_opts).State(.read_only), io: std.Io, allocator: std.mem.Allocator) !PatchWriter(repo_opts) {
@@ -1381,7 +1381,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 .parent_to_children = parent_to_children,
                 .visited = visited,
                 .snapshots = snapshots,
-                .oid_queue = std.AutoArrayHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, void){},
+                .oid_queue = std.array_hash_map.Auto([hash.byteLen(repo_opts.hash)]u8, void){},
                 .commit_count = 0,
             };
         }

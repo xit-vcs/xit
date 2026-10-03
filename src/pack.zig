@@ -189,7 +189,7 @@ pub fn OffsetToOid(comptime hash_kind: hash.HashKind) type {
         pub fn get(self: *OffsetToOid(hash_kind), offset: u64) !?[oid_len]u8 {
             const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
             const cursor = (try map.getCursor(offset)) orelse return null;
-            var oid = [_]u8{0} ** oid_len;
+            var oid: [oid_len]u8 = @splat(0);
             const bytes = try cursor.readBytes(&oid);
             if (bytes.len != oid_len) return error.InvalidOffsetEntry;
             return oid;
@@ -564,7 +564,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                     chunk_position: u64,
                     real_position: u64,
                     chunks: std.ArrayList(DeltaChunk),
-                    cache: std.AutoArrayHashMapUnmanaged(DeltaChunk, []const u8),
+                    cache: std.array_hash_map.Auto(DeltaChunk, []const u8),
                     cache_arena: *std.heap.ArenaAllocator,
                     recon_size: u64,
                 },
@@ -610,7 +610,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                     errdefer pack_obj_rdr.deinit(io, allocator);
 
                     // serialize object header
-                    var header_bytes = [_]u8{0} ** 32;
+                    var header_bytes: [32]u8 = @splat(0);
                     const header_str = try pack_obj_rdr.header().write(&header_bytes);
 
                     // expose pack_obj_rdr as new interface so we can hash it
@@ -627,7 +627,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                             return n;
                         }
                     };
-                    var reader_buffer = [_]u8{0} ** repo_opts.buffer_size;
+                    var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                     var stream = Stream{
                         .reader = pack_obj_rdr,
                         .interface = .{
@@ -638,7 +638,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                         },
                     };
 
-                    var oid = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                    var oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                     try hash.hashReader(repo_opts.hash, repo_opts.read_size, &stream.interface, header_str, &oid);
 
                     if (std.mem.eql(u8, oid_hex, &std.fmt.bytesToHex(oid, .lower))) {
@@ -668,8 +668,8 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             const pack_suffix = ".pack";
             const pack_file_name_len = pack_prefix.len + comptime hash.hexLen(repo_opts.hash) + pack_suffix.len;
 
-            var file_name_buf = [_]u8{0} ** pack_file_name_len;
-            const file_name = try std.fmt.bufPrint(&file_name_buf, "{s}{s}{s}", .{ pack_prefix, pack_offset.pack_id, pack_suffix });
+            var file_name_buf: [pack_file_name_len]u8 = @splat(0);
+            const file_name = try std.mem.print(&file_name_buf, "{s}{s}{s}", .{ pack_prefix, pack_offset.pack_id, pack_suffix });
 
             var pack_reader = try PackReader.initFile(io, allocator, pack_dir, file_name);
             defer pack_reader.deinit();
@@ -922,7 +922,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             var chunks: std.ArrayList(DeltaChunk) = .empty;
             errdefer chunks.deinit(allocator);
 
-            var cache: std.AutoArrayHashMapUnmanaged(DeltaChunk, []const u8) = .empty;
+            var cache: std.array_hash_map.Auto(DeltaChunk, []const u8) = .empty;
             errdefer cache.deinit(allocator);
 
             const cache_arena = try allocator.create(std.heap.ArenaAllocator);
@@ -967,7 +967,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                     },
                     // copy data
                     1 => {
-                        var vals = [_]u8{0} ** 7;
+                        var vals: [7]u8 = @splat(0);
                         var i: u3 = 0;
                         for (&vals) |*val| {
                             const mask: u7 = @as(u7, 1) << i;
@@ -1248,7 +1248,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
         }
 
         pub fn skipBytes(self: *PackObjectReader(repo_kind, repo_opts), num_bytes: u64) !void {
-            var buf = [_]u8{0} ** 512;
+            var buf: [512]u8 = @splat(0);
             var remaining = num_bytes;
             while (remaining > 0) {
                 const max_size = @min(remaining, buf.len);
@@ -1283,8 +1283,8 @@ pub fn LooseOrPackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_op
             defer objects_dir.close(io);
 
             // open the object file
-            var path_buf = [_]u8{0} ** (hash.hexLen(repo_opts.hash) + 1);
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ oid_hex[0..2], oid_hex[2..] });
+            var path_buf: [hash.hexLen(repo_opts.hash) + 1]u8 = @splat(0);
+            const path = try std.mem.print(&path_buf, "{s}/{s}", .{ oid_hex[0..2], oid_hex[2..] });
             var object_file = objects_dir.openFile(io, path, .{ .mode = .read_only }) catch |err| switch (err) {
                 error.FileNotFound => return .{
                     .pack = try PackObjectReader(repo_kind, repo_opts).init(io, allocator, state, oid_hex),
@@ -1372,7 +1372,7 @@ pub fn LooseOrPackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_op
 // ofs_delta pack entries (note the +1 per continuation "offset encoding",
 // mirroring the decoder above)
 fn writeOfsVarint(writer: *std.Io.Writer, value: u64) !void {
-    var buf = [_]u8{0} ** 10;
+    var buf: [10]u8 = @splat(0);
     var pos: usize = buf.len - 1;
     var remaining = value;
     buf[pos] = @truncate(remaining & 0x7f);
@@ -1423,7 +1423,7 @@ fn writeInsertCommand(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, b
 // follow (zero bytes are omitted). a size of 0x10000 is encoded with no
 // size bytes at all, since decoders treat a size of zero as 0x10000.
 fn writeCopyCommand(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, offset: usize, size: usize) !void {
-    var vals = [_]u8{0} ** 7;
+    var vals: [7]u8 = @splat(0);
     std.mem.writeInt(u32, vals[0..4], @intCast(offset), .little);
     std.mem.writeInt(u24, vals[4..], if (size == 0x10000) 0 else @intCast(size), .little);
 
@@ -1477,7 +1477,7 @@ pub fn createDelta(allocator: std.mem.Allocator, base: []const u8, target: []con
         }
     }
 
-    var insert_buffer = [_]u8{0} ** 127;
+    var insert_buffer: [127]u8 = @splat(0);
     var insert_len: usize = 0;
 
     var pos: usize = 0;
@@ -1637,7 +1637,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 .out_bytes = try .initCapacity(allocator, repo_opts.buffer_size),
                 .out_index = 0,
                 .bytes_produced = 0,
-                .stream_buffer = [_]u8{0} ** std.compress.flate.max_window_len,
+                .stream_buffer = @splat(0),
                 .hasher = hash.Hasher(repo_opts.hash).init(.{}),
                 .mode = .header,
             };
@@ -1672,7 +1672,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             // (deltas from a larger base tend to be smaller)
             std.mem.sort(Entry, self.entries.items, {}, struct {
                 fn lessThan(_: void, a: Entry, b: Entry) bool {
-                    if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+                    if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
                     if (a.name_hash != b.name_hash) return a.name_hash < b.name_hash;
                     return a.size > b.size;
                 }
@@ -1833,8 +1833,8 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         if (o.stream) |*stream| {
                             const size = switch (self.source) {
                                 .none => unreachable,
-                                .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, @enumFromInt(buffer.len)),
-                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, @enumFromInt(buffer.len)),
+                                .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, @fromBackingInt(@intCast(buffer.len))),
+                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, @fromBackingInt(@intCast(buffer.len))),
                             } catch |err| switch (err) {
                                 error.EndOfStream => 0,
                                 else => |e| return e,
@@ -1866,7 +1866,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                             try self.writeEntryHeader();
                         } else {
                             self.mode = .footer;
-                            var hash_buffer = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                            var hash_buffer: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                             self.hasher.final(&hash_buffer);
                             try self.out_bytes.writer.writeAll(&hash_buffer);
                         }
@@ -1953,7 +1953,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     if (self.allow_ofs_delta) {
                         try writeOfsVarint(&self.out_bytes.writer, entry.pack_offset - base_entry.pack_offset);
                     } else {
-                        var base_oid_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+                        var base_oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
                         _ = try std.fmt.hexToBytes(&base_oid_bytes, &base_entry.oid);
                         try self.out_bytes.writer.writeAll(&base_oid_bytes);
                     }
@@ -1981,7 +1981,7 @@ fn findOid(
     oid_list_pos: u64,
     index: usize,
 ) ![hash.byteLen(hash_kind)]u8 {
-    var reader_buffer = [_]u8{0} ** hash.byteLen(hash_kind);
+    var reader_buffer: [hash.byteLen(hash_kind)]u8 = @splat(0);
     var reader = idx_file.reader(io, &reader_buffer);
     const oid_pos = oid_list_pos + (index * hash.byteLen(hash_kind));
     try reader.seekTo(oid_pos);
@@ -2036,7 +2036,7 @@ fn findOffset(
     oid_list_pos: u64,
     index: usize,
 ) !u64 {
-    var reader_buffer = [_]u8{0} ** 256;
+    var reader_buffer: [256]u8 = @splat(0);
     var reader = idx_file.reader(io, &reader_buffer);
 
     const entry_count = fanout_table[fanout_table.len - 1];
@@ -2069,7 +2069,7 @@ fn searchPackIndex(
     idx_file: std.Io.File,
     oid_bytes: *const [hash.byteLen(hash_kind)]u8,
 ) !?u64 {
-    var reader_buffer = [_]u8{0} ** 256;
+    var reader_buffer: [256]u8 = @splat(0);
     var reader = idx_file.reader(io, &reader_buffer);
 
     const header = try reader.interface.takeArray(4);
@@ -2078,7 +2078,7 @@ fn searchPackIndex(
         return error.NotImplemented;
     }
 
-    var fanout_table = [_]u32{0} ** 256;
+    var fanout_table: [256]u32 = @splat(0);
     for (&fanout_table) |*entry| {
         entry.* = try reader.interface.takeInt(u32, .big);
     }

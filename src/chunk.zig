@@ -86,7 +86,7 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
         // in some tests, avg_size will be very low, so we use @max
         // here so that a valid mask is still used
         const bits = std.math.log2(@max(opts.avg_size, 256));
-        const normalization = @intFromEnum(opts.normalization);
+        const normalization = @backingInt(opts.normalization);
         // thanks to https://github.com/nlfiedler/fastcdc-rs
         const masks: [26]u64 = .{
             0, // padding
@@ -185,10 +185,10 @@ fn FastCdc(comptime opts: FastCdcOpts) type {
             @setEvalBranchQuota(1_000_000);
             var nums: [256]u64 = undefined;
             for (&nums, 0..) |*num, i| {
-                var seed = [_]u8{0} ** 64;
+                var seed: [64]u8 = @splat(0);
                 @memset(&seed, i);
 
-                var buffer = [_]u8{0} ** std.crypto.hash.Md5.digest_length;
+                var buffer: [std.crypto.hash.Md5.digest_length]u8 = @splat(0);
                 std.crypto.hash.Md5.hash(&seed, &buffer, .{});
 
                 num.* = std.mem.readInt(u64, buffer[0..8], .big);
@@ -205,10 +205,10 @@ test "fastcdc all zeros" {
         .max_size = 4096,
         .normalization = .level1,
     };
-    const zero_buffer = [_]u8{0} ** (opts.max_size * 3);
+    const zero_buffer: [opts.max_size * 3]u8 = @splat(0);
     var reader = std.Io.Reader.fixed(&zero_buffer);
     var iter = FastCdc(opts).init(zero_buffer.len);
-    var chunk_buffer = [_]u8{0} ** opts.max_size;
+    var chunk_buffer: [opts.max_size]u8 = @splat(0);
     while (try iter.next(&reader, &chunk_buffer)) |chunk| {
         try std.testing.expectEqual(opts.max_size, chunk.len);
     }
@@ -224,7 +224,7 @@ test "fastcdc sekien 16k chunks" {
     const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
-    var chunk_buffer = [_]u8{0} ** opts.max_size;
+    var chunk_buffer: [opts.max_size]u8 = @splat(0);
     const expected_lengths = [_]usize{
         21326,
         17140,
@@ -249,7 +249,7 @@ test "fastcdc sekien 32k chunks" {
     const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
-    var chunk_buffer = [_]u8{0} ** opts.max_size;
+    var chunk_buffer: [opts.max_size]u8 = @splat(0);
     const expected_lengths = [_]usize{
         66550,
         42916,
@@ -271,7 +271,7 @@ test "fastcdc sekien 64k chunks" {
     const buffer = @embedFile("test/data/SekienAkashita.jpg");
     var reader = std.Io.Reader.fixed(buffer);
     var iter = FastCdc(opts).init(buffer.len);
-    var chunk_buffer = [_]u8{0} ** opts.max_size;
+    var chunk_buffer: [opts.max_size]u8 = @splat(0);
     const expected_lengths = [_]usize{
         109466,
     };
@@ -352,7 +352,7 @@ fn makeChunkRecord(
         @memcpy(payload_buffer[0..chunk.len], chunk);
     }
 
-    buffer[0] = @intFromEnum(kind);
+    buffer[0] = @backingInt(kind);
     std.mem.writeInt(u32, buffer[1..chunk_record_header_size], std.hash.Adler32.hash(chunk), .big);
     return buffer[0 .. chunk_record_header_size + payload_len];
 }
@@ -396,7 +396,7 @@ pub fn writeChunks(
         var end_offset: u64 = 0;
         while (chunk_maybe) |chunk| : (chunk_maybe = try iter.next(&hashed.reader, &chunk_buffer)) {
             // hash the chunk
-            var chunk_hash_bytes = [_]u8{0} ** hash.byteLen(repo_opts.hash);
+            var chunk_hash_bytes: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
             try hash.hashBuffer(repo_opts.hash, chunk, &chunk_hash_bytes);
             const chunk_hash_int = hash.bytesToInt(repo_opts.hash, &chunk_hash_bytes);
 
@@ -583,7 +583,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
             var kv_pair = (try object_map.getKeyValuePair(try hash.hexToInt(repo_opts.hash, oid))) orelse return error.ObjectNotFound;
 
             // object kind name
-            var object_kind_name_buffer = [_]u8{0} ** 8;
+            var object_kind_name_buffer: [8]u8 = @splat(0);
             const object_kind_name = try kv_pair.key_cursor.readBytes(&object_kind_name_buffer);
 
             // object size

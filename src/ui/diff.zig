@@ -283,7 +283,7 @@ fn diffTextBox(allocator: std.mem.Allocator, text: []const u8) !wgt.TextBox {
     var start: usize = 0;
     while (start < text.len) {
         // each span keeps its trailing newline so the text box still breaks there
-        const end = if (std.mem.indexOfScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
+        const end = if (std.mem.findScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
         const line = text[start..end];
         const style: wgt.Style = if (std.mem.startsWith(u8, line, "+"))
             .{ .fg = .{ .ansi = .green } }

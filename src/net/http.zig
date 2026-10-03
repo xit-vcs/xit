@@ -295,7 +295,7 @@ const HttpRequest = struct {
             .percent_encoded => |s| s,
         };
 
-        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base_path, stream.service.url });
+        const path = try allocator.print("{s}{s}", .{ base_path, stream.service.url });
         defer allocator.free(path);
 
         var uri_writer = std.Io.Writer.Allocating.init(allocator);

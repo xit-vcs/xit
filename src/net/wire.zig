@@ -117,7 +117,7 @@ fn Buffer(comptime size: usize) type {
         fn consume(self: *Buffer(size), consumed: usize) void {
             if (consumed > 0 and consumed <= self.len) {
                 const new_len = self.len - consumed;
-                std.mem.copyForwards(u8, self.data[0..new_len], self.data[consumed..self.len]);
+                @memmove(self.data[0..new_len], self.data[consumed..self.len]);
                 self.data[new_len] = '\x00';
                 self.len = new_len;
             }
@@ -400,7 +400,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                         }
                     };
 
-                    var read_buffer = [_]u8{0} ** repo_opts.read_size;
+                    var read_buffer: [repo_opts.read_size]u8 = @splat(0);
                     var total_size: usize = 0;
 
                     while (true) {

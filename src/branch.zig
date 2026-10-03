@@ -51,7 +51,7 @@ pub fn add(
     };
 
     if (oid_maybe) |oid| {
-        var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+        var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
         const ref_path = try (rf.Ref{ .kind = .head, .name = name }).toPath(&ref_path_buffer);
         try rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = &oid });
     } else switch (repo_kind) {
@@ -78,7 +78,7 @@ pub fn remove(
     input: RemoveBranchInput,
 ) !void {
     // don't allow current branch to be deleted
-    var current_branch_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+    var current_branch_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
     if (try rf.readHead(repo_kind, repo_opts, state.readOnly(), io, &current_branch_buffer)) |current_branch| {
         switch (current_branch) {
             .ref => |ref| if (std.mem.eql(u8, input.name, ref.name)) {

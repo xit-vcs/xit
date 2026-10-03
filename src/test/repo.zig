@@ -22,7 +22,7 @@ fn addFile(
     path: []const u8,
     content: []const u8,
 ) !void {
-    if (std.fs.path.dirname(path)) |parent_path| {
+    if (std.Io.Dir.path.dirname(path)) |parent_path| {
         try repo.core.work_dir.createDirPath(io, parent_path);
     }
     const file = try repo.core.work_dir.createFile(io, path, .{ .truncate = true });
@@ -46,7 +46,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -82,7 +82,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -112,7 +112,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
     try std.testing.expectError(error.EmptyCommit, repo.commit(io, allocator, .{ .message = "d" }));
 
     // put oids in a set
-    var oid_set: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var oid_set: std.array_hash_map.String(void) = .empty;
     defer oid_set.deinit(allocator);
     try oid_set.put(allocator, &commit_a, {});
     try oid_set.put(allocator, &commit_b, {});
@@ -254,7 +254,7 @@ fn testCommitStats(comptime opts: rp.RepoOpts(.xit)) !void {
 
     // identical files share edits; only f changes in the cases below.
     try addFile(.xit, opts, &repo, io, allocator, "copy", "a\nb\n");
-    try addFile(.xit, opts, &repo, io, allocator, "large", "line\n" ** 4096);
+    try addFile(.xit, opts, &repo, io, allocator, "large", repeat("line\n", 4096));
     try addFile(.xit, opts, &repo, io, allocator, "binary", "\xffbinary");
     const cases = [_]struct { content: ?[]const u8, stats: patch.CommitStats }{
         .{ .content = "a\nb\n", .stats = .{ .first_parent_depth = 1, .lines_added = 4100, .bytes_added = 20495, .files_added = 4 } },
@@ -342,7 +342,7 @@ fn testEmptyBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -438,7 +438,7 @@ fn testMergeAncestry(
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -638,7 +638,7 @@ fn testMergeLocalChanges(
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -735,7 +735,7 @@ fn testMergeAbort(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -794,7 +794,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -864,7 +864,7 @@ fn testMergePatchApplication(algo: mrg.MergeAlgorithm, case: enum { multiple, de
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -983,9 +983,9 @@ test "applied patches" {
     try testMergeEdits(.{ .name = "beginning and end", .max_position_depth = 3, .target = &.{ "X\na\nb\nc\nd\ne\nY", "a\nb\nc\nd\ne", "X\na\nb\nc\nd\ne\nY" }, .source = &.{"a\nB\nc\nd\ne"}, .expected = &.{.{ .text = "X\na\nB\nc\nd\ne\nY" }} });
     try testMergeEdits(.{ .name = "editing a replacement", .target = &.{ "a\nu\nv\nc\nd\ne", "a\nu\nx\nv\nc\nd\ne", "a\np\nq\nx\nv\nc\nd\ne" }, .source = &.{"A\nb\nc\nd\ne"}, .expected = &.{.{ .text = "A\np\nq\nx\nv\nc\nd\ne" }} });
     try testMergeEdits(.{ .name = "insertions in nested replacement", .target = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\ny\nw\nv\nd\ne" }, .source = &.{ "a\nu\nv\nd\ne", "a\nx\ny\nv\nd\ne", "a\nx\nz\ny\nv\nd\ne" }, .expected = &.{.{ .text = "a\nx\nz\ny\nw\nv\nd\ne" }} });
-    try testMergeEdits(.{ .name = "large edit record", .shared_gaps = true, .target = &.{"a\n" ++ ("B" ** 6000) ++ "\nc\nd\ne"}, .source = &.{"a\nb\nc\nd\nE"}, .expected = &.{.{ .text = "a\n" ++ ("B" ** 6000) ++ "\nc\nd\nE" }} });
-    try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{ ("A\nb\n" ** 220) ++ "c\nd", ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nd" }, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("A\nb\n" ** 110) ++ "X\n" ++ ("A\nb\n" ** 110) ++ "c\nD" }} });
-    try testMergeEdits(.{ .name = "chunk sharing", .shared_chunks = true, .base = ("a\nb\n" ** 220) ++ "c\nd", .target = &.{("a\nb\n" ** 110) ++ "X\nb\n" ++ ("a\nb\n" ** 109) ++ "c\nd"}, .source = &.{("a\nb\n" ** 220) ++ "c\nD"}, .expected = &.{.{ .text = ("a\nb\n" ** 110) ++ "X\nb\n" ++ ("a\nb\n" ** 109) ++ "c\nD" }} });
+    try testMergeEdits(.{ .name = "large edit record", .shared_gaps = true, .target = &.{"a\n" ++ repeat("B", 6000) ++ "\nc\nd\ne"}, .source = &.{"a\nb\nc\nd\nE"}, .expected = &.{.{ .text = "a\n" ++ repeat("B", 6000) ++ "\nc\nd\nE" }} });
+    try testMergeEdits(.{ .name = "large edit list", .rebuild = true, .base = repeat("a\nb\n", 220) ++ "c\nd", .target = &.{ repeat("A\nb\n", 220) ++ "c\nd", repeat("A\nb\n", 110) ++ "X\n" ++ repeat("A\nb\n", 110) ++ "c\nd" }, .source = &.{repeat("a\nb\n", 220) ++ "c\nD"}, .expected = &.{.{ .text = repeat("A\nb\n", 110) ++ "X\n" ++ repeat("A\nb\n", 110) ++ "c\nD" }} });
+    try testMergeEdits(.{ .name = "chunk sharing", .shared_chunks = true, .base = repeat("a\nb\n", 220) ++ "c\nd", .target = &.{repeat("a\nb\n", 110) ++ "X\nb\n" ++ repeat("a\nb\n", 109) ++ "c\nd"}, .source = &.{repeat("a\nb\n", 220) ++ "c\nD"}, .expected = &.{.{ .text = repeat("a\nb\n", 110) ++ "X\nb\n" ++ repeat("a\nb\n", 109) ++ "c\nD" }} });
 }
 
 fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollback, merge, stale_oid }) !void {
@@ -1001,7 +1001,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -1010,9 +1010,9 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
     const paths = [_][]const u8{ "a.txt", "b.txt" };
     if (case == .history) {
         // a long history of replacements, which an application must handle within a small budget
-        var old_text = [_]u8{'x'} ** 8192;
+        var old_text: [8192]u8 = @splat('x');
         for (0..64) |i| {
-            _ = try std.fmt.bufPrint(old_text[0..8], "{d:0>8}", .{i});
+            _ = try std.mem.print(old_text[0..8], "{d:0>8}", .{i});
             for (paths) |path| try addFile(.xit, opts, &repo, io, allocator, path, &old_text);
             _ = try repo.commit(io, allocator, .{ .message = "old text", .timestamp = 0 });
         }
@@ -1054,7 +1054,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 const snapshots = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "commit-id->snapshot")));
                 const snapshot = try DB.HashMap(.read_write).init(try snapshots.putCursor(try hash.hexToInt(opts.hash, &ctx.oid)));
                 const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(hash.hashInt(opts.hash, paths[0])));
-                try fields.put(@intFromEnum(patch.FileField.oid), .{ .bytes = &([_]u8{1} ** hash.byteLen(opts.hash)) });
+                try fields.put(@backingInt(patch.FileField.oid), .{ .bytes = &@as([hash.byteLen(opts.hash)]u8, @splat(1)) });
             }
         };
         const history = try DB.ArrayList(.read_write).init(repo.core.db.rootCursor());
@@ -1093,7 +1093,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                             .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
                             .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &ctx.source_oid) } },
                             .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, paths[0]) } },
-                            .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                            .{ .array_list_get = @backingInt(patch.FileField.patch) },
                         })).?;
                         var bytes: [hash.byteLen(opts.hash)]u8 = undefined;
                         _ = try entry.readBytes(&bytes);
@@ -1167,7 +1167,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             for (paths, &patch_ids) |path, *patch_id| {
                 const patch_cursor = (try patch_snapshot.readPath(void, &.{
                     .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, path) } },
-                    .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                    .{ .array_list_get = @backingInt(patch.FileField.patch) },
                 })).?;
                 _ = try patch_cursor.readBytes(patch_id);
             }
@@ -1215,7 +1215,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             }
             const membership = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.edit_set) },
+                .{ .array_list_get = @backingInt(patch.FileField.edit_set) },
                 .{ .hash_map_get = .{ .key = edit_id } },
             });
             try std.testing.expect(membership != null);
@@ -1224,7 +1224,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                     .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
                     .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
                     .{ .hash_map_get = .{ .value = path_hash } },
-                    .{ .array_list_get = @intFromEnum(patch.FileField.patch) },
+                    .{ .array_list_get = @backingInt(patch.FileField.patch) },
                 })).?;
                 var id: [hash.byteLen(opts.hash)]u8 = undefined;
                 _ = try third_patch.readBytes(&id);
@@ -1236,7 +1236,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             }
             const line_list = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.lines) },
+                .{ .array_list_get = @backingInt(patch.FileField.lines) },
             });
             try std.testing.expect(line_list != null and line_list.?.tag != .none);
 
@@ -1251,7 +1251,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             try std.testing.expectEqual(size_before, try cursor.db.core.length());
             const line_list_after = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @intFromEnum(patch.FileField.lines) },
+                .{ .array_list_get = @backingInt(patch.FileField.lines) },
             });
             try std.testing.expectEqualDeep(line_list, line_list_after);
         }
@@ -1314,7 +1314,7 @@ fn testNestedLineOrder() !void {
     // eight rounds the first two lines have adjacent positions.
     for (0..8) |round| {
         for (0..15) |i| {
-            try lines.insert(allocator, 1, try std.fmt.allocPrint(arena.allocator(), "line {d}", .{round * 15 + i}));
+            try lines.insert(allocator, 1, try arena.allocator().print("line {d}", .{round * 15 + i}));
         }
         const content = try std.mem.join(allocator, "\n", lines.items);
         defer allocator.free(content);
@@ -1376,7 +1376,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
     // check both directions, including the order of conflict alternatives
     for ([_]bool{ false, true }) |reverse| {
         if (case.pick and reverse) continue;
-        const work_path = try std.fs.path.join(allocator, &.{ temp_path, if (reverse) "reverse" else "forward" });
+        const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, if (reverse) "reverse" else "forward" });
         defer allocator.free(work_path);
         var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
         defer repo.deinit(io, allocator);
@@ -1430,7 +1430,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
                             .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "commit-id->snapshot") } },
                             .{ .hash_map_get = .{ .value = try hash.hexToInt(opts.hash, &oid) } },
                             .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "f") } },
-                            .{ .array_list_get = @intFromEnum(field) },
+                            .{ .array_list_get = @backingInt(field) },
                         })).?;
                         if (field == .lines) {
                             var buffer = std.Io.Writer.Allocating.init(allocator);
@@ -1478,7 +1478,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
                 var slots = std.AutoHashMap(u64, void).init(allocator);
                 defer slots.deinit();
                 var lists: [2]DB.LinkedArrayList(.read_only) = undefined;
-                for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.lines))).?);
+                for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@backingInt(patch.FileField.lines))).?);
                 var left = try lists[0].iterator();
                 while (try left.next()) |entry| try slots.put(entry.slot().value, {});
                 var shared: usize = 0;
@@ -1492,7 +1492,7 @@ fn testMergeEdits(case: EditMergeCase) !void {
             if (case.shared_edits) |expected| {
                 var edits: [2]DB.HashSet(.read_only) = undefined;
                 for (files, &edits) |fields, *set| {
-                    set.* = try DB.HashSet(.read_only).init((try fields.getCursor(@intFromEnum(patch.FileField.edit_set))).?);
+                    set.* = try DB.HashSet(.read_only).init((try fields.getCursor(@backingInt(patch.FileField.edit_set))).?);
                 }
                 var shared: usize = 0;
                 var edit_iter = try edits[0].iterator();
@@ -1517,13 +1517,13 @@ fn testMergeEdits(case: EditMergeCase) !void {
             .text => |content| try expected.append(a, content),
             .conflict => |sides| {
                 conflict = true;
-                try expected.append(a, try std.fmt.allocPrint(a, "<<<<<<< target ({s})", .{target}));
+                try expected.append(a, try a.print("<<<<<<< target ({s})", .{target}));
                 if (sides[if (reverse) 2 else 1]) |content| try expected.append(a, content);
-                try expected.append(a, try std.fmt.allocPrint(a, "||||||| base ({s})", .{merge.base_oid}));
+                try expected.append(a, try a.print("||||||| base ({s})", .{merge.base_oid}));
                 if (sides[0]) |content| try expected.append(a, content);
                 try expected.append(a, "=======");
                 if (sides[if (reverse) 1 else 2]) |content| try expected.append(a, content);
-                try expected.append(a, try std.fmt.allocPrint(a, ">>>>>>> source ({s})", .{source}));
+                try expected.append(a, try a.print(">>>>>>> source ({s})", .{source}));
             },
         };
         try std.testing.expectEqual(conflict, merge.result == .conflict);
@@ -1583,7 +1583,7 @@ fn testMergeAfterSync(algo: mrg.MergeAlgorithm, orphan: bool) !void {
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -1630,7 +1630,7 @@ fn testMergeAtRef(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -1741,7 +1741,7 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -1874,7 +1874,7 @@ fn testMerge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
         defer obj_iter.deinit();
         try obj_iter.include(&commit_k);
 
-        const dest_work_path = try std.fs.path.join(allocator, &.{ temp_path, "dest_repo" });
+        const dest_work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "dest_repo" });
         defer allocator.free(dest_work_path);
 
         var dest_repo = try rp.Repo(repo_kind, repo_opts).init(io, allocator, .{ .path = dest_work_path });
@@ -1910,7 +1910,7 @@ fn testMergeSideBranch(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.R
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2053,7 +2053,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2104,7 +2104,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
         // verify f.txt has conflict markers
         const f_txt_content = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(1024));
         defer allocator.free(f_txt_content);
-        const expected_f_txt_content = try std.fmt.allocPrint(allocator,
+        const expected_f_txt_content = try allocator.print(
             \\a
             \\<<<<<<< target (master)
             \\x
@@ -2128,7 +2128,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2219,7 +2219,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2262,7 +2262,7 @@ fn testMergeConflictSameFile(comptime repo_kind: rp.RepoKind, comptime repo_opts
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2313,7 +2313,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2366,7 +2366,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
         // verify f.txt has conflict markers
         const f_txt_content = try repo.core.work_dir.readFileAlloc(io, "f.txt", allocator, .limited(1024));
         defer allocator.free(f_txt_content);
-        const expected_f_txt_content = try std.fmt.allocPrint(allocator,
+        const expected_f_txt_content = try allocator.print(
             \\<<<<<<< target (master)
             \\a
             \\x
@@ -2393,7 +2393,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2488,7 +2488,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2533,7 +2533,7 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2585,7 +2585,7 @@ fn testMergeConflictSameFileAutoresolved(comptime repo_kind: rp.RepoKind, compti
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2678,7 +2678,7 @@ fn testMergeConflictSameFileAutoresolvedNeighboringLines(comptime repo_kind: rp.
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2847,7 +2847,7 @@ fn testMergeConflictModifyDelete(comptime repo_kind: rp.RepoKind, comptime repo_
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -2893,7 +2893,7 @@ fn testMergeConflictModifyDelete(comptime repo_kind: rp.RepoKind, comptime repo_
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -2979,7 +2979,7 @@ fn testMergeConflictDeleteModify(comptime repo_kind: rp.RepoKind, comptime repo_
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -3025,7 +3025,7 @@ fn testMergeConflictDeleteModify(comptime repo_kind: rp.RepoKind, comptime repo_
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -3109,7 +3109,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -3160,7 +3160,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
             var grid_without_tabs = grid;
             for (0..3) |_| {
-                grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+                grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
             }
 
             try std.testing.expectEqualStrings(
@@ -3194,7 +3194,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
             var grid_without_tabs = grid;
             for (0..3) |_| {
-                grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+                grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
             }
 
             try std.testing.expectEqualStrings(
@@ -3215,7 +3215,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
             var grid_without_tabs = grid;
             for (0..3) |_| {
-                grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+                grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
             }
 
             try std.testing.expectEqualStrings(
@@ -3311,7 +3311,7 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -3362,7 +3362,7 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
             var grid_without_tabs = grid;
             for (0..3) |_| {
-                grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+                grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
             }
 
             try std.testing.expectEqualStrings(
@@ -3384,7 +3384,7 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
             var grid_without_tabs = grid;
             for (0..3) |_| {
-                grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+                grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
             }
 
             try std.testing.expectEqualStrings(
@@ -3506,7 +3506,7 @@ fn testMergeConflictBinary(
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -3616,9 +3616,9 @@ fn testMergeConflictBinary(
         if (binary_conflict) {
             try std.testing.expectEqualStrings(if (case == .source) binary else source, content);
         } else if (text_conflict) {
-            try std.testing.expect(std.mem.indexOf(u8, content, "<<<<<<<") != null);
-            try std.testing.expect(std.mem.indexOf(u8, content, "B") != null);
-            try std.testing.expect(std.mem.indexOf(u8, content, if (case == .text_conflict) "other" else "C") != null);
+            try std.testing.expect(std.mem.find(u8, content, "<<<<<<<") != null);
+            try std.testing.expect(std.mem.find(u8, content, "B") != null);
+            try std.testing.expect(std.mem.find(u8, content, if (case == .text_conflict) "other" else "C") != null);
         } else {
             try std.testing.expect(merge.result == .success);
             try std.testing.expectEqualStrings(if (neighboring) "a\nB\nC\nd\ne" else "a\nB\nc\nd\nE", content);
@@ -3631,7 +3631,7 @@ fn testMergeConflictBinary(
     //   \             /
     //    C ---------- [foo]
 
-    var bin = [_]u8{0} ** 256;
+    var bin: [256]u8 = @splat(0);
     for (&bin, 0..) |*byte, i| {
         if (i % 2 == 1) {
             byte.* = '\n';
@@ -3680,7 +3680,7 @@ fn testMergeConflictBinary(
 
         var grid_without_tabs = grid;
         for (0..3) |_| {
-            grid_without_tabs = grid_without_tabs[std.mem.indexOfScalar(u8, grid_without_tabs, '\n').? + 1 ..];
+            grid_without_tabs = grid_without_tabs[std.mem.findScalar(u8, grid_without_tabs, '\n').? + 1 ..];
         }
 
         try std.testing.expectEqualStrings(
@@ -3731,7 +3731,7 @@ fn testMergeConflictBinary(
         const file = try repo.core.work_dir.createFile(io, "bin", .{ .truncate = true, .read = true });
         defer file.close(io);
         while (try file.length(io) < repo_opts.max_line_size) {
-            try file.writeStreamingAll(io, &[_]u8{' '} ** 256);
+            try file.writeStreamingAll(io, &@as([256]u8, @splat(' ')));
         }
 
         var status = try repo.status(io, allocator);
@@ -3771,7 +3771,7 @@ fn testMergeConflictShuffle(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
     // from https://pijul.org/manual/why_pijul.html
     {
-        const work_path = try std.fs.path.join(allocator, &.{ temp_path, "simple" });
+        const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "simple" });
         defer allocator.free(work_path);
 
         {
@@ -3880,7 +3880,7 @@ fn testMergeConflictShuffle(comptime repo_kind: rp.RepoKind, comptime repo_opts:
 
     // from https://tahoe-lafs.org/~zooko/badmerge/concrete-good-semantics.html
     {
-        const work_path = try std.fs.path.join(allocator, &.{ temp_path, "concrete" });
+        const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "concrete" });
         defer allocator.free(work_path);
 
         {
@@ -4056,7 +4056,7 @@ fn testCherryPick(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -4187,7 +4187,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -4231,7 +4231,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
         // verify readme.md has conflict markers
         const readme_md_content = try repo.core.work_dir.readFileAlloc(io, "readme.md", allocator, .limited(1024));
         defer allocator.free(readme_md_content);
-        const expected_readme_md_content = try std.fmt.allocPrint(allocator,
+        const expected_readme_md_content = try allocator.print(
             \\<<<<<<< target (master)
             \\b
             \\||||||| base ({s})
@@ -4261,7 +4261,7 @@ fn testCherryPickConflict(comptime repo_kind: rp.RepoKind, comptime repo_opts: r
     }
 
     // ensure cherry-pick cannot be run again while there are unresolved conflicts
-    try std.testing.expectError(error.UnfinishedMergeInProgress, repo.merge(io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &([_]u8{0} ** hash.hexLen(repo_opts.hash)) }} } } }, null));
+    try std.testing.expectError(error.UnfinishedMergeInProgress, repo.merge(io, allocator, .{ .kind = .pick, .action = .{ .new = .{ .source = &.{.{ .oid = &@as([hash.hexLen(repo_opts.hash)]u8, @splat(0)) }} } } }, null));
     try std.testing.expectError(error.CannotContinueMergeWithUnresolvedConflicts, repo.merge(io, allocator, .{ .kind = .pick, .action = .cont }, null));
 
     // a failed continuation must preserve the cherry-pick state
@@ -4316,7 +4316,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     {
@@ -4371,7 +4371,7 @@ fn testLog(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo
     const commit_h = try repo.commit(io, allocator, .{ .message = "h" });
 
     // put oids in a set
-    var oid_set: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var oid_set: std.array_hash_map.String(void) = .empty;
     defer oid_set.deinit(allocator);
     try oid_set.put(allocator, &commit_a, {});
     try oid_set.put(allocator, &commit_b, {});
@@ -4442,7 +4442,7 @@ test "chunks are stored and deduplicated in the repo db" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var repo = try rp.Repo(.xit, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -4620,7 +4620,7 @@ fn testObjectStorage(size: usize, expect_inline: bool, collect: bool) !void {
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -4669,7 +4669,7 @@ test "shared chunks survive gc" {
     defer temp.cleanup();
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
     var repo = try rp.Repo(.xit, opts).init(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
@@ -4704,4 +4704,12 @@ test "shared chunks survive gc" {
     const actual = try reader.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(actual);
     try std.testing.expectEqualSlices(u8, kept, actual);
+}
+
+/// replacement for the removed `"str" ** n` syntax
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        const chunks: [n][s.len]u8 = @splat(s[0..s.len].*);
+        break :blk @ptrCast(&chunks);
+    };
 }

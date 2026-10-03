@@ -6,7 +6,7 @@ const rp = xit.repo;
 test "sign commit and tag" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
-    if (.windows != builtin.os.tag) {
+    if (.windows != builtin.target.os.tag) {
         try testSign(.sha1, io, allocator);
         try testSign(.sha256, io, allocator);
     }
@@ -40,12 +40,12 @@ fn testSign(
         \\-----END OPENSSH PRIVATE KEY-----
         \\
     );
-    if (.windows != builtin.os.tag) {
-        try priv_key_file.setPermissions(io, @enumFromInt(0o600));
+    if (.windows != builtin.target.os.tag) {
+        try priv_key_file.setPermissions(io, @fromBackingInt(@intCast(0o600)));
     }
 
     // create pub key
-    const pub_key_path = try std.fs.path.join(allocator, &.{ temp_path, "key.pub" });
+    const pub_key_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "key.pub" });
     defer allocator.free(pub_key_path);
     const pub_key_file = try temp.dir.createFile(io, "key.pub", .{});
     defer pub_key_file.close(io);
@@ -54,8 +54,8 @@ fn testSign(
         \\
     ;
     try pub_key_file.writeStreamingAll(io, pub_key);
-    if (.windows != builtin.os.tag) {
-        try pub_key_file.setPermissions(io, @enumFromInt(0o600));
+    if (.windows != builtin.target.os.tag) {
+        try pub_key_file.setPermissions(io, @fromBackingInt(@intCast(0o600)));
     }
 
     // add key to config and turn signing on

@@ -13,7 +13,7 @@ test "create delta" {
 
     // an edit in the middle of similar content should produce a delta
     // much smaller than the content itself
-    const base = "the quick brown fox jumps over the lazy dog. " ** 50;
+    const base = repeat("the quick brown fox jumps over the lazy dog. ", 50);
     const target = base[0..1000] ++ "EDITED!" ++ base[1000..];
     const delta = (try pack.createDelta(allocator, base, target, target.len / 2)) orelse return error.NoDelta;
     defer allocator.free(delta);
@@ -39,7 +39,7 @@ test "create and read pack" {
     defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // create the work dir
@@ -115,7 +115,7 @@ test "create and read pack" {
         var pack_file = try temp.dir.createFile(io, "test.pack", .{});
         defer pack_file.close(io);
 
-        var buffer = [_]u8{0} ** 1;
+        var buffer: [1]u8 = @splat(0);
         while (true) {
             const size = try pack_writer.read(&buffer);
             try pack_file.writeStreamingAll(io, buffer[0..size]);
@@ -149,7 +149,7 @@ test "write pack file" {
     const temp_path = try temp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(temp_path);
 
-    const client_path = try std.fs.path.join(allocator, &.{ temp_path, "client" });
+    const client_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "client" });
     defer allocator.free(client_path);
 
     var client_repo = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = client_path });
@@ -211,7 +211,7 @@ test "write pack file" {
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
-        var read_buffer = [_]u8{0} ** repo_opts.read_size;
+        var read_buffer: [repo_opts.read_size]u8 = @splat(0);
 
         while (true) {
             const size = try pack_writer.read(&read_buffer);
@@ -226,7 +226,7 @@ test "write pack file" {
 
     // make sure the pack file is valid
     {
-        const server_path = try std.fs.path.join(allocator, &.{ temp_path, "server" });
+        const server_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "server" });
         defer allocator.free(server_path);
 
         var server_repo = try rp.Repo(.git, .{ .is_test = true }).init(io, allocator, .{ .path = server_path });
@@ -260,7 +260,7 @@ test "write pack file" {
                 }
 
                 // drain the object so the iterator can advance
-                var drain_buffer = [_]u8{0} ** 1024;
+                var drain_buffer: [1024]u8 = @splat(0);
                 while (0 != try pack_obj_rdr.read(&drain_buffer)) {}
             }
             try std.testing.expect(delta_count > 0);
@@ -316,7 +316,7 @@ test "iterate pack from file" {
     defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var r = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -346,7 +346,7 @@ test "iterate pack from stream" {
     defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     var r = try rp.Repo(.git, repo_opts).init(io, allocator, .{ .path = work_path });
@@ -384,7 +384,7 @@ test "read packed refs" {
     defer allocator.free(temp_path);
 
     // get work dir path
-    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
+    const work_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // create the work dir
@@ -457,4 +457,12 @@ test "read packed refs" {
         try std.testing.expectEqualStrings("master", ((try index_iter.next()) orelse return error.RefNotFound).name);
         try std.testing.expect(null == try index_iter.next());
     }
+}
+
+/// replacement for the removed `"str" ** n` syntax
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    return comptime blk: {
+        const chunks: [n][s.len]u8 = @splat(s[0..s.len].*);
+        break :blk @ptrCast(&chunks);
+    };
 }

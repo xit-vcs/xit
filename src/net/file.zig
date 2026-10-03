@@ -15,8 +15,8 @@ const rf = @import("../ref.zig");
 fn sourceKind(io: std.Io, path: []const u8) !rp.RepoKind {
     const dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
     defer dir.close(io);
-    if (std.mem.eql(u8, std.fs.path.basename(path), ".git")) return .git;
-    if (std.mem.eql(u8, std.fs.path.basename(path), ".xit")) return .xit;
+    if (std.mem.eql(u8, std.Io.Dir.path.basename(path), ".git")) return .git;
+    if (std.mem.eql(u8, std.Io.Dir.path.basename(path), ".xit")) return .xit;
     if (dir.openDir(io, ".xit", .{})) |xit_dir| {
         xit_dir.close(io);
         return .xit;
@@ -31,7 +31,7 @@ fn parsePath(url: []const u8) ![]const u8 {
             .raw => |s| s,
             .percent_encoded => |s| s,
         };
-        if (.windows == builtin.os.tag and path[0] == '/') {
+        if (.windows == builtin.target.os.tag and path[0] == '/') {
             return path[1..];
         } else {
             return path;
@@ -42,7 +42,7 @@ fn parsePath(url: []const u8) ![]const u8 {
 }
 
 pub fn sourceHash(io: std.Io, allocator: std.mem.Allocator, cwd_path: []const u8, url: []const u8) !hash.HashKind {
-    const path = try std.fs.path.resolve(allocator, &.{ cwd_path, try parsePath(url) });
+    const path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, try parsePath(url) });
     defer allocator.free(path);
     switch (try sourceKind(io, path)) {
         inline else => |kind| {
@@ -135,7 +135,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
             const path = try parsePath(url);
 
-            const work_path = try std.fs.path.resolve(allocator, &.{ state.core.cwd_path, path });
+            const work_path = try std.Io.Dir.path.resolveAlloc(allocator, &.{ state.core.cwd_path, path });
             defer allocator.free(work_path);
 
             var remote_repo = try LocalRepo.open(io, allocator, work_path);
@@ -329,11 +329,11 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             allocator: std.mem.Allocator,
             ref: rf.Ref,
         ) !void {
-            var ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+            var ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
             const ref_path = try ref.toPath(&ref_path_buffer);
 
             const oid_maybe = try net.resolveRef(remote_kind, remote_opts, state, io, allocator, ref);
-            const oid = oid_maybe orelse (if (std.mem.eql(u8, ref_path, "HEAD")) [_]u8{'0'} ** hash.hexLen(repo_opts.hash) else return);
+            const oid = oid_maybe orelse (if (std.mem.eql(u8, ref_path, "HEAD")) @as([hash.hexLen(repo_opts.hash)]u8, @splat('0')) else return);
 
             var head: net.RemoteHead(repo_opts.hash) = undefined;
             {
@@ -344,10 +344,10 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 head.oid = oid;
 
                 // if it's a symbolic ref, store the target ref path
-                var ref_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                var ref_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                 if (try rf.read(remote_kind, remote_opts, state, io, ref_path, &ref_buffer)) |ref_or_oid| switch (ref_or_oid) {
                     .ref => |target_ref| {
-                        var target_ref_path_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
+                        var target_ref_path_buffer: [rf.MAX_REF_CONTENT_SIZE]u8 = @splat(0);
                         const target_ref_path = try target_ref.toPath(&target_ref_path_buffer);
                         head.symref = try allocator.dupe(u8, target_ref_path);
                     },

@@ -31,7 +31,7 @@ pub fn RemoteHead(comptime hash_kind: hash.HashKind) type {
 
         pub fn init(name: []u8) RemoteHead(hash_kind) {
             return .{
-                .oid = [_]u8{'0'} ** hash.hexLen(hash_kind),
+                .oid = @splat('0'),
                 .is_local = false,
                 .name = name,
                 .symref = null,
@@ -50,7 +50,7 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
         name: ?[]const u8,
         url: ?[]const u8,
         push_url: ?[]const u8,
-        heads: std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)),
+        heads: std.array_hash_map.String(RemoteHead(repo_opts.hash)),
         refspecs: std.ArrayList(net_refspec.RefSpec),
         active_refspecs: std.ArrayList(net_refspec.RefSpec),
         transport: ?net_transport.Transport(repo_kind, repo_opts),
@@ -114,10 +114,10 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             errdefer allocator.free(name_copy);
             self.name = name_copy;
 
-            self.heads = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
+            self.heads = try std.array_hash_map.String(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
             errdefer self.heads.deinit(allocator);
 
-            const remote_section_name = try std.fmt.allocPrint(allocator, "remote.{s}", .{name});
+            const remote_section_name = try allocator.print("remote.{s}", .{name});
             defer allocator.free(remote_section_name);
 
             const remote_vars = config.sections.get(remote_section_name) orelse return error.ConfigNotFound;
@@ -194,17 +194,17 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             defer config.deinit();
 
             {
-                const config_name = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{name});
+                const config_name = try allocator.print("remote.{s}.url", .{name});
                 defer allocator.free(config_name);
 
                 try config.add(state, io, .{ .name = config_name, .value = url });
             }
 
             {
-                const config_name = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{name});
+                const config_name = try allocator.print("remote.{s}.fetch", .{name});
                 defer allocator.free(config_name);
 
-                const config_value = fetch_refspec orelse try std.fmt.allocPrint(allocator, "+refs/heads/*:refs/remotes/{s}/*", .{name});
+                const config_value = fetch_refspec orelse try allocator.print("+refs/heads/*:refs/remotes/{s}/*", .{name});
                 defer if (fetch_refspec == null) allocator.free(config_value);
 
                 try config.add(state, io, .{ .name = config_name, .value = config_value });
@@ -221,14 +221,14 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             defer config.deinit();
 
             {
-                const config_name = try std.fmt.allocPrint(allocator, "remote.{s}.url", .{name});
+                const config_name = try allocator.print("remote.{s}.url", .{name});
                 defer allocator.free(config_name);
 
                 try config.remove(state, io, .{ .name = config_name });
             }
 
             {
-                const config_name = try std.fmt.allocPrint(allocator, "remote.{s}.fetch", .{name});
+                const config_name = try allocator.print("remote.{s}.fetch", .{name});
                 defer allocator.free(config_name);
 
                 try config.remove(state, io, .{ .name = config_name });
@@ -316,8 +316,8 @@ fn getHeads(
     comptime repo_opts: rp.RepoOpts(repo_kind),
     remote: *Remote(repo_kind, repo_opts),
     allocator: std.mem.Allocator,
-) !std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)) {
-    var refs = try std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
+) !std.array_hash_map.String(RemoteHead(repo_opts.hash)) {
+    var refs = try std.array_hash_map.String(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
     errdefer refs.deinit(allocator);
 
     const heads = if (remote.transport) |*transport| try transport.getHeads() else return error.RemoteNotConnected;
@@ -459,7 +459,7 @@ fn updateRefs(
     io: std.Io,
     allocator: std.mem.Allocator,
     spec: *net_refspec.RefSpec,
-    refs: *std.StringArrayHashMapUnmanaged(RemoteHead(repo_opts.hash)),
+    refs: *std.array_hash_map.String(RemoteHead(repo_opts.hash)),
 ) !void {
     var tagspec = try net_refspec.RefSpec.init(allocator, net_refspec.git_refspec_tags, .fetch);
     defer tagspec.deinit(allocator);

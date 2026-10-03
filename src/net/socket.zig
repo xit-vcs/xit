@@ -41,7 +41,14 @@ pub const SocketStream = struct {
     ) !usize {
         const stream = self.net_stream orelse return error.SocketUnconnected;
         var bufs: [1][]u8 = .{data[0..len]};
-        return try self.io.vtable.netRead(self.io.userdata, stream.socket.handle, &bufs);
+        // workaround: in zig 0.17.0, `std.Io.net.Stream.read` fails to compile
+        // (it destructures `net_read`'s result, which is now a struct), so we
+        // call `operate` directly. switch back to `stream.read` once that's fixed.
+        const result = try (try self.io.operate(.{ .net_read = .{
+            .socket_handle = stream.socket.handle,
+            .data = &bufs,
+        } })).net_read;
+        return result.data_len;
     }
 
     pub fn write(
@@ -50,8 +57,12 @@ pub const SocketStream = struct {
         len: usize,
     ) !usize {
         const stream = self.net_stream orelse return error.SocketUnconnected;
-        const dummy: [1][]const u8 = .{""};
-        return try self.io.vtable.netWrite(self.io.userdata, stream.socket.handle, data[0..len], &dummy, 0);
+        const bufs: [1][]const u8 = .{data[0..len]};
+        // `std.Io.net.Stream` has no unbuffered write function, so we call `operate` directly
+        return try (try self.io.operate(.{ .net_write = .{
+            .socket_handle = stream.socket.handle,
+            .data = &bufs,
+        } })).net_write;
     }
 
     pub fn writeAll(
