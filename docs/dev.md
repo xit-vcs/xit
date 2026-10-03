@@ -14,7 +14,7 @@ The primary tests can be run with `zig build test`. This runs a few things worth
 
   * This is a basic end-to-end test. Most actions are done through `main.run` which programmatically executes things via CLI args (in-process, not subprocessing). This helps to test that the CLI commands work correctly.
 
-  * The tests are run multiple times: once with the xit backend and once with the git backend. The git backend is also validated by running libgit2 functions at various points, to ensure that the git implementation is correct.
+  * The tests are run multiple times: once with the xit backend and once with the git backend. The final commit hashes of both runs must match, and blob hashing is checked against a hash produced by git itself.
 
 * `src/test/repo.zig`
 

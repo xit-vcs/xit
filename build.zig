@@ -27,17 +27,6 @@ pub fn build(b: *std.Build) !void {
 
     // test
     {
-        const zlib = @import("deps/test/zlib.zig");
-        const mbedtls = @import("deps/test/mbedtls.zig");
-        const libgit2 = @import("deps/test/libgit2.zig");
-
-        const z = zlib.create(b, target, optimize);
-        const tls = mbedtls.create(b, target, optimize);
-
-        const git2 = try libgit2.create(b, target, optimize);
-        tls.link(git2.step);
-        z.link(git2.step);
-
         const unit_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/test.zig"),
@@ -48,9 +37,6 @@ pub fn build(b: *std.Build) !void {
         });
         unit_tests.root_module.addImport("xitdb", b.dependency("xitdb", .{}).module("xitdb"));
         unit_tests.root_module.addImport("xitui", b.dependency("xitui", .{}).module("xitui"));
-        unit_tests.root_module.link_libc = true;
-        unit_tests.root_module.addIncludePath(b.path("deps/test/libgit2/include"));
-        unit_tests.root_module.linkLibrary(git2.step);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         run_unit_tests.has_side_effects = true;

@@ -1,6 +1,5 @@
 //! end-to-end test using the main entrypoint: `main.run`.
-//! runs with both git and xit modes, using libgit2 to
-//! validate git mode.
+//! runs with both git and xit modes.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,10 +11,6 @@ const rf = @import("../ref.zig");
 const rp = @import("../repo.zig");
 const df = @import("../diff.zig");
 const mrg = @import("../merge.zig");
-
-const c = @cImport({
-    @cInclude("git2.h");
-});
 
 test "main" {
     // read and write objects in small increments to help uncover bugs
@@ -38,10 +33,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     defer environ_map.deinit();
     const run_opts = main.RunOpts{ .out = &null_writer.writer, .err = &null_writer.writer, .environ_map = &environ_map, .color = false };
 
-    // start libgit
-    if (repo_kind == .git) _ = c.git_libgit2_init();
-    defer _ = if (repo_kind == .git) c.git_libgit2_shutdown();
-
     // create the temp dir
     const cwd = std.Io.Dir.cwd();
     var temp = std.testing.tmpDir(.{});
@@ -52,8 +43,8 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
     // init repo
     try main.run(repo_kind, any_repo_opts, io, allocator, &.{ "init", "repo" }, temp_path, run_opts);
 
-    // get work dir path (null-terminated because it's used by libgit)
-    const work_path = try std.fs.path.joinZ(allocator, &.{ temp_path, "repo" });
+    // get work dir path
+    const work_path = try std.fs.path.join(allocator, &.{ temp_path, "repo" });
     defer allocator.free(work_path);
 
     // get the work dir
@@ -187,22 +178,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                     defer hash_suffix_file.close(io);
                 }
 
-                // read the commit with libgit
-                {
-                    var repo: ?*c.git_repository = null;
-                    try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-                    defer c.git_repository_free(repo);
-                    var head: ?*c.git_reference = null;
-                    try std.testing.expectEqual(0, c.git_repository_head(&head, repo));
-                    defer c.git_reference_free(head);
-                    const oid = c.git_reference_target(head);
-                    try std.testing.expect(null != oid);
-                    var commit: ?*c.git_commit = null;
-                    try std.testing.expectEqual(0, c.git_commit_lookup(&commit, repo, oid));
-                    defer c.git_commit_free(commit);
-                    try std.testing.expectEqualStrings("first commit", std.mem.sliceTo(c.git_commit_message(commit), 0));
-                }
-
                 // make sure we are hashing files the same way git does
                 {
                     const file_size = try readme.length(io);
@@ -217,14 +192,8 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                     try hash.hashReader(any_repo_opts.hash.?, any_repo_opts.read_size, &reader.interface, header, &sha1_bytes_buffer);
                     const sha1_hex = std.fmt.bytesToHex(&sha1_bytes_buffer, .lower);
 
-                    var oid: c.git_oid = undefined;
-                    const readme_path = try std.fs.path.joinZ(allocator, &.{ work_path, "README" });
-                    defer allocator.free(readme_path);
-                    try std.testing.expectEqual(0, c.git_odb_hashfile(&oid, readme_path, c.GIT_OBJECT_BLOB));
-                    const oid_str = c.git_oid_tostr_s(&oid);
-                    try std.testing.expect(oid_str != null);
-
-                    try std.testing.expectEqualStrings(&sha1_hex, std.mem.sliceTo(oid_str, 0));
+                    // output of `printf 'My cool project' | git hash-object --stdin`
+                    try std.testing.expectEqualStrings("f52b554ed6f7a877bd61c3509fe29df7fe56b191", &sha1_hex);
                 }
             },
             .xit => {
@@ -475,22 +444,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                     defer hash_prefix_dir.close(io);
                     var hash_suffix_file = try hash_prefix_dir.openFile(io, head_file_buffer[2..], .{});
                     defer hash_suffix_file.close(io);
-                }
-
-                // read the commit with libgit
-                {
-                    var repo: ?*c.git_repository = null;
-                    try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-                    defer c.git_repository_free(repo);
-                    var head: ?*c.git_reference = null;
-                    try std.testing.expectEqual(0, c.git_repository_head(&head, repo));
-                    defer c.git_reference_free(head);
-                    const oid = c.git_reference_target(head);
-                    try std.testing.expect(null != oid);
-                    var commit: ?*c.git_commit = null;
-                    try std.testing.expectEqual(0, c.git_commit_lookup(&commit, repo, oid));
-                    defer c.git_commit_free(commit);
-                    try std.testing.expectEqualStrings("second commit", std.mem.sliceTo(c.git_commit_message(commit), 0));
                 }
             },
             .xit => {
@@ -751,31 +704,19 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             try std.testing.expect(index.entries.contains("three.txt"));
         }
 
-        switch (repo_kind) {
-            .git => {
-                // read index with libgit
-                var repo: ?*c.git_repository = null;
-                try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-                defer c.git_repository_free(repo);
-                var index: ?*c.git_index = null;
-                try std.testing.expectEqual(0, c.git_repository_index(&index, repo));
-                defer c.git_index_free(index);
-                try std.testing.expectEqual(8, c.git_index_entrycount(index));
-            },
-            .xit => {
-                // read the index in xitdb
-                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
-                defer repo.deinit(io, allocator);
-                var count: u32 = 0;
-                var moment = try repo.core.latestMoment();
-                if (try moment.getCursor(hash.hashInt(any_repo_opts.hash.?, "index"))) |index_cursor| {
-                    var iter = try index_cursor.iterator();
-                    while (try iter.next()) |_| {
-                        count += 1;
-                    }
+        // read the index in xitdb
+        if (repo_kind == .xit) {
+            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
+            defer repo.deinit(io, allocator);
+            var count: u32 = 0;
+            var moment = try repo.core.latestMoment();
+            if (try moment.getCursor(hash.hashInt(any_repo_opts.hash.?, "index"))) |index_cursor| {
+                var iter = try index_cursor.iterator();
+                while (try iter.next()) |_| {
+                    count += 1;
                 }
-                try std.testing.expectEqual(8, count);
-            },
+            }
+            try std.testing.expectEqual(8, count);
         }
 
         // replace directory with file
@@ -810,31 +751,19 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             try std.testing.expect(index.entries.contains("three.txt"));
         }
 
-        switch (repo_kind) {
-            .git => {
-                // read index with libgit
-                var repo: ?*c.git_repository = null;
-                try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-                defer c.git_repository_free(repo);
-                var index: ?*c.git_index = null;
-                try std.testing.expectEqual(0, c.git_repository_index(&index, repo));
-                defer c.git_index_free(index);
-                try std.testing.expectEqual(7, c.git_index_entrycount(index));
-            },
-            .xit => {
-                // read the index in xitdb
-                var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
-                defer repo.deinit(io, allocator);
-                var count: u32 = 0;
-                var moment = try repo.core.latestMoment();
-                if (try moment.getCursor(hash.hashInt(any_repo_opts.hash.?, "index"))) |index_cursor| {
-                    var iter = try index_cursor.iterator();
-                    while (try iter.next()) |_| {
-                        count += 1;
-                    }
+        // read the index in xitdb
+        if (repo_kind == .xit) {
+            var repo = try rp.Repo(repo_kind, any_repo_opts.toRepoOpts()).open(io, allocator, .{ .path = work_path });
+            defer repo.deinit(io, allocator);
+            var count: u32 = 0;
+            var moment = try repo.core.latestMoment();
+            if (try moment.getCursor(hash.hashInt(any_repo_opts.hash.?, "index"))) |index_cursor| {
+                var iter = try index_cursor.iterator();
+                while (try iter.next()) |_| {
+                    count += 1;
                 }
-                try std.testing.expectEqual(7, count);
-            },
+            }
+            try std.testing.expectEqual(7, count);
         }
 
         // a stale index lock file isn't hanging around
@@ -1008,25 +937,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
             // check the work_dir_deleted entries
             try std.testing.expectEqual(1, status.work_dir_deleted.count());
             try std.testing.expect(status.work_dir_deleted.contains("src/zig/main.zig"));
-        }
-
-        // get status with libgit
-        if (repo_kind == .git) {
-            var repo: ?*c.git_repository = null;
-            try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-            defer c.git_repository_free(repo);
-            var status_list: ?*c.git_status_list = null;
-            var status_options: c.git_status_options = undefined;
-            try std.testing.expectEqual(0, c.git_status_options_init(&status_options, c.GIT_STATUS_OPTIONS_VERSION));
-            status_options.show = c.GIT_STATUS_SHOW_WORKDIR_ONLY;
-            status_options.flags = c.GIT_STATUS_OPT_INCLUDE_UNTRACKED;
-            try std.testing.expectEqual(0, c.git_status_list_new(&status_list, repo, &status_options));
-            defer c.git_status_list_free(status_list);
-            switch (builtin.os.tag) {
-                .windows => try std.testing.expectEqual(5, c.git_status_list_entrycount(status_list)),
-                // libgit2 detects the symlink as worktree modified...I'm not sure why
-                else => try std.testing.expectEqual(6, c.git_status_list_entrycount(status_list)),
-            }
         }
 
         // index changes
@@ -1208,18 +1118,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
         var current_branch_buffer = [_]u8{0} ** rf.MAX_REF_CONTENT_SIZE;
         const head = try repo.head(io, &current_branch_buffer);
         try std.testing.expectEqualStrings("stuff", head.ref.name);
-    }
-
-    // get the current branch with libgit
-    if (repo_kind == .git) {
-        var repo: ?*c.git_repository = null;
-        try std.testing.expectEqual(0, c.git_repository_open(&repo, work_path));
-        defer c.git_repository_free(repo);
-        var head: ?*c.git_reference = null;
-        try std.testing.expectEqual(0, c.git_repository_head(&head, repo));
-        defer c.git_reference_free(head);
-        const branch_name = c.git_reference_shorthand(head);
-        try std.testing.expectEqualStrings("stuff", std.mem.sliceTo(branch_name, 0));
     }
 
     // can't delete current branch

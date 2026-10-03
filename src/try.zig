@@ -100,7 +100,6 @@ pub fn main(init: std.process.Init) !void {
         var status = try git_repo.status(io, allocator);
         defer status.deinit(allocator);
         for (status.work_dir_deleted.keys()) |path| {
-            if (std.mem.startsWith(u8, path, "deps/")) continue;
             try run_opts.out.print("Restoring: {s}\n", .{path});
             git_repo.restore(io, allocator, path) catch |err| switch (err) {
                 error.FileNotFound, error.ObjectInvalid => try run_opts.err.print("Failed to restore: {s}\n", .{path}),

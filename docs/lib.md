@@ -4,7 +4,7 @@ No third-party libraries
 
 * One of the most soul-sucking aspects of modern software development is running a build command and watching in horror as hundreds of transitive dependencies are downloaded. We are facing a crisis in software complexity, and many people don't even see it as a problem.
 
-* The only dependencies of xit are a few Zig libraries I wrote myself, as well as the Zig standard library. The copy of libgit2 in this repo is only used by tests to validate xit's git implementation. In prod, xit is a pure Zig program.
+* The only dependencies of xit are a few Zig libraries I wrote myself, as well as the Zig standard library; xit is a pure Zig program.
 
 * Writing things from scratch can lead to a much simpler codebase and dramatically improve the ability to add features and fix problems:
 
