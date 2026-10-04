@@ -33,7 +33,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                 var commit_iter = try repo.log(io, allocator, .{});
                 errdefer commit_iter.deinit();
 
-                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 // init scroll
@@ -71,7 +71,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values()) |id, *commit| {
                 const selected = self.getFocus().child_id == id;
-                commit.widget.text_box.options.border_style = if (selected) .single else .hidden;
+                commit.widget.text_box.options.border = if (selected) .single else .hidden;
                 commit.widget.text_box.options.invert = selected;
             }
             try self.scroll.build(allocator, constraint, root_focus);
@@ -155,7 +155,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
                     const inner_box = &self.scroll.child.box;
                     const message = commit_object.content.commit.metadata.message;
                     const line = if (message.len != 0) message else "(empty message)";
-                    var text_box = try wgt.TextBox.init(allocator, line, .{ .border_style = .hidden, .wrap_kind = .word, .detect_links = true });
+                    var text_box = try wgt.TextBox.init(allocator, line, .{ .border = .hidden, .wrap_kind = .word, .detect_links = true });
                     errdefer text_box.deinit(allocator);
                     text_box.getFocus().mode = .all;
                     try inner_box.children.put(allocator, text_box.getFocus().id, .{
@@ -184,7 +184,7 @@ pub fn Log(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime repo
         const diff_min_width: usize = 60;
 
         pub fn init(io: std.Io, allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Log(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             // add commit list

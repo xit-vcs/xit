@@ -30,7 +30,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             const tx_count = try history.count();
 
             var self = blk: {
-                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 // init scroll
@@ -65,9 +65,9 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
             const children = &self.scroll.child.box.children;
             for (children.keys(), children.values(), 0..) |id, *item, index| {
                 const selected = self.getFocus().child_id == id;
-                item.widget.text_box.options.border_style = if (selected) .single else .hidden;
+                item.widget.text_box.options.border = if (selected) .single else .hidden;
                 item.widget.text_box.options.invert = selected;
-                item.widget.text_box.options.bottom_label = if (root_focus.grandchild_id != id or index + 1 == self.tx_count)
+                item.widget.text_box.options.bottom_label.text = if (root_focus.grandchild_id != id or index + 1 == self.tx_count)
                     (if (self.undone.items[index]) undone_label else "")
                 else if (index == 0)
                     undo_label
@@ -173,7 +173,7 @@ pub fn UndoList(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime
                 }
 
                 const inner_box = &self.scroll.child.box;
-                var text_box = try wgt.TextBox.init(allocator, label.written(), .{ .border_style = .hidden, .wrap_kind = .none });
+                var text_box = try wgt.TextBox.init(allocator, label.written(), .{ .border = .hidden, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
                 try inner_box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -203,16 +203,16 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         const list_index = 1;
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts), session: *ui.Session) !Undo(Widget, repo_kind, repo_opts) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             // keep the action row above the scrollable content.
             {
-                var buttons = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+                var buttons = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
                 errdefer buttons.deinit(allocator);
 
                 {
-                    var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border_style = .single, .wrap_kind = .none });
+                    var button = try wgt.TextBox.init(allocator, "clear undo history", .{ .border = .single, .wrap_kind = .none });
                     errdefer button.deinit(allocator);
                     button.getFocus().mode = .all;
                     try buttons.children.put(allocator, button.getFocus().id, .{ .widget = .{ .text_box = button }, .rect = null, .min_size = null });
@@ -243,7 +243,7 @@ pub fn Undo(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         pub fn build(self: *Undo(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
             const button = &self.box.children.values()[buttons_index].widget.box.children.values()[0].widget.text_box;
-            button.options.bottom_label = if (self.session.pending != null and self.session.pending.? == .gc)
+            button.options.bottom_label.text = if (self.session.pending != null and self.session.pending.? == .gc)
                 " running gc... "
             else if (root_focus.grandchild_id == button.getFocus().id)
                 " run gc "

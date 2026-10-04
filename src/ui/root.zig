@@ -21,7 +21,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
         focus_ids: std.EnumArray(TabKind, ?usize),
 
         pub fn init(allocator: std.mem.Allocator, is_bare: bool) !RootTabs(Widget, repo_kind) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer box.deinit(allocator);
             var focus_ids = std.EnumArray(TabKind, ?usize).initFill(null);
 
@@ -32,7 +32,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                     .config => "config",
                     .undo => if (repo_kind == .xit) "undo" else continue,
                 };
-                var text_box = try wgt.TextBox.init(allocator, name, .{ .border_style = .single, .wrap_kind = .none });
+                var text_box = try wgt.TextBox.init(allocator, name, .{ .border = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
                 try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
@@ -55,7 +55,7 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
             self.clearGrid();
             for (self.box.children.keys(), self.box.children.values()) |id, *tab| {
                 const selected = self.getFocus().child_id == id;
-                tab.widget.text_box.options.border_style = if (selected) .single else .hidden;
+                tab.widget.text_box.options.border = if (selected) .single else .hidden;
                 tab.widget.text_box.options.invert = selected;
             }
             try self.box.build(allocator, constraint, root_focus);
@@ -135,7 +135,7 @@ pub fn Root(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             session.* = .{};
 
             const is_bare = try repo.isBare(io, allocator);
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             inline for (std.meta.tags(FocusKind)) |focus_kind| {

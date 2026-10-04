@@ -17,13 +17,13 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
         hunk_iter: ?df.HunkIterator(repo_kind, repo_opts),
 
         pub fn init(allocator: std.mem.Allocator, repo: *rp.Repo(repo_kind, repo_opts)) !Diff(Widget, repo_kind, repo_opts) {
-            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var inner_box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
             errdefer inner_box.deinit(allocator);
 
             var scroll = try wgt.Scroll(Widget).init(allocator, .{ .box = inner_box }, .{ .direction = .both });
             errdefer scroll.deinit(allocator);
 
-            var outer_box = try wgt.Box(Widget).init(allocator, .{ .border_style = .single, .direction = .vert });
+            var outer_box = try wgt.Box(Widget).init(allocator, .{ .border = .single, .direction = .vert });
             errdefer outer_box.deinit(allocator);
             try outer_box.children.put(allocator, scroll.getFocus().id, .{ .widget = .{ .scroll = scroll }, .rect = null, .min_size = null });
 
@@ -43,7 +43,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
 
         pub fn build(self: *Diff(Widget, repo_kind, repo_opts), allocator: std.mem.Allocator, constraint: layout.Constraint, root_focus: *Focus) !void {
             self.clearGrid();
-            self.box.options.border_style = if (root_focus.grandchild_id == self.getFocus().id) .double else .single;
+            self.box.options.border = if (root_focus.grandchild_id == self.getFocus().id) .double else .single;
             try self.box.build(allocator, constraint, root_focus);
 
             // add another diff if necessary
@@ -234,7 +234,7 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             defer allocator.free(buf);
 
             // add new diff widget with bold header lines
-            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border_style = .hidden, .wrap_kind = .none, .style = .{ .bold = true } });
+            var text_box = try wgt.TextBox.init(allocator, buf, .{ .border = .hidden, .wrap_kind = .none, .style = .{ .bold = true } });
             errdefer text_box.deinit(allocator);
             try self.box.children.values()[0].widget.scroll.child.box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
         }
@@ -294,5 +294,5 @@ fn diffTextBox(allocator: std.mem.Allocator, text: []const u8) !wgt.TextBox {
         try spans.append(allocator, .{ .text = line, .style = style });
         start = end;
     }
-    return try wgt.TextBox.initSpans(allocator, spans.items, .{ .border_style = .hidden, .wrap_kind = .none });
+    return try wgt.TextBox.initSpans(allocator, spans.items, .{ .border = .hidden, .wrap_kind = .none });
 }

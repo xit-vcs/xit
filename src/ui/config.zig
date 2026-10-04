@@ -32,13 +32,13 @@ pub fn ConfigListItem(comptime Widget: type) type {
         const action_child_index: usize = 2;
 
         pub fn init(allocator: std.mem.Allocator, full_name: []const u8, value: []const u8, is_global: bool) !ConfigListItem(Widget) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             var nav_ids: [2]usize = undefined;
 
             {
-                var name_text = try wgt.TextBox.init(allocator, full_name, .{ .border_style = .hidden, .wrap_kind = .none });
+                var name_text = try wgt.TextBox.init(allocator, full_name, .{ .border = .hidden, .wrap_kind = .none });
                 errdefer name_text.deinit(allocator);
                 // match the value TextInput's rendered width (visible_width 28 + 1-cell border on each side)
                 try box.children.put(allocator, name_text.getFocus().id, .{ .widget = .{ .text_box = name_text }, .rect = null, .min_size = .{ .width = 30, .height = null } });
@@ -47,7 +47,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
             {
                 var value_input = try wgt.TextInput.init(allocator, .{
                     .visible_width = 28,
-                    .bottom_label = if (is_global) " global " else "",
+                    .bottom_label = .{ .text = if (is_global) " global " else "" },
                     .read_only = is_global,
                 });
                 errdefer value_input.deinit(allocator);
@@ -65,7 +65,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 errdefer stack.deinit(allocator);
 
                 if (!is_global) {
-                    var remove_button = try wgt.TextBox.init(allocator, "remove", .{ .border_style = .single, .wrap_kind = .none });
+                    var remove_button = try wgt.TextBox.init(allocator, "remove", .{ .border = .single, .wrap_kind = .none });
                     errdefer remove_button.deinit(allocator);
                     remove_button.getFocus().mode = .all;
                     const id = remove_button.getFocus().id;
@@ -74,7 +74,7 @@ pub fn ConfigListItem(comptime Widget: type) type {
                 }
 
                 {
-                    var update_button = try wgt.TextBox.init(allocator, "update", .{ .border_style = .single, .wrap_kind = .none });
+                    var update_button = try wgt.TextBox.init(allocator, "update", .{ .border = .single, .wrap_kind = .none });
                     errdefer update_button.deinit(allocator);
                     update_button.getFocus().mode = .all;
                     update_id = update_button.getFocus().id;
@@ -186,13 +186,13 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
         pub const action_index: usize = 2;
 
         pub fn init(allocator: std.mem.Allocator) !ConfigAddListItem(Widget) {
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .horiz });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .horiz });
             errdefer box.deinit(allocator);
 
             var nav_ids: [3]usize = undefined;
 
             {
-                var name_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " name " });
+                var name_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .top_label = .{ .text = " name " } });
                 errdefer name_input.deinit(allocator);
                 name_input.getFocus().mode = .all;
                 nav_ids[name_index] = name_input.getFocus().id;
@@ -200,7 +200,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             }
 
             {
-                var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .label = " value " });
+                var value_input = try wgt.TextInput.init(allocator, .{ .visible_width = 28, .top_label = .{ .text = " value " } });
                 errdefer value_input.deinit(allocator);
                 value_input.getFocus().mode = .all;
                 nav_ids[value_index] = value_input.getFocus().id;
@@ -208,7 +208,7 @@ pub fn ConfigAddListItem(comptime Widget: type) type {
             }
 
             {
-                var add_button = try wgt.TextBox.init(allocator, "add", .{ .border_style = .single, .wrap_kind = .none });
+                var add_button = try wgt.TextBox.init(allocator, "add", .{ .border = .single, .wrap_kind = .none });
                 errdefer add_button.deinit(allocator);
                 add_button.getFocus().mode = .all;
                 nav_ids[action_index] = add_button.getFocus().id;
@@ -294,7 +294,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
             var config = try repo.listConfig(io, allocator);
             errdefer config.deinit();
 
-            var box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+            var box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
             errdefer box.deinit(allocator);
 
             // add row at index 0 — always visible
@@ -306,7 +306,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             // scroll with the config items below
             {
-                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border_style = null, .direction = .vert });
+                var inner_box = try wgt.Box(Widget).init(allocator, .{ .border = null, .direction = .vert });
                 errdefer inner_box.deinit(allocator);
 
                 try appendConfigItems(&inner_box, allocator, &config);
@@ -389,7 +389,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
                     if (current_row == 0) {
                         const add_item = self.addItemPtr();
-                        add_item.nameInput().options.label = " name ";
+                        add_item.nameInput().options.top_label.text = " name ";
                         const name = try add_item.nameInput().text(allocator);
                         defer allocator.free(name);
                         const value = try add_item.valueInput().text(allocator);
@@ -400,7 +400,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
                         self.repo.addConfig(self.io, allocator, .{ .name = name, .value = value }) catch |err| switch (err) {
                             error.KeyDoesNotContainASection => {
-                                add_item.nameInput().options.label = " name (section required) ";
+                                add_item.nameInput().options.top_label.text = " name (section required) ";
                                 return;
                             },
                             else => return err,
