@@ -230,7 +230,8 @@ pub fn LineIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             allocator: std.mem.Allocator,
             buffer: []const u8,
         ) !Self {
-            return try initFromBuffer(allocator, "", &@as([hash.byteLen(repo_opts.hash)]u8, @splat(0)), null, buffer);
+            const zero_oid: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
+            return try initFromBuffer(allocator, "", &zero_oid, null, buffer);
         }
 
         /// reads every line into memory, including the empty line after a final

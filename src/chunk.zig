@@ -535,8 +535,9 @@ fn readRecord(
         .none => payload,
         .zlib => zlib: {
             var payload_reader = std.Io.Reader.fixed(payload);
-            var zlib_stream_buffer: [std.compress.flate.max_window_len]u8 = undefined;
-            var zlib_stream: std.compress.flate.Decompress = .init(&payload_reader, .zlib, &zlib_stream_buffer);
+            // without a buffer of its own, the stream decompresses straight
+            // into `buf`, which holds the whole chunk and so all of its history
+            var zlib_stream: std.compress.flate.Decompress = .init(&payload_reader, .zlib, &.{});
             var chunk_writer = std.Io.Writer.fixed(buf);
             const size = try zlib_stream.reader.streamRemaining(&chunk_writer);
             break :zlib buf[0..size];

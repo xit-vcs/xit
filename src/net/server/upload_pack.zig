@@ -168,7 +168,8 @@ fn uploadPack(
         }
 
         if (!upload_pack.sent_capabilities) {
-            try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, "capabilities^{}", &@as([hash.hexLen(repo_opts.hash)]u8, @splat('0')));
+            const null_oid: [hash.hexLen(repo_opts.hash)]u8 = @splat('0');
+            try upload_pack.writeV0Ref(repo_kind, repo_opts, state, io, allocator, writer, &our_refs, "capabilities^{}", &null_oid);
         }
 
         try pkt.writePktFlush(writer);

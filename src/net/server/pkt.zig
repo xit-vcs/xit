@@ -23,10 +23,11 @@ pub fn writePktLine(writer: *std.Io.Writer, data: []const u8) std.Io.Writer.Erro
 }
 
 pub fn writePktLineFmt(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) std.Io.Writer.Error!void {
-    var buf: [LARGE_PACKET_MAX]u8 = undefined;
-    var fixed: std.Io.Writer = .fixed(&buf);
-    try fixed.print(fmt, args);
-    try writePktLine(writer, fixed.buffered());
+    // count the length first so the line can be printed straight into the writer
+    const data_len = std.fmt.count(fmt, args);
+    if (data_len > LARGE_PACKET_MAX) return error.WriteFailed;
+    try writer.writeAll(&pktLineHeader(data_len + PKT_LEN_SIZE));
+    try writer.print(fmt, args);
 }
 
 pub fn writePktFlush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -47,10 +48,11 @@ pub fn writePktLineSB(writer: *std.Io.Writer, band: u8, data: []const u8) std.Io
 }
 
 pub fn writePktLineSBFmt(writer: *std.Io.Writer, band: u8, comptime fmt: []const u8, args: anytype) std.Io.Writer.Error!void {
-    var buf: [LARGE_PACKET_MAX]u8 = undefined;
-    var fixed: std.Io.Writer = .fixed(&buf);
-    try fixed.print(fmt, args);
-    try writePktLineSB(writer, band, fixed.buffered());
+    const data_len = std.fmt.count(fmt, args);
+    if (data_len > LARGE_PACKET_MAX) return error.WriteFailed;
+    try writer.writeAll(&pktLineHeader(data_len + PKT_LEN_SIZE + 1));
+    try writer.writeByte(band);
+    try writer.print(fmt, args);
 }
 
 pub fn sendSideband(writer: *std.Io.Writer, band: u8, data: []const u8) std.Io.Writer.Error!void {

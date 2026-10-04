@@ -333,7 +333,8 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const ref_path = try ref.toPath(&ref_path_buffer);
 
             const oid_maybe = try net.resolveRef(remote_kind, remote_opts, state, io, allocator, ref);
-            const oid = oid_maybe orelse (if (std.mem.eql(u8, ref_path, "HEAD")) @as([hash.hexLen(repo_opts.hash)]u8, @splat('0')) else return);
+            const null_oid: [hash.hexLen(repo_opts.hash)]u8 = @splat('0');
+            const oid = oid_maybe orelse (if (std.mem.eql(u8, ref_path, "HEAD")) null_oid else return);
 
             var head: net.RemoteHead(repo_opts.hash) = undefined;
             {

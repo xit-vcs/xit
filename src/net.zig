@@ -114,7 +114,7 @@ pub fn Remote(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             errdefer allocator.free(name_copy);
             self.name = name_copy;
 
-            self.heads = try std.array_hash_map.String(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
+            self.heads = .empty;
             errdefer self.heads.deinit(allocator);
 
             const remote_section_name = try allocator.print("remote.{s}", .{name});
@@ -317,7 +317,7 @@ fn getHeads(
     remote: *Remote(repo_kind, repo_opts),
     allocator: std.mem.Allocator,
 ) !std.array_hash_map.String(RemoteHead(repo_opts.hash)) {
-    var refs = try std.array_hash_map.String(RemoteHead(repo_opts.hash)).init(allocator, &.{}, &.{});
+    var refs: std.array_hash_map.String(RemoteHead(repo_opts.hash)) = .empty;
     errdefer refs.deinit(allocator);
 
     const heads = if (remote.transport) |*transport| try transport.getHeads() else return error.RemoteNotConnected;

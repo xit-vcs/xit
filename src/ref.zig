@@ -292,9 +292,10 @@ pub fn RefIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoO
                         var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                         var reader = packed_refs_file.reader(io, &reader_buffer);
 
+                        var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
+
                         // for each line...
                         while (reader.interface.peekByte()) |_| {
-                            var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
                             var line_writer = std.Io.Writer.fixed(&line_buffer);
                             const size = try reader.interface.streamDelimiterEnding(&line_writer, '\n');
                             const line = line_buffer[0..size];
@@ -563,9 +564,10 @@ pub fn read(
                 var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
                 var reader = packed_refs_file.reader(io, &reader_buffer);
 
+                var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
+
                 // for each line...
                 while (reader.interface.peekByte()) |_| {
-                    var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
                     var line_writer = std.Io.Writer.fixed(&line_buffer);
                     const size = try reader.interface.streamDelimiterEnding(&line_writer, '\n');
                     const line = line_buffer[0..size];

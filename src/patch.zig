@@ -1136,6 +1136,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             var level: usize = 0;
             const b = b_maybe orelse "";
             var b_active = b_maybe != null;
+            const zero_pair: [pair_size]u8 = @splat(0);
             while (true) : (level += 1) {
                 const a_pair: ?[]const u8 = if ((level + 1) * pair_size <= a.len) a[level * pair_size ..][0..pair_size] else null;
                 const b_pair: ?[]const u8 = if (b_active and (level + 1) * pair_size <= b.len) b[level * pair_size ..][0..pair_size] else null;
@@ -1144,7 +1145,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 if (hi > lo and hi - lo - 1 >= text_count) {
                     return .{ .prefix = try allocator.dupe(u8, prefix.items), .lo = lo, .hi = hi };
                 }
-                const pair = a_pair orelse &@as([pair_size]u8, @splat(0));
+                const pair = a_pair orelse &zero_pair;
                 try prefix.appendSlice(allocator, pair);
                 b_active = if (b_pair) |other| std.mem.eql(u8, pair, other) else false;
             }

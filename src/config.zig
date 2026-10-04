@@ -422,9 +422,10 @@ fn parseFile(
     var reader_buffer: [repo_opts.buffer_size]u8 = @splat(0);
     var reader = config_file.reader(io, &reader_buffer);
 
+    var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
+
     // for each line...
     while (reader.interface.peekByte()) |_| {
-        var line_buffer: [repo_opts.max_read_size]u8 = @splat(0);
         var line_writer = std.Io.Writer.fixed(&line_buffer);
         const size = try reader.interface.streamDelimiterEnding(&line_writer, '\n');
         const line = line_buffer[0..size];

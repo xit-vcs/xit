@@ -247,7 +247,8 @@ pub fn advertiseUncreated(
     const defaults: ReceivePack = .{};
     var line_buf: [pkt.LARGE_PACKET_MAX]u8 = undefined;
     var line: std.Io.Writer = .fixed(&line_buf);
-    try line.writeAll(&@as([hash.hexLen(.sha1)]u8, @splat('0')) ++ " capabilities^{}");
+    const null_oid: [hash.hexLen(.sha1)]u8 = @splat('0');
+    try line.writeAll(&null_oid ++ " capabilities^{}");
     try line.writeByte(0);
     try writeCapabilities(repo_kind, &line, defaults.prefer_ofs_delta);
     try line.print(" object-format={s} object-format={s}\n", .{ common.hashName(.sha1), common.hashName(.sha256) });
@@ -381,7 +382,8 @@ const ReceivePack = struct {
         }
 
         if (!self.sent_capabilities) {
-            try self.advertiseRef(repo_kind, repo_opts, writer, "capabilities^{}", &@as([hash.hexLen(repo_opts.hash)]u8, @splat('0')));
+            const null_oid: [hash.hexLen(repo_opts.hash)]u8 = @splat('0');
+            try self.advertiseRef(repo_kind, repo_opts, writer, "capabilities^{}", &null_oid);
         }
 
         try pkt.writePktFlush(writer);
@@ -705,8 +707,8 @@ const ReceivePack = struct {
         // doesn't exist reads as the null oid, which is what a create sends.
         {
             const ref = rf.Ref.initFromPath(name, null) orelse return "funny refname";
-            const current_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref }) orelse
-                @as([hash.hexLen(repo_opts.hash)]u8, @splat('0'));
+            const null_oid: [hash.hexLen(repo_opts.hash)]u8 = @splat('0');
+            const current_oid = try rf.readRecur(repo_kind, repo_opts, state.readOnly(), io, .{ .ref = ref }) orelse null_oid;
             if (!std.mem.eql(u8, &current_oid, &ref_update.old_oid)) {
                 if (isNullOid(&ref_update.old_oid)) {
                     try writeError(writer, "refusing to create '{s}', which already exists", .{name});

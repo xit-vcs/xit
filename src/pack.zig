@@ -1833,8 +1833,8 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         if (o.stream) |*stream| {
                             const size = switch (self.source) {
                                 .none => unreachable,
-                                .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, @fromBackingInt(@intCast(buffer.len))),
-                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, @fromBackingInt(@intCast(buffer.len))),
+                                .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, .limited(buffer.len)),
+                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, .limited(buffer.len)),
                             } catch |err| switch (err) {
                                 error.EndOfStream => 0,
                                 else => |e| return e,
