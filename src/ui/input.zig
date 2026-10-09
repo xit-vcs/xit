@@ -5,12 +5,8 @@ const Focus = xitui.focus.Focus;
 
 pub fn vertDirection(key: Key) enum { up, down, none } {
     return switch (key) {
-        .arrow_up => .up,
-        .arrow_down => .down,
-        .mouse => |mouse| if (mouse.action == .scroll)
-            (if (mouse.action.scroll == .up) .up else .down)
-        else
-            .none,
+        .arrow_up, .scroll_up => .up,
+        .arrow_down, .scroll_down => .down,
         else => .none,
     };
 }
@@ -19,7 +15,7 @@ pub fn activates(key: Key, target_id: usize, root_focus: *const Focus) bool {
     return switch (key) {
         .enter => true,
         .mouse => |mouse| blk: {
-            if (mouse.action == .press and mouse.action.press == .left) {
+            if (mouse.button == .left) {
                 if (root_focus.children.get(target_id)) |entry| {
                     const rect = entry.rect;
                     break :blk mouse.x >= rect.x and mouse.y >= rect.y and
@@ -54,14 +50,9 @@ pub fn vertIndex(key: Key, current_index: usize, count: usize, grid_maybe: ?Grid
                 return @min(current_index + half_count, count - 1);
             }
         },
-        .mouse => |mouse| switch (mouse.action) {
-            .scroll => |dir| switch (dir) {
-                .up => return current_index -| 1,
-                .down => if (current_index + 1 < count) {
-                    return current_index + 1;
-                },
-            },
-            else => {},
+        .scroll_up => return current_index -| 1,
+        .scroll_down => if (current_index + 1 < count) {
+            return current_index + 1;
         },
         else => {},
     }

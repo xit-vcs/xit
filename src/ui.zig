@@ -231,7 +231,7 @@ pub fn start(
                     else => try root.input(allocator, key, root.getFocus()),
                 },
                 .mouse => |mouse| {
-                    if (mouse.action == .press and mouse.action.press == .left) {
+                    if (mouse.button == .left) {
                         const root_focus = root.getFocus();
                         if (root_focus.hitTest(mouse.x, mouse.y)) |hit| root_focus.setFocus(hit.id);
                     }

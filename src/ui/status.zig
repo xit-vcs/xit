@@ -544,12 +544,8 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                     // like arrow up/down does
                     const Direction = enum { up, down, none };
                     const direction: Direction = switch (key) {
-                        .arrow_up => .up,
-                        .arrow_down => .down,
-                        .mouse => |mouse| if (mouse.action == .scroll)
-                            (if (mouse.action.scroll == .up) .up else .down)
-                        else
-                            .none,
+                        .arrow_up, .scroll_up => .up,
+                        .arrow_down, .scroll_down => .down,
                         else => .none,
                     };
 

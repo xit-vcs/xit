@@ -477,14 +477,9 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                         }
                     }
                 },
-                .mouse => |mouse| switch (mouse.action) {
-                    .scroll => |dir| switch (dir) {
-                        .up => new_row -|= 1,
-                        .down => if (new_row + 1 < row_count) {
-                            new_row += 1;
-                        },
-                    },
-                    else => {},
+                .scroll_up => new_row -|= 1,
+                .scroll_down => if (new_row + 1 < row_count) {
+                    new_row += 1;
                 },
                 else => {},
             }
