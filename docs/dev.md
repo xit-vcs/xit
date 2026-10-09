@@ -1,13 +1,3 @@
-This is a big project and I could use some help. That said, I am very picky about accepting changes.
-
-* I usually prefer simple, dumb, compact solutions even if the more complex, verbose solution is more featureful or faster (though I'm open to the latter if the win is big enough).
-
-* I'm suspicious of too much abstraction because it creates indirection in the codebase, which hurts readability, and can make it harder to make changes later.
-
-* A little duplication is better than a bad abstraction!
-
-This project is MIT licensed and there is no CLA or COC or any other acronymized hot mess.
-
 The primary tests can be run with `zig build test`. This runs a few things worth knowing about:
 
 * `src/test/main.zig`
