@@ -1191,7 +1191,7 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                     };
 
                     // we need to return the source name so copy it into a new buffer
-                    // so we an ensure it lives as long as the rest of the return struct
+                    // so we can ensure it lives as long as the rest of the return struct
                     const source_name = try arena.allocator().dupe(u8, switch (source_ref_or_oid) {
                         .ref => |ref| ref.name,
                         .oid => |oid| oid,
