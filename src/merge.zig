@@ -1360,6 +1360,13 @@ pub fn Merge(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         break :blk try obj.writeCommit(repo_kind, repo_opts, state, io, allocator, commit_metadata, &tree, target_ref);
                     } else try obj.writeCommitAtHead(repo_kind, repo_opts, state, io, allocator, commit_metadata);
 
+                    // the new commit gets patches too, like its parents above
+                    if (repo_kind == .xit and merge_algo == .patch) {
+                        if (try patch.readCommitStats(repo_opts, state.readOnly().extra.moment, &target_oid) != null) {
+                            try patch.writePatches(repo_opts, state, io, allocator, &.{commit_oid}, progress_ctx_maybe);
+                        }
+                    }
+
                     merge_result.result = .{ .success = .{ .oid = commit_oid } };
                     return merge_result;
                 },
