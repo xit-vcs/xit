@@ -1151,8 +1151,8 @@ fn testPush(
             try std.testing.expectEqual(null, try server_repo.readRef(io, .{ .kind = .head, .name = "fresh" }));
         }
         try server_repo.removeConfig(io, allocator, .{ .name = "receive.denydeletes" });
-        try client_repo.push(io, allocator, "origin", ":master", false, .{});
-        try client_repo.push(io, allocator, "origin", "master", false, .{});
+        // the branch a bare HEAD names can't be deleted either
+        try std.testing.expectError(error.RemoteRejectedRef, client_repo.push(io, allocator, "origin", ":master", false, .{}));
 
         // also exercise conversion to an empty non-bare local destination.
         const checkout_path = try std.Io.Dir.path.join(allocator, &.{ temp_path, "checkout" });

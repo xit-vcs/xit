@@ -626,8 +626,9 @@ const ReceivePack = struct {
 
         var head_read_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
         var head_path_buf: [rf.MAX_REF_CONTENT_SIZE]u8 = undefined;
+        // a bare repo has no checked out branch, but its HEAD still names the
+        // default branch, which must not be deleted
         self.head_name = blk: {
-            if (self.is_bare) break :blk null;
             const ref_or_oid = rf.read(repo_kind, repo_opts, state.readOnly(), io, "HEAD", &head_read_buf) catch |err| switch (err) {
                 error.RefNotFound => break :blk null,
                 else => |e| return e,
@@ -738,7 +739,7 @@ const ReceivePack = struct {
         var should_update_worktree = false;
 
         if (self.head_name) |head_name| {
-            if (std.mem.eql(u8, name, head_name)) {
+            if (!self.is_bare and std.mem.eql(u8, name, head_name)) {
                 switch (self.deny_current_branch) {
                     .ignore => {},
                     .warn => if (!dry_run) try writeWarning(writer, "updating the current branch", .{}),
