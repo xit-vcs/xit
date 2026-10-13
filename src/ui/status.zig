@@ -213,7 +213,8 @@ pub fn StatusTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                 var text_box = try wgt.TextBox.init(allocator, label, .{ .border = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
-                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                // a min size makes the box keep the focused tab on screen when narrow
+                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = .{ .width = label.len + 2, .height = null } });
             }
 
             var ui_status_tabs = StatusTabs(Widget, repo_kind, repo_opts){ .box = box };

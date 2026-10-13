@@ -35,7 +35,8 @@ pub fn RootTabs(comptime Widget: type, comptime repo_kind: rp.RepoKind) type {
                 var text_box = try wgt.TextBox.init(allocator, name, .{ .border = .single, .wrap_kind = .none });
                 errdefer text_box.deinit(allocator);
                 text_box.getFocus().mode = .all;
-                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = null });
+                // a min size makes the box keep the focused tab on screen when narrow
+                try box.children.put(allocator, text_box.getFocus().id, .{ .widget = .{ .text_box = text_box }, .rect = null, .min_size = .{ .width = name.len + 2, .height = null } });
                 focus_ids.set(focus_kind, text_box.getFocus().id);
             }
 
