@@ -73,6 +73,8 @@ const ProgressCtx = struct {
                     .walking_commit => "Walking commit",
                     .sending_bytes => "Sending bytes",
                     .receiving_bytes => "Receiving bytes",
+                    .pruning_database => "Pruning database",
+                    .compacting_database => "Compacting database",
                 };
                 self.node.* = root.start(name, start.estimated_total_items);
             },
@@ -640,7 +642,15 @@ fn runCommand(
                 return error.HandledError;
             },
             .xit => {
-                const result = try repo.garbageCollect(io, allocator, .{});
+                var clear_line = false;
+                var progress_node: ?std.Progress.Node = null;
+                const result = try repo.garbageCollect(
+                    io,
+                    allocator,
+                    .{},
+                    if (repo_opts.ProgressCtx == void) {} else .{ .run_opts = run_opts, .clear_line = &clear_line, .node = &progress_node },
+                );
+                endProgress();
                 try run_opts.out.print(
                     \\.xit/db: {} -> {} bytes
                     \\

@@ -34,7 +34,7 @@ pub const Session = struct {
         defer self.pending = null;
         switch (action) {
             .gc => if (repo_kind == .xit) {
-                _ = try repo.garbageCollect(io, allocator, .{});
+                _ = try repo.garbageCollect(io, allocator, .{}, null);
             },
             .undo => |history_index| if (repo_kind == .xit) {
                 try repo.undo(io, history_index);

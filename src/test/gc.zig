@@ -75,7 +75,7 @@ test "gc" {
     try addFile(.xit, repo_opts, &repo, io, allocator, "staged.bin", staged_content);
 
     // an otherwise unreachable object survives while supplied as an extra root
-    _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = &.{side_commit} });
+    _ = try repo.garbageCollect(io, allocator, .{ .extra_roots = &.{side_commit} }, null);
     try std.testing.expectEqual(2, (try repo.commitStats(io, allocator, .{ .oid = &side_commit })).?.first_parent_depth);
     {
         var moment = try repo.core.latestMoment();
@@ -84,7 +84,7 @@ test "gc" {
         side_commit_object.deinit();
     }
 
-    const result = try repo.garbageCollect(io, allocator, .{});
+    const result = try repo.garbageCollect(io, allocator, .{}, null);
     try std.testing.expectError(error.FileNotFound, repo.core.repo_dir.access(io, "temp.gc-offsets", .{}));
 
     // the deleted branch's objects and chunks are gone, so the db shrank
@@ -144,7 +144,7 @@ test "gc" {
 
     // a second gc runs fine and everything still reads back
     {
-        _ = try repo.garbageCollect(io, allocator, .{});
+        _ = try repo.garbageCollect(io, allocator, .{}, null);
 
         var work_dir = try temp.dir.openDir(io, "repo", .{});
         defer work_dir.close(io);
@@ -190,7 +190,7 @@ test "gc ignores stale temporary files" {
 
     var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
-    _ = try repo.garbageCollect(io, allocator, .{});
+    _ = try repo.garbageCollect(io, allocator, .{}, null);
     try std.testing.expectError(error.FileNotFound, xit_dir.access(io, "temp.gc-offsets", .{}));
 
     const actual = try repo.core.work_dir.readFileAlloc(io, "hello.md", allocator, .limited(1024));
@@ -256,7 +256,7 @@ test "gc with patches" {
     // keep the discarded branch through an extra root, then collect it.
     // its insertion and replacement records should both be removed.
     for ([_][]const [hash.hexLen(repo_opts.hash)]u8{ &.{trash_oid}, &.{} }, [_]usize{ 5, 3 }) |roots, expected| {
-        const result = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots });
+        const result = try repo.garbageCollect(io, allocator, .{ .extra_roots = roots }, null);
         try std.testing.expect(result.size_after < result.size_before);
         const moment = try repo.core.latestMoment();
         for ([_][]const u8{ "patch-id->edit-list", "edit-id->edit" }) |name| {

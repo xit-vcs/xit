@@ -1042,7 +1042,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
         break :blk try repo.commit(io, allocator, .{ .message = "third", .parent_oids = &.{root_oid}, .timestamp = 4 });
     } else null;
     try repo.patchAll(io, allocator, null);
-    if (case == .history) _ = try repo.garbageCollect(io, allocator, .{});
+    if (case == .history) _ = try repo.garbageCollect(io, allocator, .{}, null);
 
     if (case == .stale_oid) {
         // a snapshot that names the wrong blob must not be diffed against
@@ -4634,7 +4634,7 @@ fn testObjectStorage(size: usize, expect_inline: bool, collect: bool) !void {
     try addFile(.xit, opts, &repo, io, allocator, "text", "some text that compresses, some text that compresses\n");
     _ = try repo.commit(io, allocator, .{ .message = "commit" });
 
-    if (collect) _ = try repo.garbageCollect(io, allocator, .{});
+    if (collect) _ = try repo.garbageCollect(io, allocator, .{}, null);
     var moment = try repo.core.latestMoment();
     const state = rp.Repo(.xit, opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };
     var index = try idx.Index(.xit, opts).init(state, io, allocator);
@@ -4692,7 +4692,7 @@ test "shared chunks survive gc" {
     try repo.removeBranch(io, .{ .name = "side" });
 
     // the dead object's own chunks go, but the ones it shared must stay
-    const result = try repo.garbageCollect(io, allocator, .{});
+    const result = try repo.garbageCollect(io, allocator, .{}, null);
     try std.testing.expect(result.size_after < result.size_before);
     var moment = try repo.core.latestMoment();
     const state = rp.Repo(.xit, opts).State(.read_only){ .core = &repo.core, .extra = .{ .moment = &moment } };

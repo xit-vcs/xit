@@ -31,37 +31,51 @@ fn SetsDb(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
 }
 
-// store offsets as u64 keys in a separate, mutable top-level xitdb hash map
-const DiskOffsets = struct {
-    const DB = @import("xitdb").Database(.file, u64);
+// an error from the reporter, such as a cancellation, stops the collection
+fn report(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe: ?repo_opts.ProgressCtx, event: rp.ProgressEvent) !void {
+    if (repo_opts.ProgressCtx == void) return;
+    const progress_ctx = progress_ctx_maybe orelse return;
+    try progress_ctx.run(io, event);
+}
 
-    io: std.Io,
-    file: std.Io.File,
-    db: DB = undefined, // initialized by compact's call to reset
+// store offsets as u64 keys in a separate, mutable top-level xitdb hash map.
+// compaction puts every record it copies, so progress is reported from here.
+fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
+    return struct {
+        const DB = @import("xitdb").Database(.file, u64);
 
-    pub fn reset(self: *@This()) !void {
-        try self.file.setLength(self.io, 0);
-        self.db = try DB.init(.{ .io = self.io, .file = self.file, .fsync = false });
-    }
+        io: std.Io,
+        file: std.Io.File,
+        db: DB = undefined, // initialized by compact's call to reset
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
-    pub fn get(self: *@This(), source_offset: u64) !?u64 {
-        const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
-        const cursor = (try map.getCursor(source_offset)) orelse return null;
-        return try cursor.readUint();
-    }
+        pub fn reset(self: *@This()) !void {
+            try self.file.setLength(self.io, 0);
+            self.db = try DB.init(.{ .io = self.io, .file = self.file, .fsync = false });
+        }
 
-    pub fn put(self: *@This(), source_offset: u64, target_offset: u64) !void {
-        const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
-        try map.put(source_offset, .{ .uint = target_offset });
-    }
-};
+        pub fn get(self: *@This(), source_offset: u64) !?u64 {
+            const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
+            const cursor = (try map.getCursor(source_offset)) orelse return null;
+            return try cursor.readUint();
+        }
+
+        pub fn put(self: *@This(), source_offset: u64, target_offset: u64) !void {
+            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
+            try map.put(source_offset, .{ .uint = target_offset });
+            try report(repo_opts, self.io, self.progress_ctx_maybe, .{ .complete_one = .compacting_database });
+        }
+    };
+}
 
 // keeps only the entries of an oid-keyed map whose key is in `live_oids`
 fn pruneOidMap(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
     map_name: []const u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const map_key = hash.hashInt(repo_opts.hash, map_name);
@@ -75,14 +89,17 @@ fn pruneOidMap(
         if (try live_oids.getSlot(kv_pair.hash) == null) {
             _ = try new_map.remove(kv_pair.hash);
         }
+        try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
     }
 }
 
 fn prunePatchData(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
     allocator: std.mem.Allocator,
     sets: SetsDb(repo_opts).HashMap(.read_write),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const patch = @import("./patch.zig");
     const xitdb = @import("xitdb");
@@ -109,6 +126,7 @@ fn prunePatchData(
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
                 try visited.put(slot.value, .{ .uint = 1 });
+                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
@@ -153,8 +171,8 @@ fn prunePatchData(
         }
     }
 
-    try pruneOidMap(repo_opts, state, patches, "patch-id->edit-list");
-    try pruneOidMap(repo_opts, state, edits, "edit-id->edit");
+    try pruneOidMap(repo_opts, state, io, patches, "patch-id->edit-list", progress_ctx_maybe);
+    try pruneOidMap(repo_opts, state, io, edits, "edit-id->edit", progress_ctx_maybe);
 }
 
 // the new repo db, ready to be renamed over "db"
@@ -170,6 +188,7 @@ pub fn prune(
     io: std.Io,
     allocator: std.mem.Allocator,
     extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const patch = @import("./patch.zig");
     const DB = rp.Repo(.xit, repo_opts).DB;
@@ -184,25 +203,30 @@ pub fn prune(
     var sets_db = try SetsDb(repo_opts).init(.{ .io = io, .file = sets_file, .fsync = false });
     const sets = try SetsDb(repo_opts).HashMap(.read_write).init(sets_db.rootCursor());
 
-    // find every object reachable from the roots
+    // find every object reachable from the roots. like every gc phase, its
+    // total isn't known until it is done.
     const live_oids = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-oids")));
-    try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids);
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .enumerating_object, .estimated_total_items = 0 } });
+    try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
+
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .pruning_database, .estimated_total_items = 0 } });
 
     // find every chunk record referenced by a live object
     const referenced_positions = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "referenced-positions")));
-    try findReferencedPositions(repo_opts, state.readOnly(), live_oids, referenced_positions);
+    try findReferencedPositions(repo_opts, state.readOnly(), io, live_oids, referenced_positions, progress_ctx_maybe);
 
     // each map is iterated through a cursor taken before it is written to,
     // because entries can't be removed while the map is being iterated.
     // writing copies the map, so the cursor keeps seeing every entry.
 
-    try pruneOidMap(repo_opts, state, live_oids, "object-id->content");
+    try pruneOidMap(repo_opts, state, io, live_oids, "object-id->content", progress_ctx_maybe);
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
-    try pruneOidMap(repo_opts, state, live_oids, "commit-id->snapshot");
-    try pruneOidMap(repo_opts, state, live_oids, patch.COMMIT_ID_TO_STATS_KEY);
-    try prunePatchData(repo_opts, state, allocator, sets);
+    try pruneOidMap(repo_opts, state, io, live_oids, "commit-id->snapshot", progress_ctx_maybe);
+    try pruneOidMap(repo_opts, state, io, live_oids, patch.COMMIT_ID_TO_STATS_KEY, progress_ctx_maybe);
+    try prunePatchData(repo_opts, state, io, allocator, sets, progress_ctx_maybe);
 
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"))) |old_chunk_map_cursor| {
         const old_chunk_map = try DB.HashMap(.read_only).init(old_chunk_map_cursor);
@@ -216,8 +240,11 @@ pub fn prune(
             if (try referenced_positions.getSlot(record_position) == null) {
                 _ = try new_chunk_map.remove(kv_pair.hash);
             }
+            try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
         }
     }
+
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .pruning_database });
 }
 
 // replaces the repo's database with a copy of its latest moment, reclaiming
@@ -228,6 +255,7 @@ pub fn compactDatabase(
     repo: *rp.Repo(.xit, repo_opts),
     io: std.Io,
     allocator: std.mem.Allocator,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !u64 {
     const repo_dir = repo.core.repo_dir;
 
@@ -236,11 +264,15 @@ pub fn compactDatabase(
         offsets_file.close(io);
         repo_dir.deleteFile(io, offsets_name) catch {};
     }
-    var offset_map = DiskOffsets{ .io = io, .file = offsets_file };
+    var offset_map = DiskOffsets(repo_opts){ .io = io, .file = offsets_file, .progress_ctx_maybe = progress_ctx_maybe };
 
     var adopted = false;
     const new_db_file = try repo_dir.createFile(io, db_new_name, .{ .truncate = true, .read = true });
-    errdefer if (!adopted) new_db_file.close(io);
+    // a cancelled or failed compaction leaves no partial copy behind
+    errdefer if (!adopted) {
+        new_db_file.close(io);
+        repo_dir.deleteFile(io, db_new_name) catch {};
+    };
 
     // the new file is locked from birth, so the repo's db file is still
     // locked after it takes the place of the old one below.
@@ -251,12 +283,15 @@ pub fn compactDatabase(
     new_db_buffer.* = std.Io.Writer.Allocating.init(allocator);
     errdefer if (!adopted) new_db_buffer.deinit();
 
+    // the number of records copied isn't known until the copy is done
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .compacting_database, .estimated_total_items = 0 } });
     const new_db = try repo.core.db.compact(.buffered_file, .{
         .io = io,
         .file = new_db_file,
         .buffer = new_db_buffer,
         .fsync = false,
     }, &offset_map);
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .compacting_database });
 
     // objects point at their chunk records through slots, so compaction has already moved them
     try new_db_file.sync(io);
@@ -294,6 +329,7 @@ fn findLiveOids(
     allocator: std.mem.Allocator,
     extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // objects whose content hasn't been read yet. an object is marked live
     // when it is queued, so nothing is queued twice, and the queue is popped
@@ -347,6 +383,7 @@ fn findLiveOids(
     while (pending.pop()) |oid| {
         var object = try obj.Object(.xit, repo_opts).init(state, io, allocator, &oid);
         defer object.deinit();
+        try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .enumerating_object });
         switch (object.content) {
             .blob => {},
             .tree => |tree| for (tree.entries.values()) |entry| {
@@ -383,8 +420,10 @@ fn includeLiveOid(
 fn findReferencedPositions(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
     referenced_positions: SetsDb(repo_opts).HashSet(.read_write),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
 
@@ -394,6 +433,7 @@ fn findReferencedPositions(
     var iter = try map.iterator();
     while (try iter.next()) |*entry_cursor| {
         const kv_pair = try entry_cursor.readKeyValuePair();
+        try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
         if (try live_oids.getSlot(kv_pair.hash) == null) continue;
         // only a chunked object points at records, through the slots after its first element
         if (kv_pair.value_cursor.slot().tag != .array_list) continue;
