@@ -17,6 +17,9 @@ pub const Options = struct {
     advertise_refs: bool = false,
     is_stateless: bool = false,
     allowed_ref: ?[]const u8 = null,
+    // branch names a push may not delete or move to a commit that doesn't
+    // descend from where it was
+    protected_branches: []const []const u8 = &.{},
     applied_ref_updates: ?*AppliedRefUpdates = null,
     // keep the final response until the caller's transaction settles
     deferred_response: ?*Response = null,
@@ -117,7 +120,7 @@ pub fn run(
     // is sent before an error unwinds past this point
     errdefer writer.flush() catch {};
 
-    var receive_pack = ReceivePack{};
+    var receive_pack = ReceivePack{ .protected_branches = options.protected_branches };
 
     try receive_pack.readConfig(repo_kind, repo_opts, state.readOnly(), io, allocator);
 
@@ -295,6 +298,9 @@ const ReceivePack = struct {
     deny_non_fast_forwards: bool = false,
     deny_current_branch: Deny = .unconfigured,
     deny_delete_current: Deny = .unconfigured,
+
+    // options
+    protected_branches: []const []const u8 = &.{},
 
     // protocol state
     sent_capabilities: bool = false,
@@ -667,6 +673,16 @@ const ReceivePack = struct {
         }
     }
 
+    // the branch `ref_name` names when it is protected
+    fn protectedBranch(self: *const ReceivePack, ref_name: []const u8) ?[]const u8 {
+        if (!std.mem.startsWith(u8, ref_name, "refs/heads/")) return null;
+        const branch = ref_name["refs/heads/".len..];
+        for (self.protected_branches) |protected| {
+            if (std.mem.eql(u8, branch, protected)) return branch;
+        }
+        return null;
+    }
+
     fn isHeadUpdate(
         self: *const ReceivePack,
         comptime hash_kind: hash.HashKind,
@@ -747,7 +763,13 @@ const ReceivePack = struct {
             }
         }
 
+        const protected_branch = self.protectedBranch(name);
+
         if (!isNullOid(&ref_update.old_oid) and isNullOid(&ref_update.new_oid)) {
+            if (protected_branch) |branch| {
+                try writeError(writer, "refusing to delete protected branch {s}", .{branch});
+                return "protected branch";
+            }
             if (self.deny_deletes and std.mem.startsWith(u8, name, "refs/heads/")) {
                 try writeError(writer, "denying ref deletion for {s}", .{name});
                 return "deletion prohibited";
@@ -770,16 +792,22 @@ const ReceivePack = struct {
             }
         }
 
-        if (self.deny_non_fast_forwards and !isNullOid(&ref_update.new_oid) and
-            !isNullOid(&ref_update.old_oid) and
-            std.mem.startsWith(u8, name, "refs/heads/"))
+        if ((protected_branch != null or (self.deny_non_fast_forwards and std.mem.startsWith(u8, name, "refs/heads/"))) and
+            !isNullOid(&ref_update.new_oid) and
+            !isNullOid(&ref_update.old_oid))
         {
-            const descendent = mrg.getDescendent(repo_kind, repo_opts, state.readOnly(), io, allocator, &ref_update.old_oid, &ref_update.new_oid) catch |err| switch (err) {
-                error.DescendentNotFound => return "non-fast-forward",
+            const fast_forward = if (mrg.getDescendent(repo_kind, repo_opts, state.readOnly(), io, allocator, &ref_update.old_oid, &ref_update.new_oid)) |descendent|
+                std.mem.eql(u8, &descendent, &ref_update.new_oid)
+            else |err| switch (err) {
+                error.DescendentNotFound => false,
                 else => |e| return e,
             };
 
-            if (!std.mem.eql(u8, &descendent, &ref_update.new_oid)) {
+            if (!fast_forward) {
+                if (protected_branch) |branch| {
+                    try writeError(writer, "refusing to force push to protected branch {s}", .{branch});
+                    return "protected branch";
+                }
                 try writeError(writer, "denying non-fast-forward {s} (you should pull first)", .{name});
                 return "non-fast-forward";
             }
