@@ -20,6 +20,8 @@ pub const Options = struct {
     // branch names a push may not delete or move to a commit that doesn't
     // descend from where it was
     protected_branches: []const []const u8 = &.{},
+    // branch names a push may not create, move or delete at all
+    locked_branches: []const []const u8 = &.{},
     applied_ref_updates: ?*AppliedRefUpdates = null,
     // keep the final response until the caller's transaction settles
     deferred_response: ?*Response = null,
@@ -120,7 +122,7 @@ pub fn run(
     // is sent before an error unwinds past this point
     errdefer writer.flush() catch {};
 
-    var receive_pack = ReceivePack{ .protected_branches = options.protected_branches };
+    var receive_pack = ReceivePack{ .protected_branches = options.protected_branches, .locked_branches = options.locked_branches };
 
     try receive_pack.readConfig(repo_kind, repo_opts, state.readOnly(), io, allocator);
 
@@ -301,6 +303,7 @@ const ReceivePack = struct {
 
     // options
     protected_branches: []const []const u8 = &.{},
+    locked_branches: []const []const u8 = &.{},
 
     // protocol state
     sent_capabilities: bool = false,
@@ -674,12 +677,12 @@ const ReceivePack = struct {
         }
     }
 
-    // the branch `ref_name` names when it is protected
-    fn protectedBranch(self: *const ReceivePack, ref_name: []const u8) ?[]const u8 {
+    // the branch `ref_name` names when it is one of `branches`
+    fn listedBranch(branches: []const []const u8, ref_name: []const u8) ?[]const u8 {
         if (!std.mem.startsWith(u8, ref_name, "refs/heads/")) return null;
         const branch = ref_name["refs/heads/".len..];
-        for (self.protected_branches) |protected| {
-            if (std.mem.eql(u8, branch, protected)) return branch;
+        for (branches) |listed| {
+            if (std.mem.eql(u8, branch, listed)) return branch;
         }
         return null;
     }
@@ -764,7 +767,12 @@ const ReceivePack = struct {
             }
         }
 
-        const protected_branch = self.protectedBranch(name);
+        if (listedBranch(self.locked_branches, name)) |branch| {
+            try writeError(writer, "refusing to update {s}, which you may not push to directly", .{branch});
+            return "branch locked";
+        }
+
+        const protected_branch = listedBranch(self.protected_branches, name);
 
         if (!isNullOid(&ref_update.old_oid) and isNullOid(&ref_update.new_oid)) {
             if (protected_branch) |branch| {
