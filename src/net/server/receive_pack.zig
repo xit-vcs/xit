@@ -22,9 +22,20 @@ pub const Options = struct {
     protected_branches: []const []const u8 = &.{},
     // branch names a push may not create, move or delete at all
     locked_branches: []const []const u8 = &.{},
+    pseudo_ref: ?PseudoRef = null,
     applied_ref_updates: ?*AppliedRefUpdates = null,
     // keep the final response until the caller's transaction settles
     deferred_response: ?*Response = null,
+};
+
+// a ref that never exists, whose delete asks the caller to do something. a
+// permitted delete that is the push's only update is reported in
+// `applied_ref_updates` without being applied. anything else done to the ref
+// refuses the whole push.
+pub const PseudoRef = struct {
+    name: []const u8,
+    // whether this push may delete it
+    deletable: bool,
 };
 
 // initialize one response per push and keep it alive through the transaction.
@@ -170,6 +181,30 @@ pub fn run(
             }
         }
 
+        if (options.pseudo_ref) |pseudo_ref| {
+            var refused = false;
+            for (ref_updates.items) |*update| {
+                if (update.error_message != null or !std.mem.eql(u8, update.ref_name, pseudo_ref.name)) continue;
+                update.error_message = if (!isNullOid(&update.new_oid))
+                    "can only be deleted"
+                else if (!pseudo_ref.deletable)
+                    "deletion prohibited"
+                else if (ref_updates.items.len != 1)
+                    "must be deleted alone"
+                else
+                    null;
+                // the caller acts on the delete, so there is no ref to apply it to
+                update.skip_update = true;
+                if (update.error_message != null) refused = true;
+            }
+            if (refused) {
+                transaction_failure = true;
+                for (ref_updates.items) |*update| {
+                    if (update.error_message == null) update.error_message = "atomic transaction failed";
+                }
+            }
+        }
+
         {
             const delete_only = for (ref_updates.items) |update| {
                 if (!isNullOid(&update.new_oid)) break false;
@@ -231,7 +266,8 @@ pub fn run(
 
     if (options.applied_ref_updates) |updates| {
         for (ref_updates.items) |update| {
-            if (update.error_message != null or update.skip_update) continue;
+            const pseudo = if (options.pseudo_ref) |pseudo_ref| std.mem.eql(u8, update.ref_name, pseudo_ref.name) else false;
+            if (update.error_message != null or (update.skip_update and !pseudo)) continue;
             try updates.append(update.ref_name, &update.old_oid, &update.new_oid);
         }
     }
