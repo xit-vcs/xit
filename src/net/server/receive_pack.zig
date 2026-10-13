@@ -722,6 +722,12 @@ const ReceivePack = struct {
             return "funny refname";
         }
 
+        // ahead of the stale check, so a stale push learns it can never land
+        if (listedBranch(self.locked_branches, name)) |branch| {
+            try writeError(writer, "refusing to update {s}, which you may not push to directly", .{branch});
+            return "branch locked";
+        }
+
         // the ref must still point at the old oid the client sent, so a stale
         // or concurrent push can't clobber an update it never saw. a ref that
         // doesn't exist reads as the null oid, which is what a create sends.
@@ -765,11 +771,6 @@ const ReceivePack = struct {
                 error.ObjectNotFound => return "bad pack",
                 else => |e| return e,
             }
-        }
-
-        if (listedBranch(self.locked_branches, name)) |branch| {
-            try writeError(writer, "refusing to update {s}, which you may not push to directly", .{branch});
-            return "branch locked";
         }
 
         const protected_branch = listedBranch(self.protected_branches, name);
