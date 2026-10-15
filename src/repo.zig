@@ -509,11 +509,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         const bare_config = cfg.AddConfigInput{ .name = "core.bare", .value = if (ctx.opts.bare) "true" else "false" };
                         try config.add(state, ctx.io, bare_config);
 
+                        // like git, the default branch stays unborn until its first commit:
+                        // HEAD names it, but no empty ref is stored that would list it
                         if (ctx.opts.create_default_branch) |name| {
-                            const input = bch.AddBranchInput{ .name = name };
-                            try bch.add(repo_kind, repo_opts, state, ctx.io, input);
-                            try rf.replaceHead(repo_kind, repo_opts, state, ctx.io, .{ .ref = .{ .kind = .head, .name = name } });
-                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .branch = .{ .action = .{ .add = input } } });
+                            const target: rf.RefOrOid(repo_opts.hash) = .{ .ref = .{ .kind = .head, .name = name } };
+                            try rf.replaceHead(repo_kind, repo_opts, state, ctx.io, target);
+                            try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .reset_add = .{ .target = target } });
                         } else {
                             try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .config = .{ .action = .{ .add = bare_config } } });
                         }
