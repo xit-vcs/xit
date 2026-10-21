@@ -80,6 +80,7 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         max_tree_size: u64 = 1_000_000, // max size in bytes of a single tree object before reading it is aborted with error.TreeTooLarge
         max_edit_count: usize = 1_000_000, // max edit distance before a diff is aborted with error.DiffTooLarge
         max_total_line_count: usize = 50_000_000, // max total lines across all files in a diff before it is aborted with error.DiffTooLarge
+        max_hunk_edits: ?usize = 500, // breaks large hunks into smaller ones; must be set to null to make diffs compatible with git apply and patch
         delta_window_size: usize = 10, // how many previous objects to try delta-compressing against when writing a pack
         delta_max_depth: usize = 50, // max delta chain length in packs written by us
         delta_big_file_threshold: u64 = 8 * 1024 * 1024, // objects larger than this are never delta-compressed

@@ -878,7 +878,10 @@ pub fn main(init: std.process.Init) !u8 {
     const cwd_path = try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd_path);
 
-    runPrint(.xit, .{ .ProgressCtx = ProgressCtx }, io, allocator, args.items, cwd_path, run_opts) catch |err| switch (err) {
+    runPrint(.xit, .{
+        .ProgressCtx = ProgressCtx,
+        .max_hunk_edits = null, // printed diffs stay applicable by git apply
+    }, io, allocator, args.items, cwd_path, run_opts) catch |err| switch (err) {
         error.HandledError => return 1,
         // the reader closed stdout early (like quitting `less`), so stop quietly
         error.WriteFailed => if (stdout_writer.err) |write_err| switch (write_err) {

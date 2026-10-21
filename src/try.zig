@@ -172,5 +172,5 @@ pub fn main(init: std.process.Init) !void {
         try xit_repo.addConfig(io, allocator, .{ .name = "branch.master.remote", .value = "origin" });
     }
 
-    try xit.main.run(.xit, .{}, io, allocator, args.items, temp_path, run_opts);
+    try xit.main.run(.xit, .{ .max_hunk_edits = null }, io, allocator, args.items, temp_path, run_opts);
 }

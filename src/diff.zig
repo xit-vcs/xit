@@ -1104,13 +1104,15 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                 while (true) {
                     if (try self.myers_diff.next()) |edit| {
                         try self.next_hunk.edits.append(allocator, edit);
+                        // a full hunk is returned, so a long change comes in pieces
+                        const full = if (repo_opts.max_hunk_edits) |max_edits| self.next_hunk.edits.items.len >= max_edits else false;
 
                         if (edit == .eql) {
                             self.margin += 1;
                             if (self.found_edit) {
                                 // if the end margin isn't the max,
                                 // keep adding to the hunk
-                                if (self.margin < max_margin) {
+                                if (self.margin < max_margin and !full) {
                                     continue;
                                 }
                             }
@@ -1125,7 +1127,7 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         } else {
                             self.found_edit = true;
                             self.margin = 0;
-                            continue;
+                            if (!full) continue;
                         }
 
                         // if the diff state contains an actual edit
