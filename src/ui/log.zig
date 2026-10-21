@@ -88,13 +88,12 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             }
 
             // add more commits if necessary
-            if (self.scroll.grid) |scroll_grid| {
+            if (self.scroll.viewport) |viewport| {
                 const scroll_y = self.scroll.y;
                 const u_scroll_y: usize = if (scroll_y >= 0) @intCast(scroll_y) else 0;
-                if (self.scroll.child.box.grid) |inner_box_grid| {
-                    const inner_box_height = inner_box_grid.size.height;
+                if (self.scroll.content_size) |content| {
                     const min_scroll_remaining = 5;
-                    if (inner_box_height -| (scroll_grid.size.height + u_scroll_y) <= min_scroll_remaining) {
+                    if (content.height -| (viewport.height + u_scroll_y) <= min_scroll_remaining) {
                         try self.addCommits(allocator, 20);
                     }
                 }
@@ -106,7 +105,7 @@ pub fn LogCommitList(comptime Widget: type, comptime repo_kind: rp.RepoKind, com
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
-                    const index = inp.vertIndex(key, current_index, children.count(), self.getGrid());
+                    const index = inp.vertIndex(key, current_index, children.count(), self.scroll.viewport);
 
                     if (index != current_index) {
                         root_focus.setFocus(children.keys()[index]);

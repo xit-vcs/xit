@@ -1,6 +1,6 @@
 const xitui = @import("xitui");
 const Key = xitui.input.Key;
-const Grid = xitui.grid.Grid;
+const layout = xitui.layout;
 const Focus = xitui.focus.Focus;
 
 pub fn vertDirection(key: Key) enum { up, down, none } {
@@ -30,7 +30,7 @@ pub fn activates(key: Key, target_id: usize, root_focus: *const Focus) bool {
 
 /// the new selection index for a navigation key press in a scrollable list.
 /// each list item is 3 rows tall, so page up/down moves by half the visible items.
-pub fn vertIndex(key: Key, current_index: usize, count: usize, grid_maybe: ?Grid) usize {
+pub fn vertIndex(key: Key, current_index: usize, count: usize, viewport_maybe: ?layout.Size) usize {
     switch (key) {
         .arrow_up => return current_index -| 1,
         .arrow_down => if (current_index + 1 < count) {
@@ -40,13 +40,13 @@ pub fn vertIndex(key: Key, current_index: usize, count: usize, grid_maybe: ?Grid
         .end => if (count > 0) {
             return count - 1;
         },
-        .page_up => if (grid_maybe) |grid| {
-            const half_count = (grid.size.height / 3) / 2;
+        .page_up => if (viewport_maybe) |viewport| {
+            const half_count = (viewport.height / 3) / 2;
             return current_index -| half_count;
         },
-        .page_down => if (grid_maybe) |grid| {
+        .page_down => if (viewport_maybe) |viewport| {
             if (count > 0) {
-                const half_count = (grid.size.height / 3) / 2;
+                const half_count = (viewport.height / 3) / 2;
                 return @min(current_index + half_count, count - 1);
             }
         },

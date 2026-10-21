@@ -47,14 +47,12 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
             try self.box.build(allocator, constraint, root_focus);
 
             // add another diff if necessary
-            if (self.box.grid) |outer_box_grid| {
-                const outer_box_height = outer_box_grid.size.height - 2;
+            if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
                 const scroll_y = self.box.children.values()[0].widget.scroll.y;
                 const u_scroll_y: usize = if (scroll_y >= 0) @intCast(scroll_y) else 0;
-                if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                    const inner_box_height = inner_box_grid.size.height;
+                if (self.box.children.values()[0].widget.scroll.content_size) |content| {
                     const min_scroll_remaining = 5;
-                    if (inner_box_height -| (outer_box_height + u_scroll_y) <= min_scroll_remaining) {
+                    if (content.height -| (viewport.height + u_scroll_y) <= min_scroll_remaining) {
                         // get the next file
                         if (self.hunk_iter == null) {
                             if (self.file_iter) |*file_iter| {
@@ -99,13 +97,11 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     }
                 },
                 .arrow_down => {
-                    if (self.box.grid) |outer_box_grid| {
-                        const outer_box_height = outer_box_grid.size.height - 2;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
                         const scroll_y = self.box.children.values()[0].widget.scroll.y;
                         const u_scroll_y: usize = if (scroll_y >= 0) @intCast(scroll_y) else 0;
-                        if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                            const inner_box_height = inner_box_grid.size.height;
-                            if (outer_box_height + u_scroll_y < inner_box_height) {
+                        if (self.box.children.values()[0].widget.scroll.content_size) |content| {
+                            if (viewport.height + u_scroll_y < content.height) {
                                 self.box.children.values()[0].widget.scroll.y += 1;
                             }
                         }
@@ -117,13 +113,11 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     }
                 },
                 .arrow_right => {
-                    if (self.box.grid) |outer_box_grid| {
-                        const outer_box_width = outer_box_grid.size.width - 2;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
                         const scroll_x = self.box.children.values()[0].widget.scroll.x;
                         const u_scroll_x: usize = if (scroll_x >= 0) @intCast(scroll_x) else 0;
-                        if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                            const inner_box_width = inner_box_grid.size.width;
-                            if (outer_box_width + u_scroll_x < inner_box_width) {
+                        if (self.box.children.values()[0].widget.scroll.content_size) |content| {
+                            if (viewport.width + u_scroll_x < content.width) {
                                 self.box.children.values()[0].widget.scroll.x += 1;
                             }
                         }
@@ -133,31 +127,26 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     self.box.children.values()[0].widget.scroll.y = 0;
                 },
                 .end => {
-                    if (self.box.grid) |outer_box_grid| {
-                        if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                            const outer_box_height = outer_box_grid.size.height - 2;
-                            const inner_box_height = inner_box_grid.size.height;
-                            const max_scroll: isize = if (inner_box_height > outer_box_height) @intCast(inner_box_height - outer_box_height) else 0;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
+                        if (self.box.children.values()[0].widget.scroll.content_size) |content| {
+                            const max_scroll: isize = if (content.height > viewport.height) @intCast(content.height - viewport.height) else 0;
                             self.box.children.values()[0].widget.scroll.y = max_scroll;
                         }
                     }
                 },
                 .page_up => {
-                    if (self.box.grid) |outer_box_grid| {
-                        const outer_box_height = outer_box_grid.size.height - 2;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
                         const scroll_y = self.box.children.values()[0].widget.scroll.y;
-                        const scroll_change: isize = @intCast(outer_box_height / 2);
+                        const scroll_change: isize = @intCast(viewport.height / 2);
                         self.box.children.values()[0].widget.scroll.y = @max(0, scroll_y - scroll_change);
                     }
                 },
                 .page_down => {
-                    if (self.box.grid) |outer_box_grid| {
-                        if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                            const outer_box_height = outer_box_grid.size.height - 2;
-                            const inner_box_height = inner_box_grid.size.height;
-                            const max_scroll: isize = if (inner_box_height > outer_box_height) @intCast(inner_box_height - outer_box_height) else 0;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
+                        if (self.box.children.values()[0].widget.scroll.content_size) |content| {
+                            const max_scroll: isize = if (content.height > viewport.height) @intCast(content.height - viewport.height) else 0;
                             const scroll_y = self.box.children.values()[0].widget.scroll.y;
-                            const scroll_change: isize = @intCast(outer_box_height / 2);
+                            const scroll_change: isize = @intCast(viewport.height / 2);
                             self.box.children.values()[0].widget.scroll.y = @min(scroll_y + scroll_change, max_scroll);
                         }
                     }
@@ -168,13 +157,11 @@ pub fn Diff(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime rep
                     }
                 },
                 .scroll_down => {
-                    if (self.box.grid) |outer_box_grid| {
-                        const outer_box_height = outer_box_grid.size.height - 2;
+                    if (self.box.children.values()[0].widget.scroll.viewport) |viewport| {
                         const scroll_y = self.box.children.values()[0].widget.scroll.y;
                         const u_scroll_y: usize = if (scroll_y >= 0) @intCast(scroll_y) else 0;
-                        if (self.box.children.values()[0].widget.scroll.child.box.grid) |inner_box_grid| {
-                            const inner_box_height = inner_box_grid.size.height;
-                            if (outer_box_height + u_scroll_y < inner_box_height) {
+                        if (self.box.children.values()[0].widget.scroll.content_size) |content| {
+                            if (viewport.height + u_scroll_y < content.height) {
                                 self.box.children.values()[0].widget.scroll.y += 1;
                             }
                         }
@@ -281,9 +268,9 @@ fn diffTextBox(allocator: std.mem.Allocator, text: []const u8) !wgt.TextBox {
         const end = if (std.mem.findScalarPos(u8, text, start, '\n')) |nl| nl + 1 else text.len;
         const line = text[start..end];
         const style: wgt.Style = if (std.mem.startsWith(u8, line, "+"))
-            .{ .fg = .{ .ansi = .green } }
+            .{ .fg = .ansi(.green) }
         else if (std.mem.startsWith(u8, line, "-"))
-            .{ .fg = .{ .ansi = .red } }
+            .{ .fg = .ansi(.red) }
         else
             .{};
         try spans.append(allocator, .{ .text = line, .style = style });

@@ -1174,8 +1174,8 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             for (hunk.edits.items) |edit| {
                 const line_iter, const line_num, const prefix, const style: ?xitui.widget.Style = switch (edit) {
                     .eql => |eql| .{ self.line_iter_b, eql.new_line.num, " ", null },
-                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+", .{ .fg = .{ .ansi = .green } } },
-                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-", .{ .fg = .{ .ansi = .red } } },
+                    .ins => |ins| .{ self.line_iter_b, ins.new_line.num, "+", .{ .fg = .ansi(.green) } },
+                    .del => |del| .{ self.line_iter_a, del.old_line.num, "-", .{ .fg = .ansi(.red) } },
                 };
                 if (color) if (style) |s| try xitui.terminal.writeStyle(writer, s);
                 try writer.print("{s} {s}", .{ prefix, try line_iter.get(line_num) });

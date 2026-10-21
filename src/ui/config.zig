@@ -464,15 +464,15 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
                     }
                 },
                 .page_up => {
-                    if (self.getGrid()) |grid| {
-                        const half_count = (grid.size.height / 3) / 2;
+                    if (self.box.children.values()[scroll_idx].widget.scroll.viewport) |viewport| {
+                        const half_count = (viewport.height / 3) / 2;
                         new_row -|= half_count;
                     }
                 },
                 .page_down => {
-                    if (self.getGrid()) |grid| {
+                    if (self.box.children.values()[scroll_idx].widget.scroll.viewport) |viewport| {
                         if (row_count > 0) {
-                            const half_count = (grid.size.height / 3) / 2;
+                            const half_count = (viewport.height / 3) / 2;
                             new_row = @min(current_row + half_count, row_count - 1);
                         }
                     }

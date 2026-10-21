@@ -141,7 +141,7 @@ pub fn StatusList(comptime Widget: type) type {
             if (self.getFocus().child_id) |child_id| {
                 const children = &self.scroll.child.box.children;
                 if (children.getIndex(child_id)) |current_index| {
-                    const index = inp.vertIndex(key, current_index, children.count(), self.getGrid());
+                    const index = inp.vertIndex(key, current_index, children.count(), self.scroll.viewport);
 
                     if (index != current_index) {
                         root_focus.setFocus(children.keys()[index]);
@@ -573,12 +573,9 @@ pub fn Status(comptime Widget: type, comptime repo_kind: rp.RepoKind, comptime r
                         break :blk current_index;
                     };
 
-                    if (index == @backingInt(FocusKind.status_content)) {
-                        if (self.box.children.values()[@backingInt(FocusKind.status_content)].widget.stack.getSelected()) |selected_widget| {
-                            if (selected_widget.ui_status_content.getGrid() == null) {
-                                index = @backingInt(FocusKind.status_tabs);
-                            }
-                        }
+                    // content that wasn't laid out can't take focus
+                    if (index == @backingInt(FocusKind.status_content) and self.box.children.values()[index].rect == null) {
+                        index = @backingInt(FocusKind.status_tabs);
                     }
 
                     if (index != current_index) {
