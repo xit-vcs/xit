@@ -1160,7 +1160,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             const snapshots = try DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(opts.hash, "commit-id->snapshot"))).?);
             const original = (try snapshots.getCursor(try hash.hexToInt(opts.hash, &ctx.snapshot_oid))).?;
             var snapshot_cursor = try moment.putCursor(hash.hashInt(opts.hash, "test-patch-snapshot"));
-            try snapshot_cursor.write(.{ .slot = original.slot() });
+            try snapshot_cursor.write(.{ .slot = try original.slot() });
             const snapshot = try DB.HashMap(.read_write).init(snapshot_cursor);
             const patch_snapshot = (try snapshots.getCursor(try hash.hexToInt(opts.hash, &ctx.patch_oid))).?;
             var patch_ids: [2][hash.byteLen(opts.hash)]u8 = undefined;
@@ -1272,7 +1272,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             corrupt_ctx.corruption = corruption;
             try std.testing.expectError(if (corruption == .gap) error.InvalidGapList else error.InvalidEdit, history.appendContext(.{ .slot = try history.getSlot(-1) }, corrupt_ctx));
             const after = try repo.core.latestMoment();
-            try std.testing.expectEqualDeep(before.cursor.slot(), after.cursor.slot());
+            try std.testing.expectEqualDeep(try before.cursor.slot(), try after.cursor.slot());
         }
     } else {
         try history.appendContext(.{ .slot = try history.getSlot(-1) }, ctx);
@@ -1480,11 +1480,11 @@ fn testMergeEdits(case: EditMergeCase) !void {
                 var lists: [2]DB.LinkedArrayList(.read_only) = undefined;
                 for (files, &lists) |fields, *list| list.* = try DB.LinkedArrayList(.read_only).init((try fields.getCursor(@backingInt(patch.FileField.lines))).?);
                 var left = try lists[0].iterator();
-                while (try left.next()) |entry| try slots.put(entry.slot().value, {});
+                while (try left.next()) |entry| try slots.put((try entry.slot()).value, {});
                 var shared: usize = 0;
                 var right = try lists[1].iterator();
                 while (try right.next()) |entry| {
-                    if (slots.contains(entry.slot().value)) shared += 1;
+                    if (slots.contains((try entry.slot()).value)) shared += 1;
                 }
                 try std.testing.expect(shared > 0);
                 try std.testing.expect(shared < try lists[0].count());
@@ -3589,7 +3589,7 @@ fn testMergeConflictBinary(
                         const parent_entry = try parent_snapshot.readPath(void, &.{
                             .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
                         });
-                        try std.testing.expectEqualDeep(if (parent_entry) |e| e.slot() else null, if (entry) |e| e.slot() else null);
+                        try std.testing.expectEqualDeep(if (parent_entry) |e| try e.slot() else null, if (entry) |e| try e.slot() else null);
                     }
                 }
                 parent_oid_maybe = oid;
@@ -4552,7 +4552,7 @@ fn testMergeDryRun(
     defer allocator.free(file_before);
     const index_before = if (kind == .git) try repo.core.repo_dir.readFileAlloc(io, "index", allocator, .limited(65536)) else &.{};
     defer if (kind == .git) allocator.free(index_before);
-    const moment_before = if (kind == .xit) (try repo.core.latestMoment()).cursor.slot().value else 0;
+    const moment_before = if (kind == .xit) (try (try repo.core.latestMoment()).cursor.slot()).value else 0;
     var input: mrg.MergeInput(opts.hash) = .{
         .kind = .full,
         .action = .{ .new = .{ .source = &.{.{ .oid = &source }}, .algo = algo } },
@@ -4570,7 +4570,7 @@ fn testMergeDryRun(
         defer allocator.free(index_after);
         try std.testing.expectEqualSlices(u8, index_before, index_after);
     } else {
-        try std.testing.expectEqual(moment_before, (try repo.core.latestMoment()).cursor.slot().value);
+        try std.testing.expectEqual(moment_before, (try (try repo.core.latestMoment()).cursor.slot()).value);
     }
     for ([_][]const u8{ "MERGE_HEAD", "CHERRY_PICK_HEAD" }) |name| {
         try std.testing.expectEqual(null, try repo.readRef(io, .{ .kind = .none, .name = name }));
@@ -4645,7 +4645,7 @@ fn testObjectStorage(size: usize, expect_inline: bool, collect: bool) !void {
         .{ .hash_map_get = .{ .value = hash.hashInt(opts.hash, "object-id->content") } },
         .{ .hash_map_get = .{ .value = hash.bytesToInt(opts.hash, &entry.oid) } },
     })).?;
-    try std.testing.expectEqual(expect_inline, value_cursor.slot().full);
+    try std.testing.expectEqual(expect_inline, (try value_cursor.slot()).full);
 
     var reader = try obj.ObjectReader(.xit, opts).init(state, io, allocator, &std.fmt.bytesToHex(entry.oid, .lower));
     defer reader.deinit();

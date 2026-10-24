@@ -314,7 +314,7 @@ const ChunkLocation = struct {
 // identifies the record. a record must be written with a byte writer rather
 // than `put`, because a short value is kept in its slot and has no position.
 pub fn chunkRecordPosition(cursor: anytype) !u64 {
-    const slot = cursor.slot();
+    const slot = try cursor.slot();
     if (slot.tag != .bytes) return error.UnexpectedTag;
     return slot.value;
 }
@@ -402,14 +402,14 @@ pub fn writeChunks(
 
             // write the chunk record unless it already exists
             const record_slot, const record_size: u64 = if (try chunk_map.getCursor(chunk_hash_int)) |chunk_cursor|
-                .{ chunk_cursor.slot(), try chunk_cursor.count() }
+                .{ try chunk_cursor.slot(), try chunk_cursor.count() }
             else blk: {
                 const record = makeChunkRecord(repo_opts, chunk, record_buffer);
                 var chunk_cursor = try chunk_map.putCursor(chunk_hash_int);
                 var record_writer = try chunk_cursor.writer(&.{});
                 try record_writer.interface.writeAll(record);
                 try record_writer.finish();
-                break :blk .{ chunk_cursor.slot(), record.len };
+                break :blk .{ try chunk_cursor.slot(), record.len };
             };
             try record_slots.append(allocator, record_slot);
 
@@ -589,7 +589,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
             // object size
             var inline_record: ?ChunkLocation = null;
-            const value_slot = kv_pair.value_cursor.slot();
+            const value_slot = try kv_pair.value_cursor.slot();
             const object_size = if (value_slot.full) blk: {
                 // a tagged value is an inline object. one read gets the byte
                 // array's length and the object size in front of the record.

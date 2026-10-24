@@ -1322,10 +1322,54 @@ pub fn copyFromPackIterator(
         }
     }
 
-    var offset_to_oid = try pack.OffsetToOid(repo_opts.hash).init(io, state.core.repo_dir);
-    defer offset_to_oid.deinit();
+    // a crash can leave the file behind, so always start from empty
+    const OffsetToOid = pack.OffsetToOid(repo_opts.hash);
+    const offsets_file = try state.core.repo_dir.createFile(io, OffsetToOid.file_name, .{ .truncate = true, .read = true });
+    defer {
+        offsets_file.close(io);
+        state.core.repo_dir.deleteFile(io, OffsetToOid.file_name) catch {};
+    }
+    var offsets_db = try OffsetToOid.DB.init(io, .{ .file = offsets_file, .fsync = false });
 
-    while (try pack_iter.next(state.readOnly(), &offset_to_oid)) |pack_obj_rdr| {
+    // the offsets are written in one transaction, so their writes aren't each committed
+    const Ctx = struct {
+        state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        pack_iter: *pack.PackIterator(repo_kind, repo_opts),
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
+
+        pub fn run(ctx: @This(), cursor: *OffsetToOid.DB.Cursor(.read_write)) !void {
+            var offset_to_oid = try OffsetToOid.init(cursor.*);
+            try copyFromPackIteratorWithOffsets(repo_kind, repo_opts, ctx.state, ctx.io, ctx.allocator, ctx.pack_iter, &offset_to_oid, ctx.progress_ctx_maybe);
+        }
+    };
+    try offsets_db.runContext(Ctx{
+        .state = state,
+        .io = io,
+        .allocator = allocator,
+        .pack_iter = pack_iter,
+        .progress_ctx_maybe = progress_ctx_maybe,
+    });
+
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| {
+            try progress_ctx.run(io, .{ .end = .writing_object_from_pack });
+        }
+    }
+}
+
+fn copyFromPackIteratorWithOffsets(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    pack_iter: *pack.PackIterator(repo_kind, repo_opts),
+    offset_to_oid: *pack.OffsetToOid(repo_opts.hash),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    while (try pack_iter.next(state.readOnly(), offset_to_oid)) |pack_obj_rdr| {
         defer pack_obj_rdr.deinit(io, allocator);
 
         const Stream = struct {
@@ -1367,12 +1411,6 @@ pub fn copyFromPackIterator(
             if (progress_ctx_maybe) |progress_ctx| {
                 try progress_ctx.run(io, .{ .complete_one = .writing_object_from_pack });
             }
-        }
-    }
-
-    if (repo_opts.ProgressCtx != void) {
-        if (progress_ctx_maybe) |progress_ctx| {
-            try progress_ctx.run(io, .{ .end = .writing_object_from_pack });
         }
     }
 }

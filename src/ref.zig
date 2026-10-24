@@ -611,7 +611,7 @@ pub fn read(
                 // if the ref's key hasn't been set, it doesn't exist
                 const kv_pair = (try map.getKeyValuePair(hash.hashInt(repo_opts.hash, ref.name))) orelse return error.RefNotFound;
                 // if the ref's content hasn't been set, it's an empty ref so just return null
-                if (kv_pair.value_cursor.slot().empty()) return null;
+                if ((try kv_pair.value_cursor.slot()).empty()) return null;
                 const ref_content = try kv_pair.value_cursor.readBytes(buffer);
                 return RefOrOid(repo_opts.hash).initFromDb(ref_content);
             }
@@ -646,7 +646,7 @@ pub fn read(
             const kv_pair = (try map.getKeyValuePair(ref.name)) orelse return error.RefNotFound;
 
             // if the ref's content hasn't been set, it's an empty ref so just return null
-            if (kv_pair.value_cursor.slot().empty()) return null;
+            if ((try kv_pair.value_cursor.slot()).empty()) return null;
             const ref_content = try kv_pair.value_cursor.readBytes(buffer);
             return RefOrOid(repo_opts.hash).initFromDb(ref_content);
         },
@@ -732,7 +732,7 @@ pub fn write(
             // unqualified refs (HEAD, etc.) are stored directly in the root map
             if (ref.kind == .none) {
                 var map = state.extra.moment.*;
-                try map.put(hash.hashInt(repo_opts.hash, ref.name), .{ .slot = ref_content_cursor.slot() });
+                try map.put(hash.hashInt(repo_opts.hash, ref.name), .{ .slot = try ref_content_cursor.slot() });
                 return;
             }
 
@@ -751,7 +751,7 @@ pub fn write(
                 .other => |other_name| try DB.SortedMap(.read_write).init(try refs.putCursor(other_name)),
             };
 
-            try map.put(ref.name, .{ .slot = ref_content_cursor.slot() });
+            try map.put(ref.name, .{ .slot = try ref_content_cursor.slot() });
         },
     }
 }

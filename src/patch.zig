@@ -112,7 +112,7 @@ pub fn writeAndApplyPatches(
     // if there is a parent commit, inherit its snapshot and increment its depth
     if (parent_commit_oid_maybe) |*parent_commit_oid| {
         if (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, parent_commit_oid))) |parent_snapshot_cursor| {
-            try snapshot_cursor.write(.{ .slot = parent_snapshot_cursor.slot() });
+            try snapshot_cursor.write(.{ .slot = try parent_snapshot_cursor.slot() });
         } else {
             return error.ParentCommitSnapshotNotFound;
         }
@@ -193,7 +193,7 @@ pub fn writeAndApplyPatches(
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @backingInt(FileField.oid) },
             })) |cursor| {
-                if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
+                if ((try cursor.slot()).tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
             }
             if (line_iter_pair.a.source == .binary) {
                 // compare to the retained text state, which its recorded blob holds
@@ -295,7 +295,7 @@ pub fn writeAndApplyPatches(
                     try buffer.writer.writeInt(u64, placement.hi, .big);
                 }
                 var record = try records.putCursor(id);
-                if (record.slot().empty()) {
+                if ((try record.slot()).empty()) {
                     try record.write(.{ .bytes = buffer.written() });
                 } else {
                     // reused records still need checking; a fresh one was just hashed
@@ -686,7 +686,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                     .{ .hash_map_get = .{ .value = path_hash } },
                     .{ .array_list_get = @backingInt(FileField.edit_list) },
                 })) orelse return .{};
-                if (cursor.slot().tag == .none) return .{};
+                if ((try cursor.slot()).tag == .none) return .{};
                 return .{ .list = try DB.ArrayList(.read_only).init(cursor) };
             }
 
@@ -1319,18 +1319,47 @@ pub fn writePatches(
     tips: []const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    var patch_writer = try PatchWriter(repo_opts).init(state.readOnly(), io, allocator);
-    defer patch_writer.deinit(io, allocator);
+    const TempDB = PatchWriter(repo_opts).TempDB;
+    const db_name = PatchWriter(repo_opts).db_name;
 
-    // a commit with patches has them for its whole ancestry, because each run
-    // covers every ancestor of its tips in one transaction. so the walk stops
-    // there, visiting only the commits that need patches and their parents.
-    var pending: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
-    defer pending.deinit(allocator);
-    try pending.appendSlice(allocator, tips);
-    while (pending.pop()) |oid| try patch_writer.add(state.readOnly(), io, allocator, &oid, &pending);
+    const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
+    defer {
+        db_file.close(io);
+        state.core.repo_dir.deleteFile(io, db_name) catch {};
+    }
+    var db = try TempDB.init(io, .{ .file = db_file, .fsync = false });
 
-    try patch_writer.write(state, io, allocator, progress_ctx_maybe);
+    // the temporary database is written in one transaction, so its writes
+    // aren't each committed
+    const Ctx = struct {
+        state: rp.Repo(.xit, repo_opts).State(.read_write),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        tips: []const [hash.hexLen(repo_opts.hash)]u8,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
+
+        pub fn run(ctx: @This(), cursor: *TempDB.Cursor(.read_write)) !void {
+            var patch_writer = try PatchWriter(repo_opts).init(ctx.state.readOnly(), cursor.*);
+            defer patch_writer.deinit(ctx.allocator);
+
+            // a commit with patches has them for its whole ancestry, because each run
+            // covers every ancestor of its tips in one transaction. so the walk stops
+            // there, visiting only the commits that need patches and their parents.
+            var pending: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+            defer pending.deinit(ctx.allocator);
+            try pending.appendSlice(ctx.allocator, ctx.tips);
+            while (pending.pop()) |oid| try patch_writer.add(ctx.state.readOnly(), ctx.io, ctx.allocator, &oid, &pending);
+
+            try patch_writer.write(ctx.state, ctx.io, ctx.allocator, ctx.progress_ctx_maybe);
+        }
+    };
+    try db.runContext(Ctx{
+        .state = state,
+        .io = io,
+        .allocator = allocator,
+        .tips = tips,
+        .progress_ctx_maybe = progress_ctx_maybe,
+    });
 }
 
 pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
@@ -1338,14 +1367,10 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         const DB = rp.Repo(.xit, repo_opts).DB;
         // the map of commits waiting on their parent and the set of visited
         // commits grow with the history, so they live in a temporary database
-        // rather than on the heap. a plain file is used because each write
-        // outside a transaction is synced anyway.
+        // rather than on the heap (see writePatches).
         const TempDB = @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
         const db_name = "temp.patches";
 
-        repo_dir: std.Io.Dir,
-        db_file: std.Io.File,
-        db: *TempDB,
         parent_to_children: TempDB.HashMap(.read_write),
         visited: TempDB.HashSet(.read_write),
         // the commits with patches, as of the start of the walk
@@ -1353,19 +1378,9 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         oid_queue: std.array_hash_map.Auto([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
-        pub fn init(state: rp.Repo(.xit, repo_opts).State(.read_only), io: std.Io, allocator: std.mem.Allocator) !PatchWriter(repo_opts) {
-            const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
-            errdefer {
-                db_file.close(io);
-                state.core.repo_dir.deleteFile(io, db_name) catch {};
-            }
-
-            // cursors point at the database, so it needs a stable address
-            const db_ptr = try allocator.create(TempDB);
-            errdefer allocator.destroy(db_ptr);
-            db_ptr.* = try TempDB.init(.{ .io = io, .file = db_file, .fsync = false });
-
-            const map = try TempDB.HashMap(.read_write).init(db_ptr.rootCursor());
+        // `root_cursor` is the root of the temporary database
+        pub fn init(state: rp.Repo(.xit, repo_opts).State(.read_only), root_cursor: TempDB.Cursor(.read_write)) !PatchWriter(repo_opts) {
+            const map = try TempDB.HashMap(.read_write).init(root_cursor);
 
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
             const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
@@ -1376,9 +1391,6 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
                 null;
 
             return .{
-                .repo_dir = state.core.repo_dir,
-                .db_file = db_file,
-                .db = db_ptr,
                 .parent_to_children = parent_to_children,
                 .visited = visited,
                 .snapshots = snapshots,
@@ -1387,10 +1399,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             };
         }
 
-        pub fn deinit(self: *PatchWriter(repo_opts), io: std.Io, allocator: std.mem.Allocator) void {
-            self.db_file.close(io);
-            self.repo_dir.deleteFile(io, db_name) catch {};
-            allocator.destroy(self.db);
+        pub fn deinit(self: *PatchWriter(repo_opts), allocator: std.mem.Allocator) void {
             self.oid_queue.deinit(allocator);
         }
 

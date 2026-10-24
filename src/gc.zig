@@ -38,31 +38,29 @@ fn report(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe:
     try progress_ctx.run(io, event);
 }
 
-// store offsets as u64 keys in a separate, mutable top-level xitdb hash map.
+// store offsets as u64 keys in a hash map in a separate xitdb database.
 // compaction puts every record it copies, so progress is reported from here.
 fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         const DB = @import("xitdb").Database(.file, u64);
 
         io: std.Io,
-        file: std.Io.File,
-        db: DB = undefined, // initialized by compact's call to reset
+        map: DB.HashMap(.read_write),
         progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
         pub fn reset(self: *@This()) !void {
-            try self.file.setLength(self.io, 0);
-            self.db = try DB.init(.{ .io = self.io, .file = self.file, .fsync = false });
+            var cursor = self.map.cursor;
+            try cursor.write(.{ .slot = null });
+            self.map = try DB.HashMap(.read_write).init(cursor);
         }
 
         pub fn get(self: *@This(), source_offset: u64) !?u64 {
-            const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
-            const cursor = (try map.getCursor(source_offset)) orelse return null;
+            const cursor = (try self.map.getCursor(source_offset)) orelse return null;
             return try cursor.readUint();
         }
 
         pub fn put(self: *@This(), source_offset: u64, target_offset: u64) !void {
-            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
-            try map.put(source_offset, .{ .uint = target_offset });
+            try self.map.put(source_offset, .{ .uint = target_offset });
             try report(repo_opts, self.io, self.progress_ctx_maybe, .{ .complete_one = .compacting_database });
         }
     };
@@ -122,7 +120,7 @@ fn prunePatchData(
             try pending.append(allocator, .{ .cursor = (try snapshot.readKeyValuePair()).value_cursor, .kind = .files });
             while (pending.pop()) |entry| {
                 const cursor = entry.cursor;
-                const slot = cursor.slot();
+                const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
                 try visited.put(slot.value, .{ .uint = 1 });
@@ -136,7 +134,7 @@ fn prunePatchData(
                         }
                         const fields = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
                         if (try fields.getCursor(@backingInt(patch.FileField.patch))) |patch_cursor| {
-                            if (patch_cursor.slot().tag != .none) {
+                            if ((try patch_cursor.slot()).tag != .none) {
                                 var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
                                 _ = try patch_cursor.readBytes(&id);
                                 try patches.put(hash.bytesToInt(repo_opts.hash, &id), .{ .uint = 1 });
@@ -190,9 +188,6 @@ pub fn prune(
     extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    const patch = @import("./patch.zig");
-    const DB = rp.Repo(.xit, repo_opts).DB;
-
     // the scratch database for the live sets. the transaction holds the
     // lock, so no other gc can be using the file.
     const sets_file = try state.core.repo_dir.createFile(io, sets_name, .{ .truncate = true, .read = true });
@@ -200,8 +195,42 @@ pub fn prune(
         sets_file.close(io);
         state.core.repo_dir.deleteFile(io, sets_name) catch {};
     }
-    var sets_db = try SetsDb(repo_opts).init(.{ .io = io, .file = sets_file, .fsync = false });
-    const sets = try SetsDb(repo_opts).HashMap(.read_write).init(sets_db.rootCursor());
+    var sets_db = try SetsDb(repo_opts).init(io, .{ .file = sets_file, .fsync = false });
+
+    // the sets are written in one transaction, so their writes aren't each committed
+    const Ctx = struct {
+        state: rp.Repo(.xit, repo_opts).State(.read_write),
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
+
+        pub fn run(ctx: @This(), cursor: *SetsDb(repo_opts).Cursor(.read_write)) !void {
+            try pruneWithSets(repo_opts, ctx.state, ctx.io, ctx.allocator, ctx.extra_roots, cursor.*, ctx.progress_ctx_maybe);
+        }
+    };
+    try sets_db.runContext(Ctx{
+        .state = state,
+        .io = io,
+        .allocator = allocator,
+        .extra_roots = extra_roots,
+        .progress_ctx_maybe = progress_ctx_maybe,
+    });
+}
+
+fn pruneWithSets(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
+    sets_cursor: SetsDb(repo_opts).Cursor(.read_write),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    const patch = @import("./patch.zig");
+    const DB = rp.Repo(.xit, repo_opts).DB;
+
+    const sets = try SetsDb(repo_opts).HashMap(.read_write).init(sets_cursor);
 
     // find every object reachable from the roots. like every gc phase, its
     // total isn't known until it is done.
@@ -264,7 +293,7 @@ pub fn compactDatabase(
         offsets_file.close(io);
         repo_dir.deleteFile(io, offsets_name) catch {};
     }
-    var offset_map = DiskOffsets(repo_opts){ .io = io, .file = offsets_file, .progress_ctx_maybe = progress_ctx_maybe };
+    var offsets_db = try DiskOffsets(repo_opts).DB.init(io, .{ .file = offsets_file, .fsync = false });
 
     var adopted = false;
     const new_db_file = try repo_dir.createFile(io, db_new_name, .{ .truncate = true, .read = true });
@@ -285,12 +314,38 @@ pub fn compactDatabase(
 
     // the number of records copied isn't known until the copy is done
     try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .compacting_database, .estimated_total_items = 0 } });
-    const new_db = try repo.core.db.compact(.buffered_file, .{
+    // compact inside one transaction on the offsets database, so the
+    // offsets aren't each committed separately
+    var new_db: rp.Repo(.xit, repo_opts).DB = undefined;
+    const Ctx = struct {
+        repo: *rp.Repo(.xit, repo_opts),
+        io: std.Io,
+        new_db_file: std.Io.File,
+        new_db_buffer: *std.Io.Writer.Allocating,
+        new_db: *rp.Repo(.xit, repo_opts).DB,
+        progress_ctx_maybe: ?repo_opts.ProgressCtx,
+
+        pub fn run(ctx: @This(), cursor: *DiskOffsets(repo_opts).DB.Cursor(.read_write)) !void {
+            var offset_map = DiskOffsets(repo_opts){
+                .io = ctx.io,
+                .map = try DiskOffsets(repo_opts).DB.HashMap(.read_write).init(cursor.*),
+                .progress_ctx_maybe = ctx.progress_ctx_maybe,
+            };
+            ctx.new_db.* = try ctx.repo.core.db.compact(.buffered_file, .{
+                .file = ctx.new_db_file,
+                .buffer = ctx.new_db_buffer,
+                .fsync = false,
+            }, &offset_map);
+        }
+    };
+    try offsets_db.runContext(Ctx{
+        .repo = repo,
         .io = io,
-        .file = new_db_file,
-        .buffer = new_db_buffer,
-        .fsync = false,
-    }, &offset_map);
+        .new_db_file = new_db_file,
+        .new_db_buffer = new_db_buffer,
+        .new_db = &new_db,
+        .progress_ctx_maybe = progress_ctx_maybe,
+    });
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .compacting_database });
 
     // objects point at their chunk records through slots, so compaction has already moved them
@@ -436,7 +491,7 @@ fn findReferencedPositions(
         try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
         if (try live_oids.getSlot(kv_pair.hash) == null) continue;
         // only a chunked object points at records, through the slots after its first element
-        if (kv_pair.value_cursor.slot().tag != .array_list) continue;
+        if ((try kv_pair.value_cursor.slot()).tag != .array_list) continue;
         const list = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
         var records = try list.iteratorFrom(1);
         while (try records.next()) |record_cursor| try referenced_positions.put(try chunk.chunkRecordPosition(record_cursor), .{ .uint = 1 });

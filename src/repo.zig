@@ -330,8 +330,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .repo_dir = repo_dir,
                             .global_config_path = global_config_path,
                             .db_file = db_file,
-                            .db = try DB.init(.{
-                                .io = io,
+                            .db = try DB.init(io, .{
                                 .file = db_file,
                                 .buffer = buffer_ptr,
                                 .hash_id = .{ .id = hash.hashId(repo_opts.hash) },
@@ -470,8 +469,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                                 errdefer buffer_ptr.deinit();
 
                                 const hash_id = hash.hashId(repo_opts.hash);
-                                const db = try DB.init(.{
-                                    .io = io,
+                                const db = try DB.init(io, .{
                                     .file = db_file,
                                     .buffer = buffer_ptr,
                                     .hash_id = .{ .id = hash_id },

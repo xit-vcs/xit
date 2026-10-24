@@ -150,45 +150,24 @@ pub const CountingReader = struct {
 // a large push, so the entries are kept in a scratch database instead.
 pub fn OffsetToOid(comptime hash_kind: hash.HashKind) type {
     return struct {
-        io: std.Io,
-        dir: std.Io.Dir,
-        file: std.Io.File,
-        db: DB,
+        map: DB.HashMap(.read_write),
 
         // the offsets are already u64, so they are used as the keys directly
-        const DB = @import("xitdb").Database(.file, u64);
+        pub const DB = @import("xitdb").Database(.file, u64);
         const oid_len = hash.byteLen(hash_kind);
-        const file_name = "temp.pack-offsets";
+        pub const file_name = "temp.pack-offsets";
 
-        pub fn init(io: std.Io, dir: std.Io.Dir) !OffsetToOid(hash_kind) {
-            // a crash can leave the file behind, so always start from empty
-            const file = try dir.createFile(io, file_name, .{ .truncate = true, .read = true });
-            errdefer {
-                file.close(io);
-                dir.deleteFile(io, file_name) catch {};
-            }
-
-            return .{
-                .io = io,
-                .dir = dir,
-                .file = file,
-                .db = try DB.init(.{ .io = io, .file = file, .fsync = false }),
-            };
-        }
-
-        pub fn deinit(self: *OffsetToOid(hash_kind)) void {
-            self.file.close(self.io);
-            self.dir.deleteFile(self.io, file_name) catch {};
+        // `cursor` is the root of the scratch database (see copyFromPackIterator)
+        pub fn init(cursor: DB.Cursor(.read_write)) !OffsetToOid(hash_kind) {
+            return .{ .map = try DB.HashMap(.read_write).init(cursor) };
         }
 
         pub fn put(self: *OffsetToOid(hash_kind), offset: u64, oid: *const [oid_len]u8) !void {
-            const map = try DB.HashMap(.read_write).init(self.db.rootCursor());
-            try map.put(offset, .{ .bytes = oid });
+            try self.map.put(offset, .{ .bytes = oid });
         }
 
         pub fn get(self: *OffsetToOid(hash_kind), offset: u64) !?[oid_len]u8 {
-            const map = try DB.HashMap(.read_only).init(self.db.rootCursor().readOnly());
-            const cursor = (try map.getCursor(offset)) orelse return null;
+            const cursor = (try self.map.getCursor(offset)) orelse return null;
             var oid: [oid_len]u8 = @splat(0);
             const bytes = try cursor.readBytes(&oid);
             if (bytes.len != oid_len) return error.InvalidOffsetEntry;

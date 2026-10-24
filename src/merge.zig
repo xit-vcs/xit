@@ -624,7 +624,7 @@ fn writeBlobWithPatches(
             .{ .hash_map_get = .{ .value = path_hash } },
             .{ .array_list_get = @backingInt(patch.FileField.oid) },
         })) |cursor| {
-            if (cursor.slot().tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
+            if ((try cursor.slot()).tag != .none and (try cursor.readBytes(&recorded)).len != recorded.len) return error.InvalidFileOid;
         }
         if (!std.mem.eql(u8, &recorded, check.oid)) return null;
     }

@@ -701,7 +701,7 @@ pub fn Index(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(re
                         const entry_buffer_set = try DB.HashSet(.read_write).init(entry_buffer_set_cursor);
                         var entry_buffer_cursor = try entry_buffer_set.putCursor(hash.hashInt(repo_opts.hash, entry_buffer_writer.written()));
                         try entry_buffer_cursor.writeIfEmpty(.{ .bytes = entry_buffer_writer.written() });
-                        try index.put(path, .{ .slot = entry_buffer_cursor.slot() });
+                        try index.put(path, .{ .slot = try entry_buffer_cursor.slot() });
                     }
 
                     // the db now matches the in-memory index
