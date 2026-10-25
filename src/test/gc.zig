@@ -260,12 +260,15 @@ test "gc with patches" {
         try std.testing.expect(result.size_after < result.size_before);
         const moment = try repo.core.latestMoment();
         for ([_][]const u8{ "patch-id->edit-list", "edit-id->edit" }) |name| {
-            var iter = try (try moment.getCursor(hash.hashInt(repo_opts.hash, name))).?.iterator();
+            const map = try rp.Repo(.xit, repo_opts).DB.CountedHashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, name))).?);
+            var iter = try map.iterator();
             var count: usize = 0;
             while (try iter.next()) |_| count += 1;
             try std.testing.expectEqual(expected, count);
+            // pruning keeps the stored count in step with the entries
+            try std.testing.expectEqual(expected, try map.count());
         }
-        const summaries = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_STATS_KEY))).?);
+        const summaries = try rp.Repo(.xit, repo_opts).DB.CountedHashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, patch.COMMIT_ID_TO_STATS_KEY))).?);
         try std.testing.expectEqual(roots.len > 0, try summaries.getCursor(try hash.hexToInt(repo_opts.hash, &trash_oid)) != null);
         try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = 2, .lines_added = 1, .lines_changed = 1, .bytes_added = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &keep_oid })).?);
     }

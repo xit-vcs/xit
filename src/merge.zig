@@ -233,7 +233,7 @@ fn MergeContext(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts
 
                 // missing derived metadata selects diff3; malformed data and I/O errors propagate.
                 const cursor = (try ancestry.state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) orelse return null;
-                const commit_id_to_snapshot = try DB.HashMap(.read_only).init(cursor);
+                const commit_id_to_snapshot = try DB.CountedHashMap(.read_only).init(cursor);
                 const target = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, &ancestry.tips[0]))) orelse return null;
                 const base = (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, base_oid))) orelse return null;
 

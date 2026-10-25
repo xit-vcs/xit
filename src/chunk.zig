@@ -392,7 +392,7 @@ pub fn writeChunks(
     // otherwise its chunks and their locations are written as part of the repo transaction
     if (inline_chunk_maybe == null) {
         const chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
-        const chunk_map = try DB.HashMap(.read_write).init(chunk_map_cursor);
+        const chunk_map = try DB.CountedHashMap(.read_write).init(chunk_map_cursor);
         var end_offset: u64 = 0;
         while (chunk_maybe) |chunk| : (chunk_maybe = try iter.next(&hashed.reader, &chunk_buffer)) {
             // hash the chunk
@@ -429,14 +429,14 @@ pub fn writeChunks(
     // an object that already exists has its content stored. every commit
     // writes all of its trees, so rewriting them would grow the database each time.
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) |existing_cursor| {
-        const existing = try DB.HashMap(.read_only).init(existing_cursor);
+        const existing = try DB.CountedHashMap(.read_only).init(existing_cursor);
         if (try existing.getCursor(object_hash) != null) return;
     }
 
     // the content is written after every chunk record is finished, because
     // xitdb byte writers must be contiguous and cannot be interleaved.
     const object_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "object-id->content"));
-    const object_map = try DB.HashMap(.read_write).init(object_map_cursor);
+    const object_map = try DB.CountedHashMap(.read_write).init(object_map_cursor);
     try object_map.putKey(object_hash, .{ .bytes = object_kind_name });
 
     if (inline_chunk_maybe) |chunk| {
@@ -580,7 +580,7 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
         ) !ChunkObjectReader(repo_opts) {
             // object map
             const object_map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return error.ObjectNotFound;
-            const object_map = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init(object_map_cursor);
+            const object_map = try rp.Repo(.xit, repo_opts).DB.CountedHashMap(.read_only).init(object_map_cursor);
             var kv_pair = (try object_map.getKeyValuePair(try hash.hexToInt(repo_opts.hash, oid))) orelse return error.ObjectNotFound;
 
             // object kind name

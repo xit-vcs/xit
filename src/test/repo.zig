@@ -323,7 +323,7 @@ fn testCommitStats(comptime opts: rp.RepoOpts(.xit)) !void {
         oid: [hash.hexLen(opts.hash)]u8,
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             const moment = try DB.HashMap(.read_write).init(cursor.*);
-            const summaries = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, patch.COMMIT_ID_TO_STATS_KEY)));
+            const summaries = try DB.CountedHashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, patch.COMMIT_ID_TO_STATS_KEY)));
             try summaries.put(try hash.hexToInt(opts.hash, &ctx.oid), .{ .bytes = &.{0} });
         }
     };
@@ -823,7 +823,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             const mode_oid = try repo.commitAtRef(io, allocator, .{ .message = "mode only", .parent_oids = &.{oids[0]} }, &tree, .{ .kind = .head, .name = "mode_only" });
             try repo.patchAll(io, allocator, null);
             const moment = try repo.core.latestMoment();
-            const snapshots = try rp.Repo(.xit, repo_opts).DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
+            const snapshots = try rp.Repo(.xit, repo_opts).DB.CountedHashMap(.read_only).init((try moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))).?);
             try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
             const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
             const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
@@ -1051,7 +1051,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
 
             pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                 const moment = try DB.HashMap(.read_write).init(cursor.*);
-                const snapshots = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "commit-id->snapshot")));
+                const snapshots = try DB.CountedHashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "commit-id->snapshot")));
                 const snapshot = try DB.HashMap(.read_write).init(try snapshots.putCursor(try hash.hexToInt(opts.hash, &ctx.oid)));
                 const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(hash.hashInt(opts.hash, paths[0])));
                 try fields.put(@backingInt(patch.FileField.oid), .{ .bytes = &@as([hash.byteLen(opts.hash)]u8, @splat(1)) });
@@ -1082,7 +1082,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                         _ = try moment.remove(stats_key);
                     },
                     .stats, .invalid_stats => {
-                        const stats = try DB.HashMap(.read_write).init(try moment.putCursor(stats_key));
+                        const stats = try DB.CountedHashMap(.read_write).init(try moment.putCursor(stats_key));
                         const id = try hash.hexToInt(opts.hash, &ctx.source_oid);
                         if (ctx.metadata == .stats) {
                             _ = try stats.remove(id);
@@ -1097,13 +1097,13 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                         })).?;
                         var bytes: [hash.byteLen(opts.hash)]u8 = undefined;
                         _ = try entry.readBytes(&bytes);
-                        const patches = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "patch-id->edit-list")));
+                        const patches = try DB.CountedHashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "patch-id->edit-list")));
                         const id = hash.bytesToInt(opts.hash, &bytes);
                         if (ctx.metadata == .missing_patch) {
                             _ = try patches.remove(id);
                         } else {
                             _ = try (try patches.getCursor(id)).?.readBytes(&bytes);
-                            const edits = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
+                            const edits = try DB.CountedHashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
                             _ = try edits.remove(hash.bytesToInt(opts.hash, &bytes));
                         }
                     },
@@ -1157,7 +1157,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
 
         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
             var moment = try DB.HashMap(.read_write).init(cursor.*);
-            const snapshots = try DB.HashMap(.read_only).init((try moment.getCursor(hash.hashInt(opts.hash, "commit-id->snapshot"))).?);
+            const snapshots = try DB.CountedHashMap(.read_only).init((try moment.getCursor(hash.hashInt(opts.hash, "commit-id->snapshot"))).?);
             const original = (try snapshots.getCursor(try hash.hexToInt(opts.hash, &ctx.snapshot_oid))).?;
             var snapshot_cursor = try moment.putCursor(hash.hashInt(opts.hash, "test-patch-snapshot"));
             try snapshot_cursor.write(.{ .slot = try original.slot() });
@@ -1184,7 +1184,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             const edit_id = std.mem.readInt(hash.HashInt(opts.hash), edit_bytes[0..comptime hash.byteLen(opts.hash)], .big);
             if (ctx.case == .rollback) {
                 // a malformed edit must leave the original snapshot intact
-                const records = try DB.HashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
+                const records = try DB.CountedHashMap(.read_write).init(try moment.putCursor(hash.hashInt(opts.hash, "edit-id->edit")));
                 switch (ctx.corruption) {
                     .count => try records.put(edit_id, .{ .bytes = "\xff\xff\xff\xff" }),
                     .gap => try records.put(edit_id, .{ .bytes = "\x00\x00\x00\x00" ++ "\x00\x00\x00\x01x" ++ "\xff\xff\xff\xff" }),

@@ -101,7 +101,7 @@ pub fn writeAndApplyPatches(
 
     // init snapshot
     const commit_id_to_snapshot_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"));
-    const commit_id_to_snapshot = try DB.HashMap(.read_write).init(commit_id_to_snapshot_cursor);
+    const commit_id_to_snapshot = try DB.CountedHashMap(.read_write).init(commit_id_to_snapshot_cursor);
     const commit_id_int = try hash.hexToInt(repo_opts.hash, commit_oid);
     if (try commit_id_to_snapshot.getCursor(commit_id_int)) |_| {
         return; // exit early if patches have already been created for this commit
@@ -212,7 +212,7 @@ pub fn writeAndApplyPatches(
             defer diff.deinit();
             var patch_buffer = std.Io.Writer.Allocating.init(allocator);
             defer patch_buffer.deinit();
-            const records = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "edit-id->edit")));
+            const records = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "edit-id->edit")));
             var next_edit = try diff.next();
             var old_index: usize = 0;
             while (next_edit) |edit| {
@@ -334,7 +334,7 @@ pub fn writeAndApplyPatches(
             }
             if (patch_buffer.written().len == 0) continue;
             const patch_id = hash.hashInt(repo_opts.hash, patch_buffer.written());
-            const patches = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "patch-id->edit-list")));
+            const patches = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "patch-id->edit-list")));
             var patch_cursor = try patches.putCursor(patch_id);
             try patch_cursor.writeIfEmpty(.{ .bytes = patch_buffer.written() });
             break :blk patch_id;
@@ -362,7 +362,7 @@ pub fn writeAndApplyPatches(
     inline for (@typeInfo(CommitStats).@"struct".field_names, 0..) |field_name, i| {
         std.mem.writeInt(u64, stats_bytes[i * 8 ..][0..8], @field(stats, field_name), .big);
     }
-    const summaries = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
+    const summaries = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
     try summaries.put(commit_id_int, .{ .bytes = &stats_bytes });
 
     // this will force xitdb consider the start of the transaction
@@ -400,7 +400,7 @@ pub fn readCommitStats(
 ) !?CommitStats {
     const DB = rp.Repo(.xit, repo_opts).DB;
     const summaries_cursor = (try moment.getCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY))) orelse return null;
-    const summaries = try DB.HashMap(.read_only).init(summaries_cursor);
+    const summaries = try DB.CountedHashMap(.read_only).init(summaries_cursor);
     const cursor = (try summaries.getCursor(try hash.hexToInt(repo_opts.hash, oid))) orelse return null;
     var bytes: [CommitStats.byte_len]u8 = undefined;
     if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitStats;
@@ -1376,7 +1376,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         parent_to_children: TempDB.HashMap(.read_write),
         visited: TempDB.HashSet(.read_write),
         // the commits with patches, as of the start of the walk
-        snapshots: ?DB.HashMap(.read_only),
+        snapshots: ?DB.CountedHashMap(.read_only),
         oid_queue: std.array_hash_map.Auto([hash.byteLen(repo_opts.hash)]u8, void),
         commit_count: usize,
 
@@ -1387,8 +1387,8 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
             const parent_to_children_cursor = try map.putCursor(hash.hashInt(repo_opts.hash, "parent->children"));
             const parent_to_children = try TempDB.HashMap(.read_write).init(parent_to_children_cursor);
             const visited = try TempDB.HashSet(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, "visited")));
-            const snapshots: ?DB.HashMap(.read_only) = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |cursor|
-                try DB.HashMap(.read_only).init(cursor)
+            const snapshots: ?DB.CountedHashMap(.read_only) = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |cursor|
+                try DB.CountedHashMap(.read_only).init(cursor)
             else
                 null;
 

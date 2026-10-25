@@ -78,8 +78,8 @@ fn pruneOidMap(
     const DB = rp.Repo(.xit, repo_opts).DB;
     const map_key = hash.hashInt(repo_opts.hash, map_name);
     const old_cursor = (try state.extra.moment.getCursor(map_key)) orelse return;
-    const old_map = try DB.HashMap(.read_only).init(old_cursor);
-    const new_map = try DB.HashMap(.read_write).init(try state.extra.moment.putCursor(map_key));
+    const old_map = try DB.CountedHashMap(.read_only).init(old_cursor);
+    const new_map = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(map_key));
 
     var iter = try old_map.iterator();
     while (try iter.next()) |*entry_cursor| {
@@ -97,6 +97,7 @@ fn prunePatchData(
     io: std.Io,
     allocator: std.mem.Allocator,
     sets: SetsDb(repo_opts).HashMap(.read_write),
+    live_oids: SetsDb(repo_opts).HashSet(.read_write),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const patch = @import("./patch.zig");
@@ -113,18 +114,21 @@ fn prunePatchData(
 
     // walk file maps and applied-edit sets with one worklist. snapshots share
     // trie nodes, so skip nodes we've already visited instead of scanning
-    // each file's entire edit history at every commit.
+    // each file's entire edit history at every commit. this runs before the
+    // snapshots are pruned, so a dead commit's snapshot is skipped here.
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
         var snapshot_iter = try snapshots.iterator();
         while (try snapshot_iter.next()) |snapshot| {
-            try pending.append(allocator, .{ .cursor = (try snapshot.readKeyValuePair()).value_cursor, .kind = .files });
+            try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
+            const snapshot_pair = try snapshot.readKeyValuePair();
+            if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
+            try pending.append(allocator, .{ .cursor = snapshot_pair.value_cursor, .kind = .files });
             while (pending.pop()) |entry| {
                 const cursor = entry.cursor;
                 const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
                 try visited.put(slot.value, .{ .uint = 1 });
-                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
@@ -241,7 +245,22 @@ fn pruneWithSets(
     try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
 
-    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .pruning_database, .estimated_total_items = 0 } });
+    // each map below is walked once before it is pruned, and the object and
+    // snapshot maps once more, so their counts make the phase's exact total
+    var total: u64 = 0;
+    for ([_]struct { []const u8, u64 }{
+        .{ "object-id->content", 2 },
+        .{ "commit-id->snapshot", 2 },
+        .{ patch.COMMIT_ID_TO_STATS_KEY, 1 },
+        .{ "patch-id->edit-list", 1 },
+        .{ "edit-id->edit", 1 },
+        .{ "chunk-hash->record", 1 },
+    }) |map| {
+        const cursor = try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, map[0])) orelse continue;
+        const counted = try DB.CountedHashMap(.read_only).init(cursor);
+        total += map[1] * try counted.count();
+    }
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .pruning_database, .estimated_total_items = @intCast(total) } });
 
     // find every chunk record referenced by a live object
     const referenced_positions = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "referenced-positions")));
@@ -252,17 +271,17 @@ fn pruneWithSets(
     // writing copies the map, so the cursor keeps seeing every entry.
 
     try pruneOidMap(repo_opts, state, io, live_oids, "object-id->content", progress_ctx_maybe);
+    try prunePatchData(repo_opts, state, io, allocator, sets, live_oids, progress_ctx_maybe);
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.
     try pruneOidMap(repo_opts, state, io, live_oids, "commit-id->snapshot", progress_ctx_maybe);
     try pruneOidMap(repo_opts, state, io, live_oids, patch.COMMIT_ID_TO_STATS_KEY, progress_ctx_maybe);
-    try prunePatchData(repo_opts, state, io, allocator, sets, progress_ctx_maybe);
 
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"))) |old_chunk_map_cursor| {
-        const old_chunk_map = try DB.HashMap(.read_only).init(old_chunk_map_cursor);
+        const old_chunk_map = try DB.CountedHashMap(.read_only).init(old_chunk_map_cursor);
         const new_chunk_map_cursor = try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, "chunk-hash->record"));
-        const new_chunk_map = try DB.HashMap(.read_write).init(new_chunk_map_cursor);
+        const new_chunk_map = try DB.CountedHashMap(.read_write).init(new_chunk_map_cursor);
 
         var iter = try old_chunk_map.iterator();
         while (try iter.next()) |*entry_cursor| {
@@ -487,7 +506,7 @@ fn findReferencedPositions(
     const DB = rp.Repo(.xit, repo_opts).DB;
 
     const map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
-    const map = try DB.HashMap(.read_only).init(map_cursor);
+    const map = try DB.CountedHashMap(.read_only).init(map_cursor);
 
     var iter = try map.iterator();
     while (try iter.next()) |*entry_cursor| {
