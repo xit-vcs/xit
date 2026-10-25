@@ -122,13 +122,12 @@ fn findLivePatches(
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
         var snapshot_iter = try snapshots.iterator();
         while (try snapshot_iter.next()) |snapshot| {
+            // a dead commit's snapshot counts as one too, so the total is the map's count
+            try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
             const snapshot_pair = try snapshot.readKeyValuePair();
             if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
             try pending.append(allocator, snapshot_pair.value_cursor);
             while (pending.pop()) |cursor| {
-                // every node checked counts, visited or not, since checking
-                // shared nodes is most of the work after the first snapshot
-                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
                 const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
@@ -263,10 +262,14 @@ fn pruneWithSets(
     try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
 
-    // find every patch a live commit's snapshot names. this walk has no total
-    // either, since it skips the trie nodes snapshots share.
+    // find every patch a live commit's snapshot names, one snapshot per step.
+    // after the first, a step only reads what earlier snapshots didn't share.
     const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
-    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = 0 } });
+    const snapshot_count = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |cursor|
+        try (try DB.CountedHashMap(.read_only).init(cursor)).count()
+    else
+        0;
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = @intCast(snapshot_count) } });
     const live_patch_count = try findLivePatches(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_patch });
 
