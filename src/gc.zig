@@ -28,7 +28,7 @@ pub const GcResult = struct {
 // they are kept in a scratch database rather than on the heap. a plain file
 // is used because each write outside a transaction is flushed anyway.
 fn SetsDb(comptime repo_opts: rp.RepoOpts(.xit)) type {
-    return @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
+    return @import("xitdb").Database(.buffered_file, hash.HashInt(repo_opts.hash));
 }
 
 // an error from the reporter, such as a cancellation, stops the collection
@@ -42,7 +42,7 @@ fn report(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe:
 // compaction puts every record it copies, so progress is reported from here.
 fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
-        const DB = @import("xitdb").Database(.file, u64);
+        const DB = @import("xitdb").Database(.buffered_file, u64);
 
         io: std.Io,
         map: DB.HashMap(.read_write),
@@ -195,7 +195,9 @@ pub fn prune(
         sets_file.close(io);
         state.core.repo_dir.deleteFile(io, sets_name) catch {};
     }
-    var sets_db = try SetsDb(repo_opts).init(io, .{ .file = sets_file, .fsync = false });
+    var sets_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer sets_buffer.deinit();
+    var sets_db = try SetsDb(repo_opts).init(io, .{ .file = sets_file, .buffer = &sets_buffer, .fsync = false });
 
     // the sets are written in one transaction, so their writes aren't each committed
     const Ctx = struct {
@@ -293,7 +295,9 @@ pub fn compactDatabase(
         offsets_file.close(io);
         repo_dir.deleteFile(io, offsets_name) catch {};
     }
-    var offsets_db = try DiskOffsets(repo_opts).DB.init(io, .{ .file = offsets_file, .fsync = false });
+    var offsets_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer offsets_buffer.deinit();
+    var offsets_db = try DiskOffsets(repo_opts).DB.init(io, .{ .file = offsets_file, .buffer = &offsets_buffer, .fsync = false });
 
     var adopted = false;
     const new_db_file = try repo_dir.createFile(io, db_new_name, .{ .truncate = true, .read = true });

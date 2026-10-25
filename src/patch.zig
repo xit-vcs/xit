@@ -1327,7 +1327,9 @@ pub fn writePatches(
         db_file.close(io);
         state.core.repo_dir.deleteFile(io, db_name) catch {};
     }
-    var db = try TempDB.init(io, .{ .file = db_file, .fsync = false });
+    var db_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer db_buffer.deinit();
+    var db = try TempDB.init(io, .{ .file = db_file, .buffer = &db_buffer, .fsync = false });
 
     // the temporary database is written in one transaction, so its writes
     // aren't each committed
@@ -1368,7 +1370,7 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         // the map of commits waiting on their parent and the set of visited
         // commits grow with the history, so they live in a temporary database
         // rather than on the heap (see writePatches).
-        const TempDB = @import("xitdb").Database(.file, hash.HashInt(repo_opts.hash));
+        const TempDB = @import("xitdb").Database(.buffered_file, hash.HashInt(repo_opts.hash));
         const db_name = "temp.patches";
 
         parent_to_children: TempDB.HashMap(.read_write),

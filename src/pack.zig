@@ -153,7 +153,7 @@ pub fn OffsetToOid(comptime hash_kind: hash.HashKind) type {
         map: DB.HashMap(.read_write),
 
         // the offsets are already u64, so they are used as the keys directly
-        pub const DB = @import("xitdb").Database(.file, u64);
+        pub const DB = @import("xitdb").Database(.buffered_file, u64);
         const oid_len = hash.byteLen(hash_kind);
         pub const file_name = "temp.pack-offsets";
 

@@ -1329,7 +1329,9 @@ pub fn copyFromPackIterator(
         offsets_file.close(io);
         state.core.repo_dir.deleteFile(io, OffsetToOid.file_name) catch {};
     }
-    var offsets_db = try OffsetToOid.DB.init(io, .{ .file = offsets_file, .fsync = false });
+    var offsets_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer offsets_buffer.deinit();
+    var offsets_db = try OffsetToOid.DB.init(io, .{ .file = offsets_file, .buffer = &offsets_buffer, .fsync = false });
 
     // the offsets are written in one transaction, so their writes aren't each committed
     const Ctx = struct {
