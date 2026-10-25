@@ -91,8 +91,11 @@ fn pruneOidMap(
     }
 }
 
-// collects the patches and edits a live commit's snapshot reaches
-fn findLivePatchData(
+// collects the patch each file of a live commit's snapshot names, returning
+// how many there are. a snapshot only ever gains edits by applying the patch
+// it then names, and a live commit's ancestors are live, so the live patches'
+// edit lists hold every live edit and the edit sets needn't be walked.
+fn findLivePatches(
     comptime repo_opts: rp.RepoOpts(.xit),
     state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
@@ -100,9 +103,8 @@ fn findLivePatchData(
     sets: SetsDb(repo_opts).HashMap(.read_write),
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
     patches: SetsDb(repo_opts).HashSet(.read_write),
-    edits: SetsDb(repo_opts).HashSet(.read_write),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
-) !void {
+) !u64 {
     const patch = @import("./patch.zig");
     const xitdb = @import("xitdb");
     const SlotInt = @typeInfo(xitdb.Slot).@"struct".backing_integer.?;
@@ -110,24 +112,23 @@ fn findLivePatchData(
     const DB = rp.Repo(.xit, repo_opts).DB;
     const visited = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "visited-positions")));
     // popped last-in first-out, so it holds at most one node's children per level of the trie
-    var pending: std.ArrayList(struct { cursor: DB.Cursor(.read_only), kind: enum { files, edits } }) = .empty;
+    var pending: std.ArrayList(DB.Cursor(.read_only)) = .empty;
     defer pending.deinit(allocator);
+    var count: u64 = 0;
 
-    // walk file maps and applied-edit sets with one worklist. snapshots share
-    // trie nodes, so skip nodes we've already visited instead of scanning
-    // each file's entire edit history at every commit. this runs before the
-    // snapshots are pruned, so a dead commit's snapshot is skipped here.
+    // snapshots share trie nodes, so skip nodes we've already visited instead
+    // of scanning every file at every commit. this runs before the snapshots
+    // are pruned, so a dead commit's snapshot is skipped here.
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
         var snapshot_iter = try snapshots.iterator();
         while (try snapshot_iter.next()) |snapshot| {
             const snapshot_pair = try snapshot.readKeyValuePair();
             if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
-            try pending.append(allocator, .{ .cursor = snapshot_pair.value_cursor, .kind = .files });
-            while (pending.pop()) |entry| {
+            try pending.append(allocator, snapshot_pair.value_cursor);
+            while (pending.pop()) |cursor| {
                 // every node checked counts, visited or not, since checking
                 // shared nodes is most of the work after the first snapshot
                 try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
-                const cursor = entry.cursor;
                 const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
@@ -135,23 +136,17 @@ fn findLivePatchData(
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
-                        if (entry.kind == .edits) {
-                            try edits.put(kv_pair.hash, .{ .uint = 1 });
-                            continue;
-                        }
                         const fields = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
-                        if (try fields.getCursor(@backingInt(patch.FileField.patch))) |patch_cursor| {
-                            if ((try patch_cursor.slot()).tag != .none) {
-                                var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
-                                _ = try patch_cursor.readBytes(&id);
-                                try patches.put(hash.bytesToInt(repo_opts.hash, &id), .{ .uint = 1 });
-                            }
-                        }
-                        if (try fields.getCursor(@backingInt(patch.FileField.edit_set))) |edit_cursor| {
-                            try pending.append(allocator, .{ .cursor = edit_cursor, .kind = .edits });
-                        }
+                        const patch_cursor = try fields.getCursor(@backingInt(patch.FileField.patch)) orelse continue;
+                        if ((try patch_cursor.slot()).tag == .none) continue;
+                        var id: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                        _ = try patch_cursor.readBytes(&id);
+                        const patch_id = hash.bytesToInt(repo_opts.hash, &id);
+                        if (try patches.getSlot(patch_id) != null) continue;
+                        try patches.put(patch_id, .{ .uint = 1 });
+                        count += 1;
                     },
-                    .hash_map, .hash_set, .index => {
+                    .hash_map, .index => {
                         var reader = cursor.db.core.reader();
                         try reader.seekTo(slot.value);
                         var bytes: [xitdb.SLOT_COUNT * slot_size]u8 = undefined;
@@ -162,11 +157,8 @@ fn findLivePatchData(
                             try child.tag.validate();
                             if (child.empty()) continue;
                             try pending.append(allocator, .{
-                                .cursor = .{
-                                    .db = cursor.db,
-                                    .slot_ptr = .{ .position = slot.value + i * slot_size, .slot = child },
-                                },
-                                .kind = entry.kind,
+                                .db = cursor.db,
+                                .slot_ptr = .{ .position = slot.value + i * slot_size, .slot = child },
                             });
                         }
                     },
@@ -174,6 +166,32 @@ fn findLivePatchData(
                 }
             }
         }
+    }
+    return count;
+}
+
+// collects the edits the live patches list
+fn findLiveEdits(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    patches: SetsDb(repo_opts).HashSet(.read_write),
+    edits: SetsDb(repo_opts).HashSet(.read_write),
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const Id = hash.HashInt(repo_opts.hash);
+    const lists_cursor = try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "patch-id->edit-list"));
+    const lists = if (lists_cursor) |cursor| try DB.CountedHashMap(.read_only).init(cursor) else null;
+
+    var iter = try patches.iterator();
+    while (try iter.next()) |*entry_cursor| {
+        try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
+        const patch_id = (try entry_cursor.readKeyValuePair()).hash;
+        var list_cursor = (if (lists) |map| try map.getCursor(patch_id) else null) orelse continue;
+        var buffer: [repo_opts.buffer_size]u8 = undefined;
+        var reader = try list_cursor.reader(&buffer);
+        while (reader.logicalPos() < reader.size) try edits.put(try reader.interface.takeInt(Id, .big), .{ .uint = 1 });
     }
 }
 
@@ -245,17 +263,16 @@ fn pruneWithSets(
     try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
 
-    // find every patch and edit a live commit's snapshot reaches. this walk
-    // has no total either, since it skips the trie nodes snapshots share.
+    // find every patch a live commit's snapshot names. this walk has no total
+    // either, since it skips the trie nodes snapshots share.
     const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
-    const edits = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-edits")));
     try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = 0 } });
-    try findLivePatchData(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, edits, progress_ctx_maybe);
+    const live_patch_count = try findLivePatches(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_patch });
 
-    // each map below is walked once as it is pruned, so their counts make the
-    // phase's exact total
-    var total: u64 = 0;
+    // each live patch's edit list is read once, and each map below is walked
+    // once as it is pruned, so these counts make the phase's exact total
+    var total: u64 = live_patch_count;
     for ([_]struct { []const u8, u64 }{
         .{ "object-id->content", 1 },
         .{ "commit-id->snapshot", 1 },
@@ -269,6 +286,9 @@ fn pruneWithSets(
         total += map[1] * try counted.count();
     }
     try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .pruning_database, .estimated_total_items = @intCast(total) } });
+
+    const edits = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-edits")));
+    try findLiveEdits(repo_opts, state.readOnly(), io, patches, edits, progress_ctx_maybe);
 
     // each map is iterated through a cursor taken before it is written to,
     // because entries can't be removed while the map is being iterated.
