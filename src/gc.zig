@@ -91,13 +91,16 @@ fn pruneOidMap(
     }
 }
 
-fn prunePatchData(
+// collects the patches and edits a live commit's snapshot reaches
+fn findLivePatchData(
     comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_write),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
     io: std.Io,
     allocator: std.mem.Allocator,
     sets: SetsDb(repo_opts).HashMap(.read_write),
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
+    patches: SetsDb(repo_opts).HashSet(.read_write),
+    edits: SetsDb(repo_opts).HashSet(.read_write),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const patch = @import("./patch.zig");
@@ -106,8 +109,6 @@ fn prunePatchData(
     const slot_size = @bitSizeOf(SlotInt) / 8;
     const DB = rp.Repo(.xit, repo_opts).DB;
     const visited = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "visited-positions")));
-    const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
-    const edits = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-edits")));
     // popped last-in first-out, so it holds at most one node's children per level of the trie
     var pending: std.ArrayList(struct { cursor: DB.Cursor(.read_only), kind: enum { files, edits } }) = .empty;
     defer pending.deinit(allocator);
@@ -119,7 +120,6 @@ fn prunePatchData(
     if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
         var snapshot_iter = try snapshots.iterator();
         while (try snapshot_iter.next()) |snapshot| {
-            try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
             const snapshot_pair = try snapshot.readKeyValuePair();
             if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
             try pending.append(allocator, .{ .cursor = snapshot_pair.value_cursor, .kind = .files });
@@ -129,6 +129,7 @@ fn prunePatchData(
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
                 try visited.put(slot.value, .{ .uint = 1 });
+                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
@@ -172,9 +173,6 @@ fn prunePatchData(
             }
         }
     }
-
-    try pruneOidMap(repo_opts, state, io, patches, "patch-id->edit-list", progress_ctx_maybe);
-    try pruneOidMap(repo_opts, state, io, edits, "edit-id->edit", progress_ctx_maybe);
 }
 
 // the new repo db, ready to be renamed over "db"
@@ -245,12 +243,20 @@ fn pruneWithSets(
     try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
 
-    // each map below is walked once before it is pruned, and the object and
-    // snapshot maps once more, so their counts make the phase's exact total
+    // find every patch and edit a live commit's snapshot reaches. this walk
+    // has no total either, since it skips the trie nodes snapshots share.
+    const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
+    const edits = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-edits")));
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = 0 } });
+    try findLivePatchData(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, edits, progress_ctx_maybe);
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_patch });
+
+    // each map below is walked once before it is pruned, and the object map
+    // once more, so their counts make the phase's exact total
     var total: u64 = 0;
     for ([_]struct { []const u8, u64 }{
         .{ "object-id->content", 2 },
-        .{ "commit-id->snapshot", 2 },
+        .{ "commit-id->snapshot", 1 },
         .{ patch.COMMIT_ID_TO_STATS_KEY, 1 },
         .{ "patch-id->edit-list", 1 },
         .{ "edit-id->edit", 1 },
@@ -271,7 +277,8 @@ fn pruneWithSets(
     // writing copies the map, so the cursor keeps seeing every entry.
 
     try pruneOidMap(repo_opts, state, io, live_oids, "object-id->content", progress_ctx_maybe);
-    try prunePatchData(repo_opts, state, io, allocator, sets, live_oids, progress_ctx_maybe);
+    try pruneOidMap(repo_opts, state, io, patches, "patch-id->edit-list", progress_ctx_maybe);
+    try pruneOidMap(repo_opts, state, io, edits, "edit-id->edit", progress_ctx_maybe);
 
     // a dead commit's descendants are dead, and snapshots are only
     // loaded for live commits or seeded from a live commit's parent.

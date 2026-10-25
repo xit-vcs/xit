@@ -28,6 +28,7 @@ pub const ProgressKind = enum {
     compressing_object,
     checking_object,
     walking_commit,
+    walking_patch,
     sending_bytes,
     receiving_bytes,
     pruning_database,
