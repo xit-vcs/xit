@@ -124,12 +124,14 @@ fn findLivePatchData(
             if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
             try pending.append(allocator, .{ .cursor = snapshot_pair.value_cursor, .kind = .files });
             while (pending.pop()) |entry| {
+                // every node checked counts, visited or not, since checking
+                // shared nodes is most of the work after the first snapshot
+                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
                 const cursor = entry.cursor;
                 const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
                 try visited.put(slot.value, .{ .uint = 1 });
-                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
                 switch (slot.tag) {
                     .kv_pair => {
                         const kv_pair = try cursor.readKeyValuePair();
@@ -251,11 +253,11 @@ fn pruneWithSets(
     try findLivePatchData(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, edits, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_patch });
 
-    // each map below is walked once before it is pruned, and the object map
-    // once more, so their counts make the phase's exact total
+    // each map below is walked once as it is pruned, so their counts make the
+    // phase's exact total
     var total: u64 = 0;
     for ([_]struct { []const u8, u64 }{
-        .{ "object-id->content", 2 },
+        .{ "object-id->content", 1 },
         .{ "commit-id->snapshot", 1 },
         .{ patch.COMMIT_ID_TO_STATS_KEY, 1 },
         .{ "patch-id->edit-list", 1 },
@@ -268,15 +270,12 @@ fn pruneWithSets(
     }
     try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .pruning_database, .estimated_total_items = @intCast(total) } });
 
-    // find every chunk record referenced by a live object
-    const referenced_positions = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "referenced-positions")));
-    try findReferencedPositions(repo_opts, state.readOnly(), io, live_oids, referenced_positions, progress_ctx_maybe);
-
     // each map is iterated through a cursor taken before it is written to,
     // because entries can't be removed while the map is being iterated.
     // writing copies the map, so the cursor keeps seeing every entry.
 
-    try pruneOidMap(repo_opts, state, io, live_oids, "object-id->content", progress_ctx_maybe);
+    const referenced_positions = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "referenced-positions")));
+    try pruneObjects(repo_opts, state, io, live_oids, referenced_positions, progress_ctx_maybe);
     try pruneOidMap(repo_opts, state, io, patches, "patch-id->edit-list", progress_ctx_maybe);
     try pruneOidMap(repo_opts, state, io, edits, "edit-id->edit", progress_ctx_maybe);
 
@@ -424,12 +423,12 @@ fn findLiveOids(
     var pending: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
     defer pending.deinit(allocator);
 
-    for (extra_roots) |*oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, oid);
+    for (extra_roots) |*oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, oid, true);
 
     // HEAD. this covers a detached HEAD; a symbolic HEAD points at a
     // ref that is included below.
     if (try rf.readHeadRecurMaybe(.xit, repo_opts, state, io)) |head_oid| {
-        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &head_oid);
+        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &head_oid, true);
     }
 
     // all refs under the "refs" key: heads, tags, remotes and any other kind
@@ -438,7 +437,7 @@ fn findLiveOids(
         defer ref_iter.deinit();
         while (try ref_iter.next()) |ref| {
             if (try rf.readRecur(.xit, repo_opts, state, io, .{ .ref = ref })) |oid| {
-                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &oid);
+                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &oid, true);
             }
         }
     }
@@ -447,7 +446,7 @@ fn findLiveOids(
     // unqualified ref that contains an oid must be added here, because
     // unlike the refs above, they can't be enumerated.
     if (try mrg.readAnyMergeHead(.xit, repo_opts, state, io)) |merge_oid| {
-        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &merge_oid);
+        try includeLiveOid(repo_opts, allocator, live_oids, &pending, &merge_oid, true);
     }
 
     // blobs staged in the index
@@ -458,7 +457,7 @@ fn findLiveOids(
             for (entries_for_path) |entry_maybe| {
                 if (entry_maybe) |entry| {
                     const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
-                    try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid);
+                    try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid, false);
                 }
             }
         }
@@ -472,54 +471,64 @@ fn findLiveOids(
         switch (object.content) {
             .blob => {},
             .tree => |tree| for (tree.entries.values()) |entry| {
-                if (entry.mode.content.object_type == .gitlink) continue;
                 const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
-                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid);
+                switch (entry.mode.content.object_type) {
+                    .tree => try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid, true),
+                    .regular_file, .symbolic_link => try includeLiveOid(repo_opts, allocator, live_oids, &pending, &entry_oid, false),
+                    .gitlink => {},
+                }
             },
             .commit => |commit| {
                 if (commit.metadata.parent_oids) |parent_oids| {
-                    for (parent_oids) |*parent_oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, parent_oid);
+                    for (parent_oids) |*parent_oid| try includeLiveOid(repo_opts, allocator, live_oids, &pending, parent_oid, true);
                 }
-                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &commit.tree);
+                try includeLiveOid(repo_opts, allocator, live_oids, &pending, &commit.tree, true);
             },
-            .tag => |tag| try includeLiveOid(repo_opts, allocator, live_oids, &pending, &tag.target),
+            .tag => |tag| try includeLiveOid(repo_opts, allocator, live_oids, &pending, &tag.target, true),
         }
     }
 }
 
-// marks an object live and queues it to be read, unless it already is
+// marks an object live, unless it already is, and queues it to be read when
+// `walk` is set. a blob has nothing to walk, so it is only marked.
 fn includeLiveOid(
     comptime repo_opts: rp.RepoOpts(.xit),
     allocator: std.mem.Allocator,
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
     pending: *std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    walk: bool,
 ) !void {
     const oid_int = try hash.hexToInt(repo_opts.hash, oid);
     if (try live_oids.getSlot(oid_int) != null) return;
     try live_oids.put(oid_int, .{ .uint = 1 });
-    try pending.append(allocator, oid.*);
+    if (walk) try pending.append(allocator, oid.*);
 }
 
-// collects the position of every chunk record a live object points at
-fn findReferencedPositions(
+// removes dead objects, and collects the position of every chunk record a
+// live one points at, in one pass over the object map
+fn pruneObjects(
     comptime repo_opts: rp.RepoOpts(.xit),
-    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
     io: std.Io,
     live_oids: SetsDb(repo_opts).HashSet(.read_write),
     referenced_positions: SetsDb(repo_opts).HashSet(.read_write),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const DB = rp.Repo(.xit, repo_opts).DB;
+    const map_key = hash.hashInt(repo_opts.hash, "object-id->content");
+    const old_cursor = (try state.extra.moment.getCursor(map_key)) orelse return;
+    const old_map = try DB.CountedHashMap(.read_only).init(old_cursor);
+    const new_map = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(map_key));
 
-    const map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
-    const map = try DB.CountedHashMap(.read_only).init(map_cursor);
-
-    var iter = try map.iterator();
+    var iter = try old_map.iterator();
     while (try iter.next()) |*entry_cursor| {
         const kv_pair = try entry_cursor.readKeyValuePair();
         try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .pruning_database });
-        if (try live_oids.getSlot(kv_pair.hash) == null) continue;
+        if (try live_oids.getSlot(kv_pair.hash) == null) {
+            _ = try new_map.remove(kv_pair.hash);
+            continue;
+        }
         // only a chunked object points at records, through the slots after its first element
         if ((try kv_pair.value_cursor.slot()).tag != .array_list) continue;
         const list = try DB.ArrayList(.read_only).init(kv_pair.value_cursor);
