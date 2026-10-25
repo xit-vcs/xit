@@ -39,7 +39,8 @@ fn report(comptime repo_opts: rp.RepoOpts(.xit), io: std.Io, progress_ctx_maybe:
 }
 
 // store offsets as u64 keys in a hash map in a separate xitdb database.
-// compaction puts every record it copies, so progress is reported from here.
+// compaction puts every record it copies at the end of the new database, so
+// each record's offset there is how many bytes have been copied.
 fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
     return struct {
         const DB = @import("xitdb").Database(.buffered_file, u64);
@@ -47,6 +48,11 @@ fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
         io: std.Io,
         map: DB.HashMap(.read_write),
         progress_ctx_maybe: ?repo_opts.ProgressCtx,
+        copied: u64 = 0,
+        reported: u64 = 0,
+
+        // bytes copied between reports
+        const report_every = 1024 * 1024;
 
         pub fn reset(self: *@This()) !void {
             var cursor = self.map.cursor;
@@ -61,7 +67,10 @@ fn DiskOffsets(comptime repo_opts: rp.RepoOpts(.xit)) type {
 
         pub fn put(self: *@This(), source_offset: u64, target_offset: u64) !void {
             try self.map.put(source_offset, .{ .uint = target_offset });
-            try report(repo_opts, self.io, self.progress_ctx_maybe, .{ .complete_one = .compacting_database });
+            self.copied = @max(self.copied, target_offset);
+            if (self.copied - self.reported < report_every) return;
+            self.reported = self.copied;
+            try report(repo_opts, self.io, self.progress_ctx_maybe, .{ .complete_total = .{ .kind = .compacting_database, .count = @intCast(self.copied) } });
         }
     };
 }
@@ -364,8 +373,9 @@ pub fn compactDatabase(
     new_db_buffer.* = std.Io.Writer.Allocating.init(allocator);
     errdefer if (!adopted) new_db_buffer.deinit();
 
-    // the number of records copied isn't known until the copy is done
-    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .compacting_database, .estimated_total_items = 0 } });
+    // progress is bytes copied. only live records are copied, so the copy
+    // can't outgrow the database it copies, which bounds it.
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .compacting_database, .estimated_total_items = @intCast(try repo.core.db_file.length(io)) } });
     // compact inside one transaction on the offsets database, so the
     // offsets aren't each committed separately
     var new_db: rp.Repo(.xit, repo_opts).DB = undefined;
@@ -398,12 +408,13 @@ pub fn compactDatabase(
         .new_db = &new_db,
         .progress_ctx_maybe = progress_ctx_maybe,
     });
-    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .compacting_database });
 
     // objects point at their chunk records through slots, so compaction has already moved them
     try new_db_file.sync(io);
 
     const size_after = try new_db_file.length(io);
+    try report(repo_opts, io, progress_ctx_maybe, .{ .complete_total = .{ .kind = .compacting_database, .count = @intCast(size_after) } });
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .compacting_database });
 
     // replacing one file is atomic, so a crash leaves either the old valid
     // database or the new valid database. a stale db.gc is simply overwritten.

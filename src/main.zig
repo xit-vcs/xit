@@ -77,7 +77,12 @@ const ProgressCtx = struct {
                     .pruning_database => "Pruning database",
                     .compacting_database => "Compacting database",
                 };
-                self.node.* = root.start(name, start.estimated_total_items);
+                // a byte phase names its progress instead of counting items
+                const total = switch (start.kind) {
+                    .sending_bytes, .receiving_bytes, .compacting_database => 0,
+                    else => start.estimated_total_items,
+                };
+                self.node.* = root.start(name, total);
             },
             .complete_one => if (self.node.*) |node| node.completeOne(),
             .complete_total => |complete_total| if (self.node.*) |node| {
@@ -85,6 +90,7 @@ const ProgressCtx = struct {
                 switch (complete_total.kind) {
                     .sending_bytes => node.setName(try std.mem.print(&buffer, "Sending bytes: {Bi:.2}", .{complete_total.count})),
                     .receiving_bytes => node.setName(try std.mem.print(&buffer, "Receiving bytes: {Bi:.2}", .{complete_total.count})),
+                    .compacting_database => node.setName(try std.mem.print(&buffer, "Compacting database: {Bi:.2}", .{complete_total.count})),
                     else => node.setCompletedItems(complete_total.count),
                 }
             },
