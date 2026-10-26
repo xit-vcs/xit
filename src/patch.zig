@@ -113,6 +113,9 @@ pub fn writeAndApplyPatches(
     if (parent_commit_oid_maybe) |*parent_commit_oid| {
         if (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, parent_commit_oid))) |parent_snapshot_cursor| {
             try snapshot_cursor.write(.{ .slot = try parent_snapshot_cursor.slot() });
+            // this snapshot shares the parent's data, so freeze it to make changes
+            // copy that data instead of mutating the parent's snapshot
+            try snapshot_cursor.freeze();
         } else {
             return error.ParentCommitSnapshotNotFound;
         }
@@ -364,16 +367,6 @@ pub fn writeAndApplyPatches(
     }
     const summaries = try DB.CountedHashMap(.read_write).init(try state.extra.moment.putCursor(hash.hashInt(repo_opts.hash, COMMIT_ID_TO_STATS_KEY)));
     try summaries.put(commit_id_int, .{ .bytes = &stats_bytes });
-
-    // this will force xitdb consider the start of the transaction
-    // to be at the very end of the file. this is necessary in case
-    // this function is called again in this transaction, which can
-    // happen during a clone or fetch. this could be bad because,
-    // as you can see above, we are getting the snapshot from the
-    // parent commit and copying it. we don't want that snapshot to
-    // be mutable, so we have to make xitdb think the transaction
-    // just started.
-    try state.core.db.freeze();
 }
 
 pub const COMMIT_ID_TO_STATS_KEY = "commit-id->stats";
