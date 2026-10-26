@@ -125,18 +125,34 @@ fn findLivePatches(
     defer pending.deinit(allocator);
     var count: u64 = 0;
 
+    // the first live snapshot reads its commit's whole file trie, and how big
+    // that is isn't known up front, so it's counted by node in a phase of its
+    // own. every later snapshot is one step of a percentage, and one step only
+    // reads what earlier snapshots didn't share.
+    const snapshots = try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot")) orelse return 0;
+    const snapshot_count = try (try DB.CountedHashMap(.read_only).init(snapshots)).count();
+    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .preparing_patch_walk, .estimated_total_items = 0 } });
+    var walked_first = false;
+    // the snapshots handled before the percentage starts, which it begins from
+    var before_first: u64 = 0;
+
     // snapshots share trie nodes, so skip nodes we've already visited instead
     // of scanning every file at every commit. this runs before the snapshots
     // are pruned, so a dead commit's snapshot is skipped here.
-    if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |snapshots| {
+    {
         var snapshot_iter = try snapshots.iterator();
         while (try snapshot_iter.next()) |snapshot| {
             // a dead commit's snapshot counts as one too, so the total is the map's count
-            try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
+            if (walked_first) {
+                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .walking_patch });
+            } else {
+                before_first += 1;
+            }
             const snapshot_pair = try snapshot.readKeyValuePair();
             if (try live_oids.getSlot(snapshot_pair.hash) == null) continue;
             try pending.append(allocator, snapshot_pair.value_cursor);
             while (pending.pop()) |cursor| {
+                if (!walked_first) try report(repo_opts, io, progress_ctx_maybe, .{ .complete_one = .preparing_patch_walk });
                 const slot = try cursor.slot();
                 if (slot.tag == .none) continue;
                 if (try visited.getSlot(slot.value) != null) continue;
@@ -173,8 +189,15 @@ fn findLivePatches(
                     else => return error.UnexpectedTag,
                 }
             }
+            if (!walked_first) {
+                walked_first = true;
+                try report(repo_opts, io, progress_ctx_maybe, .{ .end = .preparing_patch_walk });
+                try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = @intCast(snapshot_count) } });
+                try report(repo_opts, io, progress_ctx_maybe, .{ .complete_total = .{ .kind = .walking_patch, .count = @intCast(before_first) } });
+            }
         }
     }
+    try report(repo_opts, io, progress_ctx_maybe, .{ .end = if (walked_first) .walking_patch else .preparing_patch_walk });
     return count;
 }
 
@@ -271,16 +294,9 @@ fn pruneWithSets(
     try findLiveOids(repo_opts, state.readOnly(), io, allocator, extra_roots, live_oids, progress_ctx_maybe);
     try report(repo_opts, io, progress_ctx_maybe, .{ .end = .enumerating_object });
 
-    // find every patch a live commit's snapshot names, one snapshot per step.
-    // after the first, a step only reads what earlier snapshots didn't share.
+    // find every patch a live commit's snapshot names
     const patches = try SetsDb(repo_opts).HashSet(.read_write).init(try sets.putCursor(hash.hashInt(repo_opts.hash, "live-patches")));
-    const snapshot_count = if (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "commit-id->snapshot"))) |cursor|
-        try (try DB.CountedHashMap(.read_only).init(cursor)).count()
-    else
-        0;
-    try report(repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .walking_patch, .estimated_total_items = @intCast(snapshot_count) } });
     const live_patch_count = try findLivePatches(repo_opts, state.readOnly(), io, allocator, sets, live_oids, patches, progress_ctx_maybe);
-    try report(repo_opts, io, progress_ctx_maybe, .{ .end = .walking_patch });
 
     // each live patch's edit list is read once, and each map below is walked
     // once as it is pruned, so these counts make the phase's exact total
