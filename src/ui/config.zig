@@ -432,7 +432,7 @@ pub fn ConfigList(comptime Widget: type, comptime repo_kind: rp.RepoKind, compti
 
             // text-editing keys go to the focused cell
             switch (key) {
-                .codepoint, .arrow_left, .arrow_right, .home, .end, .delete, .backspace => {
+                .codepoint, .arrow_left, .arrow_right, .home, .end, .delete, .backspace, .mouse => {
                     if (current_row == 0) {
                         try self.addItemPtr().input(allocator, key, root_focus);
                     } else if (self.configItemPtr(current_row - 1)) |row| {
