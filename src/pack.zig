@@ -1347,22 +1347,6 @@ pub fn LooseOrPackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_op
     };
 }
 
-// append an offset in the big endian variable length format used by
-// ofs_delta pack entries (note the +1 per continuation "offset encoding",
-// mirroring the decoder above)
-fn writeOfsVarint(writer: *std.Io.Writer, value: u64) !void {
-    var buf: [10]u8 = @splat(0);
-    var pos: usize = buf.len - 1;
-    var remaining = value;
-    buf[pos] = @truncate(remaining & 0x7f);
-    while (remaining >> 7 != 0) {
-        remaining = (remaining >> 7) - 1;
-        pos -= 1;
-        buf[pos] = 0x80 | @as(u8, @truncate(remaining & 0x7f));
-    }
-    try writer.writeAll(buf[pos..]);
-}
-
 // the base object is indexed in blocks of this size when creating a delta.
 // smaller finds more matches but makes the index bigger; git uses 16.
 const delta_block_size = 16;
@@ -1541,21 +1525,23 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         io: std.Io,
         core: *rp.Repo(repo_kind, repo_opts).Core,
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
-        allow_ofs_delta: bool,
-        entries: std.ArrayList(Entry),
-        entry_index: usize,
+        temp: *Temp,
+        entries: TempDB.SortedSet(.read_only),
+        entry_count: u64,
+        deltas: TempDB.HashMap(.read_only),
+        entry_index: u64,
         // where the current entry's data is streamed from: a reader over the
-        // object store for full objects, or the cached delta instructions
+        // object store for full objects, or the entry's delta instructions
         source: union(enum) {
             none,
             object_reader: obj.ObjectReader(repo_kind, repo_opts),
-            delta: std.Io.Reader,
+            delta: struct {
+                bytes: []const u8,
+                reader: std.Io.Reader,
+            },
         },
         out_bytes: std.Io.Writer.Allocating,
         out_index: usize,
-        // total bytes handed to the caller so far; used to record each
-        // entry's offset in the pack for ofs_delta encoding
-        bytes_produced: u64,
         stream_buffer: [std.compress.flate.max_window_len]u8,
         hasher: hash.Hasher(repo_opts.hash),
         mode: union(enum) {
@@ -1567,31 +1553,30 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             finished,
         },
 
-        pub const InitOptions = struct {
-            allow_ofs_delta: bool = false,
-            progress_ctx: ?repo_opts.ProgressCtx = null,
+        const TempDB = obj.ObjectIterator(repo_kind, repo_opts).TempDB;
+
+        // the temporary database the pack is written from. it's on the heap
+        // because cursors into the database point at it.
+        const Temp = struct {
+            dir: std.Io.Dir,
+            name: [temp_prefix.len + 16]u8,
+            file: std.Io.File,
+            buffer: std.Io.Writer.Allocating,
+            db: TempDB,
         };
+        const temp_prefix = "xit-pack-";
 
         const Entry = struct {
-            oid: [hash.hexLen(repo_opts.hash)]u8,
+            oid: [hash.byteLen(repo_opts.hash)]u8,
             kind: obj.ObjectKind,
             size: u64,
-            name_hash: u32,
-            // delta chain length (zero for full objects)
-            depth: usize,
-            pack_offset: u64,
-            repr: union(enum) {
-                full,
-                delta: struct {
-                    base_index: usize,
-                    bytes: []u8,
-                },
-            },
         };
 
-        // stop finding new deltas once this many bytes of delta instructions
-        // are cached in memory
-        const max_delta_cache_size = 256 * 1024 * 1024;
+        // an entry's key is its kind, the hash of the name it was found under,
+        // its size subtracted from the max, and its oid. so the entries sort
+        // similar objects near each other, largest first (deltas from a larger
+        // base tend to be smaller).
+        const entry_key_len = 1 + 4 + 8 + hash.byteLen(repo_opts.hash);
 
         fn reportProgress(io: std.Io, progress_ctx_maybe: ?repo_opts.ProgressCtx, event: rp.ProgressEvent) !void {
             if (repo_opts.ProgressCtx == void) return;
@@ -1601,67 +1586,101 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
         pub fn init(
             allocator: std.mem.Allocator,
-            obj_iter: *obj.ObjectIterator(repo_kind, repo_opts),
-            options: InitOptions,
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            includes: []const [hash.hexLen(repo_opts.hash)]u8,
+            excludes: []const [hash.hexLen(repo_opts.hash)]u8,
+            progress_ctx_maybe: ?repo_opts.ProgressCtx,
         ) !?PackWriter(repo_kind, repo_opts) {
             var self = PackWriter(repo_kind, repo_opts){
                 .allocator = allocator,
-                .io = obj_iter.io,
-                .core = obj_iter.core,
-                .moment = obj_iter.moment,
-                .allow_ofs_delta = options.allow_ofs_delta,
-                .entries = .empty,
+                .io = io,
+                .core = state.core,
+                .moment = state.extra.moment.*,
+                .temp = try createTemp(state, io, allocator),
+                .entries = undefined,
+                .entry_count = 0,
+                .deltas = undefined,
                 .entry_index = 0,
                 .source = .none,
-                .out_bytes = try .initCapacity(allocator, repo_opts.buffer_size),
+                .out_bytes = .init(allocator),
                 .out_index = 0,
-                .bytes_produced = 0,
                 .stream_buffer = @splat(0),
                 .hasher = hash.Hasher(repo_opts.hash).init(.{}),
                 .mode = .header,
             };
             errdefer self.deinit();
 
-            // the walk is what decides how many objects there are, so it can
-            // only report what it has reached
-            try reportProgress(obj_iter.io, options.progress_ctx, .{ .start = .{ .kind = .enumerating_object, .estimated_total_items = 0 } });
-            while (try obj_iter.next(allocator)) |object| {
-                defer object.deinit();
-                try reportProgress(obj_iter.io, options.progress_ctx, .{ .complete_one = .enumerating_object });
-                try self.entries.append(allocator, .{
-                    .oid = object.oid,
-                    .kind = object.content,
-                    .size = object.len,
-                    .name_hash = obj_iter.name_hash,
-                    .depth = 0,
-                    .pack_offset = 0,
-                    .repr = .full,
-                });
-            }
+            const Ctx = struct {
+                pack_writer: *PackWriter(repo_kind, repo_opts),
+                includes: []const [hash.hexLen(repo_opts.hash)]u8,
+                excludes: []const [hash.hexLen(repo_opts.hash)]u8,
+                progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
-            try reportProgress(obj_iter.io, options.progress_ctx, .{ .end = .enumerating_object });
+                pub fn run(ctx: @This(), cursor: *TempDB.Cursor(.read_write)) !void {
+                    const pack_writer = ctx.pack_writer;
+                    const map = try TempDB.HashMap(.read_write).init(cursor.*);
+                    const entry_set = try TempDB.SortedSet(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, "entries")));
+                    const delta_map = try TempDB.HashMap(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, "deltas")));
+                    const exclude_set = try TempDB.HashSet(.read_write).init(try map.putCursor(hash.hashInt(repo_opts.hash, "excludes")));
 
-            if (self.entries.items.len == 0) {
+                    const read_state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = pack_writer.core, .extra = .{ .moment = &pack_writer.moment } };
+                    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).initTemp(read_state, pack_writer.io, pack_writer.allocator, .{ .kind = .all }, exclude_set);
+                    defer obj_iter.deinit();
+
+                    for (ctx.excludes) |*oid| {
+                        obj_iter.exclude(oid) catch |err| switch (err) {
+                            error.ObjectNotFound => {},
+                            else => |e| return e,
+                        };
+                    }
+
+                    for (ctx.includes) |*oid| {
+                        try obj_iter.include(oid);
+                    }
+
+                    // the walk is what decides how many objects there are, so it can
+                    // only report what it has reached
+                    try reportProgress(pack_writer.io, ctx.progress_ctx_maybe, .{ .start = .{ .kind = .enumerating_object, .estimated_total_items = 0 } });
+                    while (try obj_iter.next(pack_writer.allocator)) |object| {
+                        defer object.deinit();
+                        try reportProgress(pack_writer.io, ctx.progress_ctx_maybe, .{ .complete_one = .enumerating_object });
+                        const kind: obj.ObjectKind = object.content;
+                        var key: [entry_key_len]u8 = undefined;
+                        key[0] = @backingInt(kind);
+                        std.mem.writeInt(u32, key[1..5], obj_iter.name_hash, .big);
+                        std.mem.writeInt(u64, key[5..13], std.math.maxInt(u64) - object.len, .big);
+                        _ = try std.fmt.hexToBytes(key[13..], &object.oid);
+                        try entry_set.put(&key);
+                    }
+
+                    try reportProgress(pack_writer.io, ctx.progress_ctx_maybe, .{ .end = .enumerating_object });
+
+                    pack_writer.entries = entry_set.readOnly();
+                    pack_writer.entry_count = try entry_set.count();
+                    try pack_writer.findDeltas(delta_map, ctx.progress_ctx_maybe);
+                }
+            };
+            try self.temp.db.runContext(Ctx{
+                .pack_writer = &self,
+                .includes = includes,
+                .excludes = excludes,
+                .progress_ctx_maybe = progress_ctx_maybe,
+            });
+
+            if (self.entry_count == 0) {
                 self.deinit();
                 return null;
             }
 
-            // sort so that similar objects are near each other: by kind, then
-            // by the name the object was found under, then largest first
-            // (deltas from a larger base tend to be smaller)
-            std.mem.sort(Entry, self.entries.items, {}, struct {
-                fn lessThan(_: void, a: Entry, b: Entry) bool {
-                    if (a.kind != b.kind) return @backingInt(a.kind) < @backingInt(b.kind);
-                    if (a.name_hash != b.name_hash) return a.name_hash < b.name_hash;
-                    return a.size > b.size;
-                }
-            }.lessThan);
-
-            try self.findDeltas(options.progress_ctx);
+            // the cursors made in the transaction are reopened from the committed root
+            const map = try TempDB.HashMap(.read_only).init(self.temp.db.rootCursor().readOnly());
+            self.entries = try TempDB.SortedSet(.read_only).init(try map.getCursor(hash.hashInt(repo_opts.hash, "entries")) orelse return error.EntriesNotFound);
+            self.deltas = try TempDB.HashMap(.read_only).init(try map.getCursor(hash.hashInt(repo_opts.hash, "deltas")) orelse return error.DeltasNotFound);
 
             _ = try self.out_bytes.writer.write("PACK");
             try self.out_bytes.writer.writeInt(u32, 2, .big); // version
-            try self.out_bytes.writer.writeInt(u32, @intCast(self.entries.items.len), .big);
+            try self.out_bytes.writer.writeInt(u32, @intCast(self.entry_count), .big);
 
             try self.writeEntryHeader();
 
@@ -1671,28 +1690,92 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         pub fn deinit(self: *PackWriter(repo_kind, repo_opts)) void {
             switch (self.source) {
                 .object_reader => |*object_reader| object_reader.deinit(),
-                .none, .delta => {},
+                .delta => |delta| self.allocator.free(delta.bytes),
+                .none => {},
             }
-            for (self.entries.items) |*entry| {
-                switch (entry.repr) {
-                    .full => {},
-                    .delta => |d| self.allocator.free(d.bytes),
+            self.out_bytes.deinit();
+            self.temp.buffer.deinit();
+            self.temp.file.close(self.io);
+            self.temp.dir.deleteFile(self.io, &self.temp.name) catch {};
+            self.temp.dir.close(self.io);
+            self.allocator.destroy(self.temp);
+        }
+
+        // the temporary database goes in the repo's temp path, or the repo dir
+        // if there is none. fetches are served without a lock, so each one gets
+        // a random name, and holds a file lock while it's in use.
+        fn createTemp(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+        ) !*Temp {
+            const temp = try allocator.create(Temp);
+            errdefer allocator.destroy(temp);
+
+            temp.dir = if (state.core.temp_path) |temp_path|
+                try std.Io.Dir.cwd().openDir(io, temp_path, .{ .iterate = true })
+            else
+                try state.core.repo_dir.openDir(io, ".", .{ .iterate = true });
+            errdefer temp.dir.close(io);
+
+            // a database whose process died was never deleted, but its lock
+            // was released, so delete the ones that can be locked
+            {
+                var iter = temp.dir.iterate();
+                while (try iter.next(io)) |entry| {
+                    if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, temp_prefix)) continue;
+                    const stale_file = temp.dir.openFile(io, entry.name, .{ .lock = .exclusive, .lock_nonblocking = true }) catch continue;
+                    stale_file.close(io);
+                    temp.dir.deleteFile(io, entry.name) catch {};
                 }
             }
-            self.entries.deinit(self.allocator);
-            self.out_bytes.deinit();
+
+            var random_bytes: [8]u8 = undefined;
+            io.random(&random_bytes);
+            _ = try std.mem.print(&temp.name, "{s}{s}", .{ temp_prefix, &std.fmt.bytesToHex(random_bytes, .lower) });
+
+            temp.file = try temp.dir.createFile(io, &temp.name, .{
+                .exclusive = true,
+                .read = true,
+                .lock = .exclusive,
+                .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
+            });
+            errdefer {
+                temp.file.close(io);
+                temp.dir.deleteFile(io, &temp.name) catch {};
+            }
+
+            temp.buffer = .init(allocator);
+            errdefer temp.buffer.deinit();
+            temp.db = try TempDB.init(io, .{ .file = temp.file, .buffer = &temp.buffer, .fsync = false });
+
+            return temp;
+        }
+
+        fn getEntry(self: *PackWriter(repo_kind, repo_opts), index: u64) !Entry {
+            const kv_pair = try self.entries.getIndexKeyValuePair(index) orelse return error.EntryNotFound;
+            var key: [entry_key_len]u8 = undefined;
+            if ((try kv_pair.key_cursor.readBytes(&key)).len != entry_key_len) return error.InvalidEntryKey;
+            return .{
+                .oid = key[13..].*,
+                .kind = std.enums.fromInt(obj.ObjectKind, key[0]) orelse return error.InvalidEnumTag,
+                .size = std.math.maxInt(u64) - std.mem.readInt(u64, key[5..13], .big),
+            };
         }
 
         // slide a window over the sorted entries, trying to represent each
         // one as a delta against a nearby earlier entry
-        fn findDeltas(self: *PackWriter(repo_kind, repo_opts), progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
+        fn findDeltas(self: *PackWriter(repo_kind, repo_opts), delta_map: TempDB.HashMap(.read_write), progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
             const window_size = repo_opts.delta_window_size;
-            if (window_size == 0 or self.entries.items.len < 2) return;
+            if (window_size == 0 or self.entry_count < 2) return;
 
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
 
             const WindowEntry = struct {
-                index: usize,
+                oid: [hash.byteLen(repo_opts.hash)]u8,
+                kind: obj.ObjectKind,
+                // delta chain length (zero for full objects)
+                depth: usize,
                 bytes: []u8,
             };
             var window: std.ArrayList(WindowEntry) = .empty;
@@ -1703,23 +1786,22 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 window.deinit(self.allocator);
             }
 
-            var cache_size: usize = 0;
-
             // an entry is counted as it is reached, so the ones too big to
             // delta move the bar too
-            try reportProgress(self.io, progress_ctx_maybe, .{ .start = .{ .kind = .compressing_object, .estimated_total_items = self.entries.items.len } });
+            try reportProgress(self.io, progress_ctx_maybe, .{ .start = .{ .kind = .compressing_object, .estimated_total_items = @intCast(self.entry_count) } });
             defer reportProgress(self.io, progress_ctx_maybe, .{ .end = .compressing_object }) catch {};
 
-            for (self.entries.items, 0..) |*entry, i| {
+            for (0..self.entry_count) |i| {
                 try reportProgress(self.io, progress_ctx_maybe, .{ .complete_one = .compressing_object });
+                const entry = try self.getEntry(i);
                 if (entry.size == 0 or entry.size > repo_opts.delta_big_file_threshold) continue;
-                if (cache_size > max_delta_cache_size) break;
 
                 // read the whole object into memory
                 const target = try self.allocator.alloc(u8, @intCast(entry.size));
                 errdefer self.allocator.free(target);
                 {
-                    var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &entry.oid);
+                    const oid_hex = std.fmt.bytesToHex(entry.oid, .lower);
+                    var object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &oid_hex);
                     defer object_reader.deinit();
                     try object_reader.interface.readSliceAll(target);
                 }
@@ -1727,16 +1809,16 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 // try a delta against each window entry, newest first,
                 // keeping the smallest result
                 var best_bytes: ?[]u8 = null;
-                errdefer if (best_bytes) |bytes| self.allocator.free(bytes);
-                var best_base: usize = 0;
+                defer if (best_bytes) |bytes| self.allocator.free(bytes);
+                var best_base: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+                var depth: usize = 0;
 
                 var window_i = window.items.len;
                 while (window_i > 0) {
                     window_i -= 1;
                     const candidate = window.items[window_i];
-                    const base_entry = &self.entries.items[candidate.index];
-                    if (base_entry.kind != entry.kind) continue;
-                    if (base_entry.depth + 1 > repo_opts.delta_max_depth) continue;
+                    if (candidate.kind != entry.kind) continue;
+                    if (candidate.depth + 1 > repo_opts.delta_max_depth) continue;
 
                     // a delta is only worth using if it's less than half the
                     // object's size, and only worth keeping if it beats the best
@@ -1746,14 +1828,18 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     if (try createDelta(self.allocator, candidate.bytes, target, max_size)) |delta_bytes| {
                         if (best_bytes) |bytes| self.allocator.free(bytes);
                         best_bytes = delta_bytes;
-                        best_base = candidate.index;
+                        best_base = candidate.oid;
+                        depth = candidate.depth + 1;
                     }
                 }
 
+                // the base's oid, then the delta instructions
                 if (best_bytes) |delta_bytes| {
-                    entry.repr = .{ .delta = .{ .base_index = best_base, .bytes = delta_bytes } };
-                    entry.depth = self.entries.items[best_base].depth + 1;
-                    cache_size += delta_bytes.len;
+                    var delta_cursor = try delta_map.putCursor(i);
+                    var delta_writer = try delta_cursor.writer(&.{});
+                    try delta_writer.interface.writeAll(&best_base);
+                    try delta_writer.interface.writeAll(delta_bytes);
+                    try delta_writer.finish();
                 }
 
                 // add this object to the window (even if it became a delta,
@@ -1762,7 +1848,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     const oldest = window.orderedRemove(0);
                     self.allocator.free(oldest.bytes);
                 }
-                try window.append(self.allocator, .{ .index = i, .bytes = target });
+                try window.append(self.allocator, .{ .oid = entry.oid, .kind = entry.kind, .depth = depth, .bytes = target });
             }
         }
 
@@ -1780,7 +1866,6 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                     @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
                     self.hasher.update(buffer[0..size]);
-                    self.bytes_produced += size;
                     if (size < buffer.len) {
                         self.out_bytes.deinit();
                         self.out_bytes = try .initCapacity(self.allocator, repo_opts.buffer_size);
@@ -1800,7 +1885,6 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                         @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
                         self.hasher.update(buffer[0..size]);
-                        self.bytes_produced += size;
                         self.out_index += size;
                         return size;
                     } else {
@@ -1813,7 +1897,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                             const size = switch (self.source) {
                                 .none => unreachable,
                                 .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, .limited(buffer.len)),
-                                .delta => |*delta_reader| delta_reader.stream(&stream.writer, .limited(buffer.len)),
+                                .delta => |*delta| delta.reader.stream(&stream.writer, .limited(buffer.len)),
                             } catch |err| switch (err) {
                                 error.EndOfStream => 0,
                                 else => |e| return e,
@@ -1836,11 +1920,12 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         // there is nothing more to write, so move on to the next object
                         switch (self.source) {
                             .object_reader => |*object_reader| object_reader.deinit(),
-                            .none, .delta => {},
+                            .delta => |delta| self.allocator.free(delta.bytes),
+                            .none => {},
                         }
                         self.source = .none;
                         self.entry_index += 1;
-                        if (self.entry_index < self.entries.items.len) {
+                        if (self.entry_index < self.entry_count) {
                             self.mode = .header;
                             try self.writeEntryHeader();
                         } else {
@@ -1855,7 +1940,6 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 .footer => {
                     const size = @min(self.out_bytes.written().len - self.out_index, buffer.len);
                     @memcpy(buffer[0..size], self.out_bytes.written()[self.out_index .. self.out_index + size]);
-                    self.bytes_produced += size;
                     if (size < buffer.len) {
                         self.out_bytes.deinit();
                         self.out_bytes = try .initCapacity(self.allocator, repo_opts.buffer_size);
@@ -1871,27 +1955,24 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         }
 
         fn writeEntryHeader(self: *PackWriter(repo_kind, repo_opts)) !void {
-            const entry = &self.entries.items[self.entry_index];
+            const entry = try self.getEntry(self.entry_index);
+            const oid_len = hash.byteLen(repo_opts.hash);
 
-            // the entry begins after everything already handed to the caller
-            // plus anything still sitting in out_bytes
-            entry.pack_offset = self.bytes_produced + self.out_bytes.written().len;
+            const delta_maybe: ?[]const u8 = if (try self.deltas.getCursor(self.entry_index)) |delta_cursor|
+                try delta_cursor.readBytesAlloc(self.allocator, null)
+            else
+                null;
+            errdefer if (delta_maybe) |delta| self.allocator.free(delta);
 
-            const kind: PackObjectKind = switch (entry.repr) {
-                .full => switch (entry.kind) {
-                    .blob => .blob,
-                    .tree => .tree,
-                    .commit => .commit,
-                    .tag => .tag,
-                },
-                .delta => if (self.allow_ofs_delta) .ofs_delta else .ref_delta,
-            };
+            const kind: PackObjectKind = if (delta_maybe == null) switch (entry.kind) {
+                .blob => .blob,
+                .tree => .tree,
+                .commit => .commit,
+                .tag => .tag,
+            } else .ref_delta;
             // for delta entries, the header size field is the size of the
             // delta instructions, not the reconstructed object
-            const size: u64 = switch (entry.repr) {
-                .full => entry.size,
-                .delta => |d| d.bytes.len,
-            };
+            const size: u64 = if (delta_maybe) |delta| delta.len - oid_len else entry.size;
 
             const first_size_parts: packed struct {
                 low_bits: u4,
@@ -1924,28 +2005,15 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 next_size = size_parts.high_bits;
             }
 
-            // delta entries name their base object before the compressed data
-            switch (entry.repr) {
-                .full => {},
-                .delta => |d| {
-                    const base_entry = &self.entries.items[d.base_index];
-                    if (self.allow_ofs_delta) {
-                        try writeOfsVarint(&self.out_bytes.writer, entry.pack_offset - base_entry.pack_offset);
-                    } else {
-                        var base_oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
-                        _ = try std.fmt.hexToBytes(&base_oid_bytes, &base_entry.oid);
-                        try self.out_bytes.writer.writeAll(&base_oid_bytes);
-                    }
-                },
-            }
-
-            // set up the source that the entry's data will be streamed from
-            switch (entry.repr) {
-                .full => {
-                    const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
-                    self.source = .{ .object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &entry.oid) };
-                },
-                .delta => |d| self.source = .{ .delta = std.Io.Reader.fixed(d.bytes) },
+            // delta entries name their base object before the compressed data,
+            // and then stream the delta instructions
+            if (delta_maybe) |delta| {
+                try self.out_bytes.writer.writeAll(delta[0..oid_len]);
+                self.source = .{ .delta = .{ .bytes = delta, .reader = .fixed(delta[oid_len..]) } };
+            } else {
+                const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
+                const oid_hex = std.fmt.bytesToHex(entry.oid, .lower);
+                self.source = .{ .object_reader = try obj.ObjectReader(repo_kind, repo_opts).init(state, self.io, self.allocator, &oid_hex) };
             }
         }
     };

@@ -204,13 +204,13 @@ fn uploadPack(
                 .eof => {},
                 .data => |line| {
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, line)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, if (upload_pack.no_progress) null else progress_ctx_maybe);
                     }
                 },
                 .flush => {
                     // flush with no negotiation; proceed directly to pack
                     if (try upload_pack.getCommonCommits(repo_kind, repo_opts, state, io, writer, allocator, stdin_reader, &have_obj, &want_obj, null)) {
-                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
+                        try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, if (upload_pack.no_progress) null else progress_ctx_maybe);
                     }
                 },
                 .delim => return error.UnexpectedDelim,
@@ -229,21 +229,9 @@ fn writePack(
     writer: *std.Io.Writer,
     want_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
     have_obj: *const std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
-    use_ofs_delta: bool,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
-    defer obj_iter.deinit();
-
-    for (have_obj.items) |*item| {
-        try obj_iter.exclude(item);
-    }
-
-    for (want_obj.items) |*item| {
-        try obj_iter.include(item);
-    }
-
-    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = use_ofs_delta, .progress_ctx = progress_ctx_maybe });
+    var pack_writer_maybe = try pack.PackWriter(repo_kind, repo_opts).init(allocator, state, io, want_obj.items, have_obj.items, progress_ctx_maybe);
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 
@@ -274,7 +262,6 @@ const UploadPack = struct {
     multi_ack: MultiAck = .none,
     use_sideband: bool = false,
     writer_use_sideband: bool = false,
-    use_ofs_delta: bool = false,
     no_progress: bool = false,
     no_done: bool = false,
     is_stateless: bool = false,
@@ -460,14 +447,10 @@ const UploadPack = struct {
                 try exclude_iter.include(oid);
             }
 
+            // transfer visited commits to main iterator's excludes
             while (try exclude_iter.next(allocator)) |excluded_obj| {
-                excluded_obj.deinit();
-            }
-
-            // transfer visited oids to main iterator's excludes
-            var exclude_it = exclude_iter.oid_excludes.iterator();
-            while (exclude_it.next()) |entry| {
-                try obj_iter.oid_excludes.put(entry.key_ptr.*, {});
+                defer excluded_obj.deinit();
+                try obj_iter.putExcluded(&excluded_obj.oid);
             }
         }
 
@@ -710,10 +693,7 @@ const UploadPack = struct {
                     }
 
                     if (std.mem.eql(u8, arg, "thin-pack")) continue;
-                    if (std.mem.eql(u8, arg, "ofs-delta")) {
-                        self.use_ofs_delta = true;
-                        continue;
-                    }
+                    if (std.mem.eql(u8, arg, "ofs-delta")) continue;
                     if (std.mem.eql(u8, arg, "no-progress")) {
                         self.no_progress = true;
                         continue;
@@ -966,9 +946,6 @@ const UploadPack = struct {
                 common.hasFeature(features, "side-band"))
             {
                 self.use_sideband = true;
-            }
-            if (common.hasFeature(features, "ofs-delta")) {
-                self.use_ofs_delta = true;
             }
             if (common.hasFeature(features, "no-progress")) {
                 self.no_progress = true;
@@ -1440,7 +1417,7 @@ fn uploadPackV2(
             try upload_pack.sendShallowInfo(hex_len, writer, repo_kind, repo_opts, state, io, allocator, &our_refs, &shallow_oids, &deepen_not, &want_obj);
 
             try writePktResponse(writer, upload_pack.writer_use_sideband, "packfile\n", .{});
-            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, upload_pack.use_ofs_delta, if (upload_pack.no_progress) null else progress_ctx_maybe);
+            try writePack(repo_kind, repo_opts, state, io, allocator, writer, &want_obj, &have_obj, if (upload_pack.no_progress) null else progress_ctx_maybe);
             break :upload_pack;
         },
     }

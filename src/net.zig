@@ -570,7 +570,7 @@ pub fn push(
         try remote.active_refspecs.append(allocator, spec_dupe);
     }
 
-    var remote_push = try net_push.Push(repo_kind, repo_opts).init(state, remote, io, allocator);
+    var remote_push = net_push.Push(repo_kind, repo_opts).init(remote);
     defer remote_push.deinit(allocator);
 
     var added_refspecs = false;

@@ -88,7 +88,7 @@ pub fn Transport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpt
         ) !void {
             switch (self.*) {
                 .file => |*file| try file.push(state, io, allocator, git_push),
-                .wire => |*wire| try wire.push(io, allocator, git_push),
+                .wire => |*wire| try wire.push(state, io, allocator, git_push),
             }
         }
 

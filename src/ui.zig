@@ -220,6 +220,7 @@ pub fn start(
                             .cwd_path = repo.core.cwd_path,
                             .path = repo.core.work_path,
                             .global_config_path = repo.core.global_config_path,
+                            .temp_path = repo.core.temp_path,
                         });
                         repo.deinit(io, allocator);
                         repo.* = new_repo;

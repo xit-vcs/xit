@@ -5,7 +5,6 @@ const net_transport = @import("./transport.zig");
 const net_refspec = @import("./refspec.zig");
 const rp = @import("../repo.zig");
 const hash = @import("../hash.zig");
-const obj = @import("../object.zig");
 const rf = @import("../ref.zig");
 const mrg = @import("../merge.zig");
 
@@ -14,24 +13,18 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
         remote: *net.Remote(repo_kind, repo_opts),
         unpack_ok: bool,
         ref_rejected: bool,
-        obj_iter: obj.ObjectIterator(repo_kind, repo_opts),
+        includes: std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
+        excludes: std.ArrayList([hash.hexLen(repo_opts.hash)]u8),
 
         specs: std.ArrayList(PushSpec(repo_kind, repo_opts)),
 
-        pub fn init(
-            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-            remote: *net.Remote(repo_kind, repo_opts),
-            io: std.Io,
-            allocator: std.mem.Allocator,
-        ) !Push(repo_kind, repo_opts) {
-            var obj_iter = try obj.ObjectIterator(repo_kind, repo_opts).init(state, io, allocator, .{ .kind = .all });
-            errdefer obj_iter.deinit();
-
+        pub fn init(remote: *net.Remote(repo_kind, repo_opts)) Push(repo_kind, repo_opts) {
             return Push(repo_kind, repo_opts){
                 .remote = remote,
                 .unpack_ok = false,
                 .ref_rejected = false,
-                .obj_iter = obj_iter,
+                .includes = .empty,
+                .excludes = .empty,
                 .specs = .empty,
             };
         }
@@ -40,7 +33,8 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             self: *Push(repo_kind, repo_opts),
             allocator: std.mem.Allocator,
         ) void {
-            self.obj_iter.deinit();
+            self.includes.deinit(allocator);
+            self.excludes.deinit(allocator);
 
             for (self.specs.items) |*spec| {
                 spec.deinit(allocator);
@@ -60,14 +54,12 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             try self.specs.append(allocator, spec);
         }
 
-        fn initObjectIterator(
+        fn initOids(
             self: *Push(repo_kind, repo_opts),
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
             allocator: std.mem.Allocator,
         ) !void {
-            var obj_iter = &self.obj_iter;
-
             for (self.specs.items) |*spec| {
                 if (std.mem.allEqual(u8, &spec.loid, '0')) {
                     continue;
@@ -77,7 +69,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
                     continue;
                 }
 
-                try obj_iter.include(&spec.loid);
+                try self.includes.append(allocator, spec.loid);
 
                 if (!spec.refspec.is_force) {
                     if (std.mem.allEqual(u8, &spec.roid, '0')) {
@@ -102,10 +94,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
                     continue;
                 }
 
-                obj_iter.exclude(&head.oid) catch |err| switch (err) {
-                    error.ObjectNotFound => {},
-                    else => |e| return e,
-                };
+                try self.excludes.append(allocator, head.oid);
             }
         }
 
@@ -150,7 +139,7 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             const transport = if (self.remote.transport) |*transport| transport else return error.NotConnected;
 
             try self.initSpecs(state, io, allocator);
-            try self.initObjectIterator(state, io, allocator);
+            try self.initOids(state, io, allocator);
             try transport.push(state, io, allocator, self);
 
             if (!self.unpack_ok) {

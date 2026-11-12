@@ -135,6 +135,10 @@ pub const InitOpts = struct {
     /// this is null by default so nothing outside the repo can affect it
     /// unless the caller asks for it (see `cfg.globalConfigPath`).
     global_config_path: ?[]const u8 = null,
+    /// path of the dir to put scratch databases in, such as the one a pack is
+    /// written from. they go in the repo dir if this is null, but a repo on a
+    /// network volume can keep them on a local disk instead.
+    temp_path: ?[]const u8 = null,
 };
 
 pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind)) type {
@@ -152,6 +156,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 work_dir: std.Io.Dir,
                 repo_dir: std.Io.Dir,
                 global_config_path: ?[]const u8,
+                temp_path: ?[]const u8,
 
                 pub fn latestMoment(_: *@This()) !void {}
             },
@@ -162,6 +167,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                 work_dir: std.Io.Dir,
                 repo_dir: std.Io.Dir,
                 global_config_path: ?[]const u8,
+                temp_path: ?[]const u8,
                 db_file: std.Io.File,
                 db: DB,
 
@@ -245,9 +251,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         pub fn init(io: std.Io, allocator: std.mem.Allocator, opts: InitOpts) !Repo(repo_kind, repo_opts) {
             const cwd_path = opts.cwd_path orelse opts.path;
             if (!std.Io.Dir.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
+            if (opts.temp_path) |path| if (!std.Io.Dir.path.isAbsolute(path)) return error.PathMustBeAbsolute;
 
             const global_config_path = if (opts.global_config_path) |path| try allocator.dupe(u8, path) else null;
             errdefer if (global_config_path) |path| allocator.free(path);
+            const temp_path = if (opts.temp_path) |path| try allocator.dupe(u8, path) else null;
+            errdefer if (temp_path) |path| allocator.free(path);
 
             // resolve cwd path to ensure it is well-formed
             const cwd_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, "." });
@@ -304,6 +313,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .work_dir = work_dir,
                             .repo_dir = repo_dir,
                             .global_config_path = global_config_path,
+                            .temp_path = temp_path,
                         },
                     };
 
@@ -331,6 +341,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .work_dir = work_dir,
                             .repo_dir = repo_dir,
                             .global_config_path = global_config_path,
+                            .temp_path = temp_path,
                             .db_file = db_file,
                             .db = try DB.init(io, .{
                                 .file = db_file,
@@ -350,9 +361,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
         pub fn open(io: std.Io, allocator: std.mem.Allocator, opts: InitOpts) !Repo(repo_kind, repo_opts) {
             const cwd_path = opts.cwd_path orelse opts.path;
             if (!std.Io.Dir.path.isAbsolute(cwd_path)) return error.PathMustBeAbsolute;
+            if (opts.temp_path) |path| if (!std.Io.Dir.path.isAbsolute(path)) return error.PathMustBeAbsolute;
 
             const global_config_path = if (opts.global_config_path) |path| try allocator.dupe(u8, path) else null;
             errdefer if (global_config_path) |path| allocator.free(path);
+            const temp_path = if (opts.temp_path) |path| try allocator.dupe(u8, path) else null;
+            errdefer if (temp_path) |path| allocator.free(path);
 
             // resolve cwd path to ensure it is well-formed
             const cwd_path_resolved = try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, "." });
@@ -417,6 +431,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .work_dir = work_dir,
                             .repo_dir = repo_dir,
                             .global_config_path = global_config_path,
+                            .temp_path = temp_path,
                         },
                     };
                     var config = try self.listConfig(io, allocator);
@@ -462,6 +477,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                             .work_dir = work_dir,
                             .repo_dir = repo_dir,
                             .global_config_path = global_config_path,
+                            .temp_path = temp_path,
                             .db_file = db_file,
                             .db = if (repo_opts.extra.init_db) blk: {
                                 const buffer_ptr = try allocator.create(std.Io.Writer.Allocating);
@@ -547,6 +563,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     self.core.work_dir.close(io);
                     self.core.repo_dir.close(io);
                     if (self.core.global_config_path) |path| allocator.free(path);
+                    if (self.core.temp_path) |path| allocator.free(path);
                 },
                 .xit => {
                     allocator.free(self.core.cwd_path);
@@ -555,6 +572,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     self.core.work_dir.close(io);
                     self.core.repo_dir.close(io);
                     if (self.core.global_config_path) |path| allocator.free(path);
+                    if (self.core.temp_path) |path| allocator.free(path);
                     self.core.db_file.close(io);
                     if (DB != void) {
                         self.core.db.core.memory.buffer.deinit();

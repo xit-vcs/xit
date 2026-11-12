@@ -105,11 +105,7 @@ test "create and read pack" {
 
         const head_oid = try rf.readHeadRecur(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io);
 
-        var obj_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &r.core, .extra = .{} }, io, allocator, .{ .kind = .all });
-        defer obj_iter.deinit();
-        try obj_iter.include(&head_oid);
-
-        var pack_writer = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = true }) orelse return error.PackWriterIsEmpty;
+        var pack_writer = try pack.PackWriter(.git, repo_opts).init(allocator, .{ .core = &r.core, .extra = .{} }, io, &.{head_oid}, &.{}, null) orelse return error.PackWriterIsEmpty;
         defer pack_writer.deinit();
 
         var pack_file = try temp.dir.createFile(io, "test.pack", .{});
@@ -201,13 +197,8 @@ test "write pack file" {
     var pack_file = try temp.dir.createFile(io, "test.pack", .{});
     defer pack_file.close(io);
 
-    var obj_iter = try obj.ObjectIterator(.git, repo_opts).init(.{ .core = &client_repo.core, .extra = .{} }, io, allocator, .{ .kind = .all });
-    defer obj_iter.deinit();
-
-    try obj_iter.include(&commit2);
-
     // write pack file
-    var pack_writer_maybe = try pack.PackWriter(.git, repo_opts).init(allocator, &obj_iter, .{ .allow_ofs_delta = true });
+    var pack_writer_maybe = try pack.PackWriter(.git, repo_opts).init(allocator, .{ .core = &client_repo.core, .extra = .{} }, io, &.{commit2}, &.{}, null);
     if (pack_writer_maybe) |*pack_writer| {
         defer pack_writer.deinit();
 

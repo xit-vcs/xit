@@ -985,7 +985,7 @@ fn markVerifiedCommits(
             else => return err,
         } orelse break;
         defer commit.deinit();
-        try obj_iter.oid_excludes.put(commit.oid, {});
+        try obj_iter.putExcluded(&commit.oid);
         try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .complete_one = .checking_object });
     }
 }

@@ -170,7 +170,6 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             allocator: std.mem.Allocator,
             git_push: *net_push.Push(repo_kind, repo_opts),
         ) !void {
-            _ = state;
             const remote_repo = if (self.remote_repo) |*repo| repo else return error.NotConnected;
             if (git_push.specs.items.len == 0) {
                 git_push.unpack_ok = true;
@@ -188,7 +187,7 @@ pub fn FileTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             const need_pack = for (git_push.specs.items) |spec| {
                 if (!std.mem.allEqual(u8, &spec.loid, '0')) break true;
             } else false;
-            var pack_writer = if (need_pack) try pack.PackWriter(repo_kind, repo_opts).init(allocator, &git_push.obj_iter, .{ .progress_ctx = self.opts.progress_ctx }) else null;
+            var pack_writer = if (need_pack) try pack.PackWriter(repo_kind, repo_opts).init(allocator, state, io, git_push.includes.items, git_push.excludes.items, self.opts.progress_ctx) else null;
             defer if (pack_writer) |*writer| writer.deinit();
             if (need_pack and pack_writer == null) {
                 try prefix.writer.writeAll(&pack.emptyPack(repo_opts.hash));

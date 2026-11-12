@@ -1077,7 +1077,10 @@ pub fn ObjectIterator(
         core: *rp.Repo(repo_kind, repo_opts).Core,
         moment: rp.Repo(repo_kind, repo_opts).Moment(.read_only),
         oid_queue: std.DoublyLinkedList,
-        oid_excludes: std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void),
+        oid_excludes: union(enum) {
+            memory: std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void),
+            temp: TempDB.HashSet(.read_write),
+        },
         object: Object(repo_kind, repo_opts),
         depth: usize,
         // hash of the tree entry name the current object was found under
@@ -1093,6 +1096,20 @@ pub fn ObjectIterator(
             node: std.DoublyLinkedList.Node,
         };
 
+        pub const TempDB = @import("xitdb").Database(.buffered_file, hash.HashInt(repo_opts.hash));
+
+        pub fn initTemp(
+            state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+            io: std.Io,
+            allocator: std.mem.Allocator,
+            options: ObjectIteratorOptions,
+            excludes: TempDB.HashSet(.read_write),
+        ) !ObjectIterator(repo_kind, repo_opts) {
+            var self = try init(state, io, allocator, options);
+            self.oid_excludes = .{ .temp = excludes };
+            return self;
+        }
+
         pub fn init(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
@@ -1105,7 +1122,7 @@ pub fn ObjectIterator(
                 .core = state.core,
                 .moment = state.extra.moment.*,
                 .oid_queue = std.DoublyLinkedList{},
-                .oid_excludes = std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void).init(allocator),
+                .oid_excludes = .{ .memory = std.AutoHashMap([hash.hexLen(repo_opts.hash)]u8, void).init(allocator) },
                 .object = undefined,
                 .depth = 0,
                 .name_hash = 0,
@@ -1118,7 +1135,24 @@ pub fn ObjectIterator(
                 const oid_and_node: *OidAndNode = @fieldParentPtr("node", node);
                 self.allocator.destroy(oid_and_node);
             }
-            self.oid_excludes.deinit();
+            switch (self.oid_excludes) {
+                .memory => |*memory| memory.deinit(),
+                .temp => {},
+            }
+        }
+
+        fn isExcluded(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8) !bool {
+            return switch (self.oid_excludes) {
+                .memory => |*memory| memory.contains(oid.*),
+                .temp => |temp| try temp.getSlot(try hash.hexToInt(repo_opts.hash, oid)) != null,
+            };
+        }
+
+        pub fn putExcluded(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
+            switch (self.oid_excludes) {
+                .memory => |*memory| try memory.put(oid.*, {}),
+                .temp => |temp| try temp.put(try hash.hexToInt(repo_opts.hash, oid), .{ .uint = 1 }),
+            }
         }
 
         pub fn next(self: *ObjectIterator(repo_kind, repo_opts), allocator: std.mem.Allocator) !?*Object(repo_kind, repo_opts) {
@@ -1130,8 +1164,8 @@ pub fn ObjectIterator(
                 const node_name_hash = oid_and_node.name_hash;
                 self.allocator.destroy(oid_and_node);
 
-                if (!self.oid_excludes.contains(next_oid)) {
-                    try self.oid_excludes.put(next_oid, {});
+                if (!try self.isExcluded(&next_oid)) {
+                    try self.putExcluded(&next_oid);
                     self.depth = node_depth;
                     self.name_hash = node_name_hash;
 
@@ -1196,7 +1230,7 @@ pub fn ObjectIterator(
 
         fn includeWithName(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8, item_depth: usize, name_hash: u32) !void {
             if (self.options.max_depth) |max| if (item_depth > max) return;
-            if (!self.oid_excludes.contains(oid.*)) {
+            if (!try self.isExcluded(oid)) {
                 var oid_and_node = try self.allocator.create(OidAndNode);
                 errdefer self.allocator.free(oid_and_node);
                 oid_and_node.oid = oid.*;
@@ -1208,7 +1242,7 @@ pub fn ObjectIterator(
         }
 
         pub fn exclude(self: *ObjectIterator(repo_kind, repo_opts), oid: *const [hash.hexLen(repo_opts.hash)]u8) !void {
-            try self.oid_excludes.put(oid.*, {});
+            try self.putExcluded(oid);
 
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
             var object = try Object(repo_kind, repo_opts).init(state, self.io, self.allocator, oid);
@@ -1221,7 +1255,7 @@ pub fn ObjectIterator(
                         const entry_oid = std.fmt.bytesToHex(entry.oid, .lower);
                         // an already-excluded tree or blob has had its whole
                         // subtree excluded, so there is no need to recurse
-                        if (!self.oid_excludes.contains(entry_oid)) {
+                        if (!try self.isExcluded(&entry_oid)) {
                             try self.exclude(&entry_oid);
                         }
                     },
@@ -1231,16 +1265,16 @@ pub fn ObjectIterator(
                     if (commit.metadata.parent_oids) |parent_oids| {
                         if (self.options.first_parent) {
                             if (parent_oids.len > 0) {
-                                try self.oid_excludes.put(parent_oids[0], {});
+                                try self.putExcluded(&parent_oids[0]);
                             }
                         } else {
-                            for (parent_oids) |parent_oid| {
-                                try self.oid_excludes.put(parent_oid, {});
+                            for (parent_oids) |*parent_oid| {
+                                try self.putExcluded(parent_oid);
                             }
                         }
                     }
                     switch (self.options.kind) {
-                        .all => if (!self.oid_excludes.contains(commit.tree)) {
+                        .all => if (!try self.isExcluded(&commit.tree)) {
                             try self.exclude(&commit.tree);
                         },
                         .commit => {},
