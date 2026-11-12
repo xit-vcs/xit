@@ -1753,11 +1753,11 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             try writer.flush();
         }
 
-        pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, response_kind: server_http_backend.ResponseKind, options: server_http_backend.Options) !void {
+        pub fn httpBackend(self: *Repo(repo_kind, repo_opts), io: std.Io, allocator: std.mem.Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer, response_kind: server_http_backend.ResponseKind, options: server_http_backend.Options, progress_ctx_maybe: ?repo_opts.ProgressCtx) !void {
             switch (repo_kind) {
                 .git => {
                     const state = State(.read_write){ .core = &self.core, .extra = .{} };
-                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options) catch |err| switch (err) {
+                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,
                     };
@@ -1771,11 +1771,12 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         writer: *std.Io.Writer,
                         response_kind: server_http_backend.ResponseKind,
                         options: server_http_backend.Options,
+                        progress_ctx_maybe: ?repo_opts.ProgressCtx,
 
                         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options);
+                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options, ctx.progress_ctx_maybe);
                             // every non-push request returns CancelTransaction,
                             // so reaching this point means a push committed
                             try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .receive_pack = .{} });
@@ -1788,7 +1789,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                     const history = try DB.ArrayList(.read_write).init(self.core.db.rootCursor());
                     history.appendContext(
                         .{ .slot = try history.getSlot(-1) },
-                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .response_kind = response_kind, .options = options },
+                        Ctx{ .core = &self.core, .io = io, .allocator = allocator, .reader = reader, .writer = writer, .response_kind = response_kind, .options = options, .progress_ctx_maybe = progress_ctx_maybe },
                     ) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,

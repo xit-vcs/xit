@@ -763,7 +763,7 @@ fn runCommand(
                 .content_type = environ_map.get("CONTENT_TYPE") orelse "",
                 .has_remote_user = environ_map.get("REMOTE_USER") != null,
                 .protocol_version = server_common.parseProtocolVersion(environ_map.get("GIT_PROTOCOL")),
-            });
+            }, null);
         },
         .patch => |patch_cmd| switch (repo_kind) {
             .git => {

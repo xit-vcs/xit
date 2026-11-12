@@ -84,6 +84,7 @@ pub fn run(
     writer: *std.Io.Writer,
     response_kind: ResponseKind,
     options: Options,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // method validation
     for (&routes) |*svc| {
@@ -96,7 +97,7 @@ pub fn run(
         }
     }
 
-    runRoute(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options) catch |err| switch (err) {
+    runRoute(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
         error.Forbidden, error.ServiceNotEnabled => {
             try sendForbidden(response_kind, writer);
             return error.CancelTransaction;
@@ -116,6 +117,7 @@ fn runRoute(
     writer: *std.Io.Writer,
     response_kind: ResponseKind,
     options: Options,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // read http config
     var http_config = Config{};
@@ -131,7 +133,7 @@ fn runRoute(
 
     switch (options.handler) {
         .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
-        .run_service => try runService(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
+        .run_service => try runService(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config, progress_ctx_maybe),
     }
 }
 
@@ -283,6 +285,7 @@ fn runService(
     response_kind: ResponseKind,
     options: Options,
     http_config: *const Config,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     // strip "/git-" prefix from suffix (e.g. "/git-upload-pack" -> "upload-pack")
     const service = if (std.mem.startsWith(u8, options.suffix, "/git-"))
@@ -321,13 +324,13 @@ fn runService(
         try upload_pack.run(repo_kind, repo_opts, state.readOnly(), io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .is_stateless = true,
-        }, null);
+        }, progress_ctx_maybe);
         // no need to make a new transaction
         return error.CancelTransaction;
     } else {
         try receive_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .is_stateless = true,
-        }, null);
+        }, progress_ctx_maybe);
     }
 }
