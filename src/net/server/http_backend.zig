@@ -74,10 +74,21 @@ pub fn resolveDir(
     return try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, dir });
 }
 
+// whether the request is part of a push, which needs a write state. every
+// other request only reads the repo.
+pub fn isReceivePack(options: Options) bool {
+    return switch (options.handler) {
+        .get_info_refs => std.mem.startsWith(u8, options.query_string, "service=git-receive-pack"),
+        .run_service => std.mem.eql(u8, options.suffix, "/git-receive-pack"),
+    };
+}
+
+// `write_state_maybe` is the state a push writes to. without one, a push is refused.
 pub fn run(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    write_state_maybe: ?rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -97,7 +108,7 @@ pub fn run(
         }
     }
 
-    runRoute(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
+    runRoute(repo_kind, repo_opts, state, write_state_maybe, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
         error.Forbidden, error.ServiceNotEnabled => {
             try sendForbidden(response_kind, writer);
             return error.CancelTransaction;
@@ -110,7 +121,8 @@ pub fn run(
 fn runRoute(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    write_state_maybe: ?rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -122,7 +134,7 @@ fn runRoute(
     // read http config
     var http_config = Config{};
     {
-        var config = try cfg.Config(repo_kind, repo_opts).init(state.readOnly(), io, allocator);
+        var config = try cfg.Config(repo_kind, repo_opts).init(state, io, allocator);
         defer config.deinit();
 
         if (config.sections.get("http")) |vars| {
@@ -132,8 +144,8 @@ fn runRoute(
     }
 
     switch (options.handler) {
-        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
-        .run_service => try runService(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config, progress_ctx_maybe),
+        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, write_state_maybe, io, allocator, reader, writer, response_kind, options, &http_config),
+        .run_service => try runService(repo_kind, repo_opts, state, write_state_maybe, io, allocator, reader, writer, response_kind, options, &http_config, progress_ctx_maybe),
     }
 }
 
@@ -218,7 +230,8 @@ pub fn resolveRepoPath(environ_map: *std.process.Environ.Map, buf: []u8) ![]cons
 fn getInfoRefs(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    write_state_maybe: ?rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -240,7 +253,7 @@ fn getInfoRefs(
             try pkt.writePktFlush(writer);
         }
 
-        try upload_pack.run(repo_kind, repo_opts, state.readOnly(), io, allocator, reader, writer, .{
+        try upload_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .advertise_refs = true,
             .is_stateless = true,
@@ -261,8 +274,8 @@ fn getInfoRefs(
             try pkt.writePktFlush(writer);
         }
 
-        // the http backend carries no progress context of its own
-        try receive_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, .{
+        const write_state = write_state_maybe orelse return error.Forbidden;
+        try receive_pack.run(repo_kind, repo_opts, write_state, io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .advertise_refs = true,
             .is_stateless = true,
@@ -277,7 +290,8 @@ fn getInfoRefs(
 fn runService(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
-    state: rp.Repo(repo_kind, repo_opts).State(.read_write),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    write_state_maybe: ?rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -321,14 +335,15 @@ fn runService(
 
     // dispatch
     if (is_upload) {
-        try upload_pack.run(repo_kind, repo_opts, state.readOnly(), io, allocator, reader, writer, .{
+        try upload_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .is_stateless = true,
         }, progress_ctx_maybe);
         // no need to make a new transaction
         return error.CancelTransaction;
     } else {
-        try receive_pack.run(repo_kind, repo_opts, state, io, allocator, reader, writer, .{
+        const write_state = write_state_maybe orelse return error.Forbidden;
+        try receive_pack.run(repo_kind, repo_opts, write_state, io, allocator, reader, writer, .{
             .protocol_version = options.protocol_version,
             .is_stateless = true,
         }, progress_ctx_maybe);

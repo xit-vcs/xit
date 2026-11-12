@@ -1757,12 +1757,20 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
             switch (repo_kind) {
                 .git => {
                     const state = State(.read_write){ .core = &self.core, .extra = .{} };
-                    server_http_backend.run(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
+                    server_http_backend.run(repo_kind, repo_opts, state.readOnly(), state, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
                         error.CancelTransaction => {},
                         else => |e| return e,
                     };
                 },
-                .xit => {
+                // only a push writes, so every other request reads the latest moment without locking
+                .xit => if (!server_http_backend.isReceivePack(options)) {
+                    var moment = try self.core.latestMoment();
+                    const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
+                    server_http_backend.run(repo_kind, repo_opts, state, null, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {
+                        error.CancelTransaction => {},
+                        else => |e| return e,
+                    };
+                } else {
                     const Ctx = struct {
                         core: *Repo(repo_kind, repo_opts).Core,
                         io: std.Io,
@@ -1776,7 +1784,7 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         pub fn run(ctx: @This(), cursor: *DB.Cursor(.read_write)) !void {
                             var moment = try DB.HashMap(.read_write).init(cursor.*);
                             const state = State(.read_write){ .core = ctx.core, .extra = .{ .moment = &moment } };
-                            try server_http_backend.run(repo_kind, repo_opts, state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options, ctx.progress_ctx_maybe);
+                            try server_http_backend.run(repo_kind, repo_opts, state.readOnly(), state, ctx.io, ctx.allocator, ctx.reader, ctx.writer, ctx.response_kind, ctx.options, ctx.progress_ctx_maybe);
                             // every non-push request returns CancelTransaction,
                             // so reaching this point means a push committed
                             try un.write(repo_opts, state, std.Io.Timestamp.now(ctx.io, .real).toSeconds(), .{ .receive_pack = .{} });
