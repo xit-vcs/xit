@@ -44,6 +44,58 @@ pub const LockFile = struct {
     }
 };
 
+/// a scratch file, such as a temporary database, in `temp_path` or `repo_dir`
+/// if there is none. a temp path can be shared by many repos and processes,
+/// so each file gets a random name, holds a lock while it's in use, and can
+/// only be read by its owner.
+pub const TempFile = struct {
+    dir: std.Io.Dir,
+    name: [prefix.len + 16]u8,
+    file: std.Io.File,
+
+    pub const prefix = "xit-temp-";
+
+    pub fn init(io: std.Io, repo_dir: std.Io.Dir, temp_path: ?[]const u8) !TempFile {
+        var dir = if (temp_path) |path|
+            try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true })
+        else
+            try repo_dir.openDir(io, ".", .{ .iterate = true });
+        errdefer dir.close(io);
+
+        // a file whose process died was never deleted, but its lock was
+        // released, so delete the ones that can be locked
+        {
+            var iter = dir.iterate();
+            while (try iter.next(io)) |entry| {
+                if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, prefix)) continue;
+                const stale_file = dir.openFile(io, entry.name, .{ .lock = .exclusive, .lock_nonblocking = true }) catch continue;
+                stale_file.close(io);
+                dir.deleteFile(io, entry.name) catch {};
+            }
+        }
+
+        var random_bytes: [8]u8 = undefined;
+        io.random(&random_bytes);
+        var name: [prefix.len + 16]u8 = undefined;
+        _ = try std.mem.print(&name, "{s}{s}", .{ prefix, &std.fmt.bytesToHex(random_bytes, .lower) });
+
+        const file = try dir.createFile(io, &name, .{
+            .exclusive = true,
+            .read = true,
+            .lock = .exclusive,
+            .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
+        });
+
+        return .{ .dir = dir, .name = name, .file = file };
+    }
+
+    pub fn deinit(self: TempFile, io: std.Io) void {
+        self.file.close(io);
+        self.dir.deleteFile(io, &self.name) catch {};
+        self.dir.close(io);
+    }
+};
+
 /// fsyncs a directory, making renames/creates/deletes of its entries durable
 pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {
     if (.windows == builtin.target.os.tag) return;

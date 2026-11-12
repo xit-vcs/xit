@@ -2,6 +2,7 @@ const std = @import("std");
 const hash = @import("./hash.zig");
 const rp = @import("./repo.zig");
 const obj = @import("./object.zig");
+const fs = @import("./fs.zig");
 
 pub const PackReader = union(enum) {
     file: struct {
@@ -155,7 +156,6 @@ pub fn OffsetToOid(comptime hash_kind: hash.HashKind) type {
         // the offsets are already u64, so they are used as the keys directly
         pub const DB = @import("xitdb").Database(.buffered_file, u64);
         const oid_len = hash.byteLen(hash_kind);
-        pub const file_name = "temp.pack-offsets";
 
         // `cursor` is the root of the scratch database (see copyFromPackIterator)
         pub fn init(cursor: DB.Cursor(.read_write)) !OffsetToOid(hash_kind) {
@@ -1558,13 +1558,10 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         // the temporary database the pack is written from. it's on the heap
         // because cursors into the database point at it.
         const Temp = struct {
-            dir: std.Io.Dir,
-            name: [temp_prefix.len + 16]u8,
-            file: std.Io.File,
+            file: fs.TempFile,
             buffer: std.Io.Writer.Allocating,
             db: TempDB,
         };
-        const temp_prefix = "xit-pack-";
 
         const Entry = struct {
             oid: [hash.byteLen(repo_opts.hash)]u8,
@@ -1695,15 +1692,10 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             }
             self.out_bytes.deinit();
             self.temp.buffer.deinit();
-            self.temp.file.close(self.io);
-            self.temp.dir.deleteFile(self.io, &self.temp.name) catch {};
-            self.temp.dir.close(self.io);
+            self.temp.file.deinit(self.io);
             self.allocator.destroy(self.temp);
         }
 
-        // the temporary database goes in the repo's temp path, or the repo dir
-        // if there is none. fetches are served without a lock, so each one gets
-        // a random name, and holds a file lock while it's in use.
         fn createTemp(
             state: rp.Repo(repo_kind, repo_opts).State(.read_only),
             io: std.Io,
@@ -1712,42 +1704,12 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             const temp = try allocator.create(Temp);
             errdefer allocator.destroy(temp);
 
-            temp.dir = if (state.core.temp_path) |temp_path|
-                try std.Io.Dir.cwd().openDir(io, temp_path, .{ .iterate = true })
-            else
-                try state.core.repo_dir.openDir(io, ".", .{ .iterate = true });
-            errdefer temp.dir.close(io);
-
-            // a database whose process died was never deleted, but its lock
-            // was released, so delete the ones that can be locked
-            {
-                var iter = temp.dir.iterate();
-                while (try iter.next(io)) |entry| {
-                    if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, temp_prefix)) continue;
-                    const stale_file = temp.dir.openFile(io, entry.name, .{ .lock = .exclusive, .lock_nonblocking = true }) catch continue;
-                    stale_file.close(io);
-                    temp.dir.deleteFile(io, entry.name) catch {};
-                }
-            }
-
-            var random_bytes: [8]u8 = undefined;
-            io.random(&random_bytes);
-            _ = try std.mem.print(&temp.name, "{s}{s}", .{ temp_prefix, &std.fmt.bytesToHex(random_bytes, .lower) });
-
-            temp.file = try temp.dir.createFile(io, &temp.name, .{
-                .exclusive = true,
-                .read = true,
-                .lock = .exclusive,
-                .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
-            });
-            errdefer {
-                temp.file.close(io);
-                temp.dir.deleteFile(io, &temp.name) catch {};
-            }
+            temp.file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
+            errdefer temp.file.deinit(io);
 
             temp.buffer = .init(allocator);
             errdefer temp.buffer.deinit();
-            temp.db = try TempDB.init(io, .{ .file = temp.file, .buffer = &temp.buffer, .fsync = false });
+            temp.db = try TempDB.init(io, .{ .file = temp.file.file, .buffer = &temp.buffer, .fsync = false });
 
             return temp;
         }

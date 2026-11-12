@@ -1356,16 +1356,12 @@ pub fn copyFromPackIterator(
         }
     }
 
-    // a crash can leave the file behind, so always start from empty
     const OffsetToOid = pack.OffsetToOid(repo_opts.hash);
-    const offsets_file = try state.core.repo_dir.createFile(io, OffsetToOid.file_name, .{ .truncate = true, .read = true });
-    defer {
-        offsets_file.close(io);
-        state.core.repo_dir.deleteFile(io, OffsetToOid.file_name) catch {};
-    }
+    const offsets_file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
+    defer offsets_file.deinit(io);
     var offsets_buffer = std.Io.Writer.Allocating.init(allocator);
     defer offsets_buffer.deinit();
-    var offsets_db = try OffsetToOid.DB.init(io, .{ .file = offsets_file, .buffer = &offsets_buffer, .fsync = false });
+    var offsets_db = try OffsetToOid.DB.init(io, .{ .file = offsets_file.file, .buffer = &offsets_buffer, .fsync = false });
 
     // the offsets are written in one transaction, so their writes aren't each committed
     const Ctx = struct {

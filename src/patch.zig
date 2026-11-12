@@ -78,6 +78,7 @@ const hash = @import("./hash.zig");
 const df = @import("./diff.zig");
 const obj = @import("./object.zig");
 const tr = @import("./tree.zig");
+const fs = @import("./fs.zig");
 
 pub fn writeAndApplyPatches(
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -1313,16 +1314,12 @@ pub fn writePatches(
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
     const TempDB = PatchWriter(repo_opts).TempDB;
-    const db_name = PatchWriter(repo_opts).db_name;
 
-    const db_file = try state.core.repo_dir.createFile(io, db_name, .{ .truncate = true, .lock = .exclusive, .read = true });
-    defer {
-        db_file.close(io);
-        state.core.repo_dir.deleteFile(io, db_name) catch {};
-    }
+    const db_file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
+    defer db_file.deinit(io);
     var db_buffer = std.Io.Writer.Allocating.init(allocator);
     defer db_buffer.deinit();
-    var db = try TempDB.init(io, .{ .file = db_file, .buffer = &db_buffer, .fsync = false });
+    var db = try TempDB.init(io, .{ .file = db_file.file, .buffer = &db_buffer, .fsync = false });
 
     // the temporary database is written in one transaction, so its writes
     // aren't each committed
@@ -1364,7 +1361,6 @@ pub fn PatchWriter(comptime repo_opts: rp.RepoOpts(.xit)) type {
         // commits grow with the history, so they live in a temporary database
         // rather than on the heap (see writePatches).
         const TempDB = @import("xitdb").Database(.buffered_file, hash.HashInt(repo_opts.hash));
-        const db_name = "temp.patches";
 
         parent_to_children: TempDB.HashMap(.read_write),
         visited: TempDB.HashSet(.read_write),

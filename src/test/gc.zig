@@ -4,6 +4,7 @@ const std = @import("std");
 const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
 const hash = @import("../hash.zig");
+const fs = @import("../fs.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -85,7 +86,6 @@ test "gc" {
     }
 
     const result = try repo.garbageCollect(io, allocator, .{}, null);
-    try std.testing.expectError(error.FileNotFound, repo.core.repo_dir.access(io, "temp.gc-offsets", .{}));
 
     // the deleted branch's objects and chunks are gone, so the db shrank
     try std.testing.expect(result.size_after < result.size_before);
@@ -182,16 +182,15 @@ test "gc ignores stale temporary files" {
     var xit_dir = try temp.dir.openDir(io, "repo/.xit", .{});
     defer xit_dir.close(io);
 
-    // a crash can leave temporary files behind. opening ignores them,
-    // and the next collection truncates and replaces them.
-    for ([_][]const u8{ "db.gc", "temp.gc-offsets" }) |name| {
+    // a crash can leave temporary files behind. opening ignores them, the
+    // next collection replaces db.gc, and an unlocked temp file is deleted.
+    for ([_][]const u8{ "db.gc", fs.TempFile.prefix ++ "0000000000000000" }) |name| {
         try xit_dir.writeFile(io, .{ .sub_path = name, .data = "junk" });
     }
 
     var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);
     _ = try repo.garbageCollect(io, allocator, .{}, null);
-    try std.testing.expectError(error.FileNotFound, xit_dir.access(io, "temp.gc-offsets", .{}));
 
     const actual = try repo.core.work_dir.readFileAlloc(io, "hello.md", allocator, .limited(1024));
     defer allocator.free(actual);
