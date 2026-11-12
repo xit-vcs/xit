@@ -46,6 +46,6 @@ I don't have great benchmarks right now, but here's the ghetto way I do it:
 
 * `time ./zig-out/bin/try --cli --patch`
 
-* This command builds everything and then runs the above-mentioned `try` command, but this time with a few flags. The `--cli` flag prevents the TUI from launching, because a benchmark wouldn't be very useful if it never finished. The `--patch` flag makes it generate patches for each commit.
+* This command runs the above-mentioned `try` command, but this time with a few flags. The `--cli` flag prevents the TUI from launching, because a benchmark wouldn't be very useful if it never finished. The `--patch` flag makes it generate patches for each commit.
 
 * Since the `try` command creates several commits, adding the `--patch` flag will make it generate a bunch of patches, so it is a convenient way to get a quick benchmark when making changes to the myers diff code or whatever.
