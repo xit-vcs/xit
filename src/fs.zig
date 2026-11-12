@@ -44,57 +44,32 @@ pub const LockFile = struct {
     }
 };
 
-/// a scratch file, such as a temporary database, in `temp_path` or `repo_dir`
-/// if there is none. a temp path can be shared by many repos and processes,
-/// so each file gets a random name, holds a lock while it's in use, and can
-/// only be read by its owner.
-pub const TempFile = struct {
-    dir: std.Io.Dir,
-    name: [prefix.len + 16]u8,
-    file: std.Io.File,
+/// creates a scratch file, such as a temporary database, in `temp_path` or
+/// `repo_dir` if there is none. it's deleted right away, so it's gone once
+/// closed, even if the process dies. a temp path can be shared by many repos
+/// and processes, so the name is random and only the owner can read it.
+pub fn createTempFile(io: std.Io, repo_dir: std.Io.Dir, temp_path: ?[]const u8) !std.Io.File {
+    const dir = if (temp_path) |path|
+        try std.Io.Dir.cwd().openDir(io, path, .{})
+    else
+        try repo_dir.openDir(io, ".", .{});
+    defer dir.close(io);
 
-    pub const prefix = "xit-temp-";
+    var random_bytes: [8]u8 = undefined;
+    io.random(&random_bytes);
+    const prefix = "xit-temp-";
+    var name_buffer: [prefix.len + random_bytes.len * 2]u8 = undefined;
+    const name = try std.mem.print(&name_buffer, "{s}{s}", .{ prefix, &std.fmt.bytesToHex(random_bytes, .lower) });
 
-    pub fn init(io: std.Io, repo_dir: std.Io.Dir, temp_path: ?[]const u8) !TempFile {
-        var dir = if (temp_path) |path|
-            try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true })
-        else
-            try repo_dir.openDir(io, ".", .{ .iterate = true });
-        errdefer dir.close(io);
-
-        // a file whose process died was never deleted, but its lock was
-        // released, so delete the ones that can be locked
-        {
-            var iter = dir.iterate();
-            while (try iter.next(io)) |entry| {
-                if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, prefix)) continue;
-                const stale_file = dir.openFile(io, entry.name, .{ .lock = .exclusive, .lock_nonblocking = true }) catch continue;
-                stale_file.close(io);
-                dir.deleteFile(io, entry.name) catch {};
-            }
-        }
-
-        var random_bytes: [8]u8 = undefined;
-        io.random(&random_bytes);
-        var name: [prefix.len + 16]u8 = undefined;
-        _ = try std.mem.print(&name, "{s}{s}", .{ prefix, &std.fmt.bytesToHex(random_bytes, .lower) });
-
-        const file = try dir.createFile(io, &name, .{
-            .exclusive = true,
-            .read = true,
-            .lock = .exclusive,
-            .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
-        });
-
-        return .{ .dir = dir, .name = name, .file = file };
-    }
-
-    pub fn deinit(self: TempFile, io: std.Io) void {
-        self.file.close(io);
-        self.dir.deleteFile(io, &self.name) catch {};
-        self.dir.close(io);
-    }
-};
+    const file = try dir.createFile(io, name, .{
+        .exclusive = true,
+        .read = true,
+        .permissions = if (@hasDecl(std.Io.File.Permissions, "fromMode")) .fromMode(0o600) else .default_file,
+    });
+    errdefer file.close(io);
+    try dir.deleteFile(io, name);
+    return file;
+}
 
 /// fsyncs a directory, making renames/creates/deletes of its entries durable
 pub fn syncDir(io: std.Io, dir: std.Io.Dir) !void {

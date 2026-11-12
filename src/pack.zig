@@ -1558,7 +1558,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         // the temporary database the pack is written from. it's on the heap
         // because cursors into the database point at it.
         const Temp = struct {
-            file: fs.TempFile,
+            file: std.Io.File,
             buffer: std.Io.Writer.Allocating,
             db: TempDB,
         };
@@ -1692,7 +1692,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             }
             self.out_bytes.deinit();
             self.temp.buffer.deinit();
-            self.temp.file.deinit(self.io);
+            self.temp.file.close(self.io);
             self.allocator.destroy(self.temp);
         }
 
@@ -1704,12 +1704,12 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             const temp = try allocator.create(Temp);
             errdefer allocator.destroy(temp);
 
-            temp.file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
-            errdefer temp.file.deinit(io);
+            temp.file = try fs.createTempFile(io, state.core.repo_dir, state.core.temp_path);
+            errdefer temp.file.close(io);
 
             temp.buffer = .init(allocator);
             errdefer temp.buffer.deinit();
-            temp.db = try TempDB.init(io, .{ .file = temp.file.file, .buffer = &temp.buffer, .fsync = false });
+            temp.db = try TempDB.init(io, .{ .file = temp.file, .buffer = &temp.buffer, .fsync = false });
 
             return temp;
         }

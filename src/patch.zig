@@ -1315,11 +1315,11 @@ pub fn writePatches(
 ) !void {
     const TempDB = PatchWriter(repo_opts).TempDB;
 
-    const db_file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
-    defer db_file.deinit(io);
+    const db_file = try fs.createTempFile(io, state.core.repo_dir, state.core.temp_path);
+    defer db_file.close(io);
     var db_buffer = std.Io.Writer.Allocating.init(allocator);
     defer db_buffer.deinit();
-    var db = try TempDB.init(io, .{ .file = db_file.file, .buffer = &db_buffer, .fsync = false });
+    var db = try TempDB.init(io, .{ .file = db_file, .buffer = &db_buffer, .fsync = false });
 
     // the temporary database is written in one transaction, so its writes
     // aren't each committed

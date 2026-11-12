@@ -4,7 +4,6 @@ const std = @import("std");
 const rp = @import("../repo.zig");
 const obj = @import("../object.zig");
 const hash = @import("../hash.zig");
-const fs = @import("../fs.zig");
 
 fn addFile(
     comptime repo_kind: rp.RepoKind,
@@ -182,11 +181,9 @@ test "gc ignores stale temporary files" {
     var xit_dir = try temp.dir.openDir(io, "repo/.xit", .{});
     defer xit_dir.close(io);
 
-    // a crash can leave temporary files behind. opening ignores them, the
-    // next collection replaces db.gc, and an unlocked temp file is deleted.
-    for ([_][]const u8{ "db.gc", fs.TempFile.prefix ++ "0000000000000000" }) |name| {
-        try xit_dir.writeFile(io, .{ .sub_path = name, .data = "junk" });
-    }
+    // a crash can leave db.gc behind. opening ignores it, and the next
+    // collection replaces it.
+    try xit_dir.writeFile(io, .{ .sub_path = "db.gc", .data = "junk" });
 
     var repo = try rp.Repo(.xit, repo_opts).open(io, allocator, .{ .path = work_path });
     defer repo.deinit(io, allocator);

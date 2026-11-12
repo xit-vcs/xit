@@ -239,11 +239,11 @@ pub fn prune(
     extra_roots: []const [hash.hexLen(repo_opts.hash)]u8,
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
 ) !void {
-    const sets_file = try fs.TempFile.init(io, state.core.repo_dir, state.core.temp_path);
-    defer sets_file.deinit(io);
+    const sets_file = try fs.createTempFile(io, state.core.repo_dir, state.core.temp_path);
+    defer sets_file.close(io);
     var sets_buffer = std.Io.Writer.Allocating.init(allocator);
     defer sets_buffer.deinit();
-    var sets_db = try SetsDb(repo_opts).init(io, .{ .file = sets_file.file, .buffer = &sets_buffer, .fsync = false });
+    var sets_db = try SetsDb(repo_opts).init(io, .{ .file = sets_file, .buffer = &sets_buffer, .fsync = false });
 
     // the sets are written in one transaction, so their writes aren't each committed
     const Ctx = struct {
@@ -356,11 +356,11 @@ pub fn compactDatabase(
 ) !u64 {
     const repo_dir = repo.core.repo_dir;
 
-    const offsets_file = try fs.TempFile.init(io, repo_dir, repo.core.temp_path);
-    defer offsets_file.deinit(io);
+    const offsets_file = try fs.createTempFile(io, repo_dir, repo.core.temp_path);
+    defer offsets_file.close(io);
     var offsets_buffer = std.Io.Writer.Allocating.init(allocator);
     defer offsets_buffer.deinit();
-    var offsets_db = try DiskOffsets(repo_opts).DB.init(io, .{ .file = offsets_file.file, .buffer = &offsets_buffer, .fsync = false });
+    var offsets_db = try DiskOffsets(repo_opts).DB.init(io, .{ .file = offsets_file, .buffer = &offsets_buffer, .fsync = false });
 
     var adopted = false;
     const new_db_file = try repo_dir.createFile(io, db_new_name, .{ .truncate = true, .read = true });
