@@ -1859,26 +1859,24 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                         self.out_index = 0;
 
                         if (o.stream) |*stream| {
-                            const size = switch (self.source) {
+                            // zero bytes doesn't mean the source is done, only that the
+                            // compressor took none this time. only EndOfStream ends it.
+                            const size_maybe: ?usize = switch (self.source) {
                                 .none => unreachable,
                                 .object_reader => |*object_reader| object_reader.interface.stream(&stream.writer, .limited(buffer.len)),
                                 .delta => |*delta| delta.reader.stream(&stream.writer, .limited(buffer.len)),
                             } catch |err| switch (err) {
-                                error.EndOfStream => 0,
+                                error.EndOfStream => null,
                                 else => |e| return e,
                             };
 
-                            if (size > 0) {
+                            if (size_maybe) |size| {
                                 self.entry_bytes += size;
                                 // return so we can read out_bytes the next time this fn is called
                                 return 0;
                             } else {
                                 // a short object would make a pack the client can't read
-                                if (self.entry_bytes != self.entry_size) {
-                                    const entry = try self.getEntry(self.entry_index);
-                                    std.log.err("object {s} gave {d} bytes but its pack header says {d}", .{ &std.fmt.bytesToHex(entry.oid, .lower), self.entry_bytes, self.entry_size });
-                                    return error.PackEntrySizeMismatch;
-                                }
+                                if (self.entry_bytes != self.entry_size) return error.PackEntrySizeMismatch;
                                 try stream.finish();
                                 o.stream = null;
                                 // if finish() added more data to out_bytes,
