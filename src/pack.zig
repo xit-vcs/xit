@@ -1530,6 +1530,10 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
         entry_count: u64,
         deltas: TempDB.HashMap(.read_only),
         entry_index: u64,
+        // the size the current entry's header announced, and how many bytes
+        // of its data have gone into the compressor so far
+        entry_size: u64,
+        entry_bytes: u64,
         // where the current entry's data is streamed from: a reader over the
         // object store for full objects, or the entry's delta instructions
         source: union(enum) {
@@ -1599,6 +1603,8 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 .entry_count = 0,
                 .deltas = undefined,
                 .entry_index = 0,
+                .entry_size = 0,
+                .entry_bytes = 0,
                 .source = .none,
                 .out_bytes = .init(allocator),
                 .out_index = 0,
@@ -1863,9 +1869,16 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                             };
 
                             if (size > 0) {
+                                self.entry_bytes += size;
                                 // return so we can read out_bytes the next time this fn is called
                                 return 0;
                             } else {
+                                // a short object would make a pack the client can't read
+                                if (self.entry_bytes != self.entry_size) {
+                                    const entry = try self.getEntry(self.entry_index);
+                                    std.log.err("object {s} gave {d} bytes but its pack header says {d}", .{ &std.fmt.bytesToHex(entry.oid, .lower), self.entry_bytes, self.entry_size });
+                                    return error.PackEntrySizeMismatch;
+                                }
                                 try stream.finish();
                                 o.stream = null;
                                 // if finish() added more data to out_bytes,
@@ -1932,6 +1945,8 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
             // for delta entries, the header size field is the size of the
             // delta instructions, not the reconstructed object
             const size: u64 = if (delta_maybe) |delta| delta.len - oid_len else entry.size;
+            self.entry_size = size;
+            self.entry_bytes = 0;
 
             const first_size_parts: packed struct {
                 low_bits: u4,
