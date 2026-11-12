@@ -331,7 +331,7 @@ const UploadPack = struct {
         refname_nons: []const u8,
         oid: *const [hash.hexLen(repo_opts.hash)]u8,
     ) !void {
-        const v0_capabilities = "multi_ack thin-pack side-band side-band-64k ofs-delta shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed allow-tip-sha1-in-want allow-reachable-sha1-in-want";
+        const v0_capabilities = "multi_ack thin-pack side-band side-band-64k shallow deepen-since deepen-not deepen-relative no-progress include-tag multi_ack_detailed allow-tip-sha1-in-want allow-reachable-sha1-in-want";
 
         try our_refs.put(oid.*, {});
 

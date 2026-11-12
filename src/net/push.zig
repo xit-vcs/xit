@@ -5,6 +5,7 @@ const net_transport = @import("./transport.zig");
 const net_refspec = @import("./refspec.zig");
 const rp = @import("../repo.zig");
 const hash = @import("../hash.zig");
+const obj = @import("../object.zig");
 const rf = @import("../ref.zig");
 const mrg = @import("../merge.zig");
 
@@ -93,6 +94,12 @@ pub fn Push(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
                 if (std.mem.allEqual(u8, &head.oid, '0')) {
                     continue;
                 }
+
+                var object_reader = obj.ObjectReader(repo_kind, repo_opts).init(state, io, allocator, &head.oid) catch |err| switch (err) {
+                    error.ObjectNotFound => continue,
+                    else => |e| return e,
+                };
+                object_reader.deinit();
 
                 try self.excludes.append(allocator, head.oid);
             }

@@ -1626,10 +1626,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     defer obj_iter.deinit();
 
                     for (ctx.excludes) |*oid| {
-                        obj_iter.exclude(oid) catch |err| switch (err) {
-                            error.ObjectNotFound => {},
-                            else => |e| return e,
-                        };
+                        try obj_iter.exclude(oid);
                     }
 
                     for (ctx.includes) |*oid| {
