@@ -1792,6 +1792,11 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     const max_size: usize = if (best_bytes) |bytes| bytes.len else @intCast(entry.size / 2);
                     if (max_size == 0) break;
 
+                    // like git, skip a base the target outgrows by the whole budget,
+                    // or one so much bigger that indexing it isn't worth it
+                    if (target.len > candidate.bytes.len and target.len - candidate.bytes.len >= max_size) continue;
+                    if (target.len < candidate.bytes.len / 32) continue;
+
                     if (try createDelta(self.allocator, candidate.bytes, target, max_size)) |delta_bytes| {
                         if (best_bytes) |bytes| self.allocator.free(bytes);
                         best_bytes = delta_bytes;
