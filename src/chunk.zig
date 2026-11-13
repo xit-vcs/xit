@@ -697,12 +697,12 @@ pub fn ChunkObjectReader(comptime repo_opts: rp.RepoOpts(.xit)) type {
                         break :blk chunk_info;
                     };
 
-                    const chunk_index = findChunkIndex(chunk_info, self.position) orelse return 0;
+                    const chunk_index = findChunkIndex(chunk_info, self.position) orelse return error.WrongChunkInfoSize;
                     const span = try loadChunk(repo_opts, chunk_info, self.db, chunk_index, self.chunk_cache);
                     self.cache_start = span.object_offset;
                     self.cache_end = span.object_offset + span.len;
                 }
-                if (self.position < self.cache_start or self.position >= self.cache_end) return 0;
+                if (self.position < self.cache_start or self.position >= self.cache_end) return error.WrongChunkSize;
             }
 
             // serve straight from the cache
