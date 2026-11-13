@@ -1202,6 +1202,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
                                     const size = try self.stream.read(dest_slice[0..bytes_to_read]);
                                     // TODO: in rare cases this is not true....why?
                                     //if (size != bytes_to_read) return error.UnexpectedEndOfStream;
+                                    if (size == 0) return error.UnexpectedEndOfStream;
                                     self.relative_position += size;
                                     bytes_read += size;
                                     delta_state.chunk_position += size;
@@ -1232,6 +1233,7 @@ pub fn PackObjectReader(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.
             while (remaining > 0) {
                 const max_size = @min(remaining, buf.len);
                 const size = try self.read(buf[0..max_size]);
+                if (size == 0) return error.UnexpectedEndOfStream;
                 remaining -= size;
             }
         }
