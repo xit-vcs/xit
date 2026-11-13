@@ -15,7 +15,9 @@ test "create delta" {
     // much smaller than the content itself
     const base = repeat("the quick brown fox jumps over the lazy dog. ", 50);
     const target = base[0..1000] ++ "EDITED!" ++ base[1000..];
-    const delta = (try pack.createDelta(allocator, base, target, target.len / 2)) orelse return error.NoDelta;
+    var base_index = try pack.indexDeltaBase(allocator, base);
+    defer base_index.deinit();
+    const delta = (try pack.createDelta(allocator, base, &base_index, target, target.len / 2)) orelse return error.NoDelta;
     defer allocator.free(delta);
     try std.testing.expect(delta.len < 100);
 
@@ -23,7 +25,7 @@ test "create delta" {
     var random_bytes: [1000]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(123);
     prng.random().bytes(&random_bytes);
-    try std.testing.expectEqual(null, try pack.createDelta(allocator, base, &random_bytes, random_bytes.len / 2));
+    try std.testing.expectEqual(null, try pack.createDelta(allocator, base, &base_index, &random_bytes, random_bytes.len / 2));
 }
 
 test "create and read pack" {
