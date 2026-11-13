@@ -1415,12 +1415,22 @@ fn writeCopyCommand(delta: *std.ArrayList(u8), allocator: std.mem.Allocator, off
     }
 }
 
-/// index `base` in fixed-size blocks for createDelta, so a base tried against
-/// several targets is only indexed once. when multiple blocks have the same
-/// hash, the first one wins.
-pub fn indexDeltaBase(allocator: std.mem.Allocator, base: []const u8) !std.AutoHashMap(u64, u32) {
+/// try to create a delta object that reconstructs `target` from `base`,
+/// in the format described in https://git-scm.com/docs/pack-format
+/// (and decoded by PackObjectReader above). returns null if no delta
+/// smaller than `max_size` could be produced.
+pub fn createDelta(allocator: std.mem.Allocator, base: []const u8, target: []const u8, max_size: usize) !?[]u8 {
+    var delta: std.ArrayList(u8) = .empty;
+    defer delta.deinit(allocator);
+
+    // the header contains the sizes of the base and reconstructed objects
+    try writeDeltaSizeVarint(&delta, allocator, base.len);
+    try writeDeltaSizeVarint(&delta, allocator, target.len);
+
+    // index the base in fixed-size blocks. when multiple blocks have the
+    // same hash, the first one wins.
     var block_index = std.AutoHashMap(u64, u32).init(allocator);
-    errdefer block_index.deinit();
+    defer block_index.deinit();
     if (base.len >= delta_block_size) {
         try block_index.ensureTotalCapacity(@intCast(base.len / delta_block_size + 1));
         var i: usize = 0;
@@ -1431,20 +1441,6 @@ pub fn indexDeltaBase(allocator: std.mem.Allocator, base: []const u8) !std.AutoH
             }
         }
     }
-    return block_index;
-}
-
-/// try to create a delta object that reconstructs `target` from `base`,
-/// in the format described in https://git-scm.com/docs/pack-format
-/// (and decoded by PackObjectReader above). returns null if no delta
-/// smaller than `max_size` could be produced.
-pub fn createDelta(allocator: std.mem.Allocator, base: []const u8, block_index: *const std.AutoHashMap(u64, u32), target: []const u8, max_size: usize) !?[]u8 {
-    var delta: std.ArrayList(u8) = .empty;
-    defer delta.deinit(allocator);
-
-    // the header contains the sizes of the base and reconstructed objects
-    try writeDeltaSizeVarint(&delta, allocator, base.len);
-    try writeDeltaSizeVarint(&delta, allocator, target.len);
 
     var insert_buffer: [127]u8 = @splat(0);
     var insert_len: usize = 0;
@@ -1748,13 +1744,11 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                 // delta chain length (zero for full objects)
                 depth: usize,
                 bytes: []u8,
-                index: std.AutoHashMap(u64, u32),
             };
             var window: std.ArrayList(WindowEntry) = .empty;
             defer {
-                for (window.items) |*window_entry| {
+                for (window.items) |window_entry| {
                     self.allocator.free(window_entry.bytes);
-                    window_entry.index.deinit();
                 }
                 window.deinit(self.allocator);
             }
@@ -1798,7 +1792,7 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
                     const max_size: usize = if (best_bytes) |bytes| bytes.len else @intCast(entry.size / 2);
                     if (max_size == 0) break;
 
-                    if (try createDelta(self.allocator, candidate.bytes, &candidate.index, target, max_size)) |delta_bytes| {
+                    if (try createDelta(self.allocator, candidate.bytes, target, max_size)) |delta_bytes| {
                         if (best_bytes) |bytes| self.allocator.free(bytes);
                         best_bytes = delta_bytes;
                         best_base = candidate.oid;
@@ -1817,14 +1811,11 @@ pub fn PackWriter(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOp
 
                 // add this object to the window (even if it became a delta,
                 // it can still be the base of later entries)
-                var target_index = try indexDeltaBase(self.allocator, target);
-                errdefer target_index.deinit();
                 if (window.items.len == window_size) {
-                    var oldest = window.orderedRemove(0);
+                    const oldest = window.orderedRemove(0);
                     self.allocator.free(oldest.bytes);
-                    oldest.index.deinit();
                 }
-                try window.append(self.allocator, .{ .oid = entry.oid, .kind = entry.kind, .depth = depth, .bytes = target, .index = target_index });
+                try window.append(self.allocator, .{ .oid = entry.oid, .kind = entry.kind, .depth = depth, .bytes = target });
             }
         }
 
