@@ -417,6 +417,70 @@ pub fn lastChange(
     return std.fmt.bytesToHex(&bytes, .lower);
 }
 
+// the commit that first applied each line in [start, start + count), clipped to
+// the file's end, as of the given commit. null when the path has no lines.
+pub fn lineCommits(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    moment: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
+    allocator: std.mem.Allocator,
+    commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    path: []const u8,
+    start: usize,
+    count: usize,
+) !?[]const [hash.hexLen(repo_opts.hash)]u8 {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    const Id = hash.HashInt(repo_opts.hash);
+    const F = File(repo_opts);
+    const file_cursor = (try moment.cursor.readPath(void, &.{
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "commit-id->snapshot") } },
+        .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, commit_oid) } },
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, path) } },
+    })) orelse return null;
+    const lines_cursor = (try file_cursor.readPath(void, &.{.{ .array_list_get = @backingInt(FileField.lines) }})) orelse return null;
+    // a path that has only been binary has no lines slot
+    if ((try lines_cursor.slot()).tag == .none) return null;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    // each edit_list blob's commits, parsed whole the first time a line needs one
+    var blobs: std.AutoHashMapUnmanaged(u32, []const Id) = .empty;
+
+    var oids: std.ArrayList([hash.hexLen(repo_opts.hash)]u8) = .empty;
+    errdefer oids.deinit(allocator);
+    const end = start +| count;
+    const lines = try DB.LinkedArrayList(.read_only).init(lines_cursor);
+    var iter = try lines.iterator();
+    var line_index: usize = 0;
+    collect: while (try iter.next()) |chunk| {
+        const bytes = try chunk.readBytesAlloc(allocator, null);
+        defer allocator.free(bytes);
+        var reader = std.Io.Reader.fixed(bytes);
+        while (reader.bufferedLen() > 0) {
+            const line = (try F.readChunkEntry(&reader)).line orelse break :collect;
+            if (line_index >= end) break :collect;
+            line_index += 1;
+            if (line_index <= start) continue;
+
+            const blob = line.edit_index / F.entry_batch;
+            const commits = blobs.get(blob) orelse commits: {
+                const cursor = (try file_cursor.readPath(void, &.{
+                    .{ .array_list_get = @backingInt(FileField.edit_list) },
+                    .{ .array_list_get = blob },
+                })) orelse return error.InvalidLineList;
+                var blob_reader = std.Io.Reader.fixed(try cursor.readBytesAlloc(arena.allocator(), null));
+                var commits: std.ArrayList(Id) = .empty;
+                while (blob_reader.bufferedLen() > 0) try commits.append(arena.allocator(), (try F.EditList.readEntry(&blob_reader)).commit);
+                try blobs.put(arena.allocator(), blob, commits.items);
+                break :commits commits.items;
+            };
+            const offset = line.edit_index % F.entry_batch;
+            if (offset >= commits.len) return error.InvalidLineList;
+            try oids.append(allocator, std.fmt.bytesToHex(hash.intToBytes(Id, commits[offset]), .lower));
+        }
+    }
+    return try oids.toOwnedSlice(allocator);
+}
+
 // removes the moment keys patch writing owns
 pub fn removePatches(
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -736,7 +800,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                     var count: u32 = 0;
                     while (reader.bufferedLen() > 0) : (count += 1) {
                         if (count == entry_batch) return error.InvalidLineList;
-                        const entry = try readEntry(&reader);
+                        const entry = (try readEntry(&reader)).entry;
                         self.by_index.items[first + count] = entry;
                         try self.by_id.put(arena, entry.id, first + count);
                     }
@@ -791,10 +855,10 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 if (index < try list.count()) try list.put(index, .{ .bytes = bytes }) else try list.append(.{ .bytes = bytes });
             }
 
-            fn readEntry(reader: *std.Io.Reader) !Entry {
+            // the commit that first applied it stays out of Entry, since loading doesn't need it
+            fn readEntry(reader: *std.Io.Reader) !struct { entry: Entry, commit: Id } {
                 const id = try reader.takeInt(Id, .big);
-                // the commit that first applied it, which loading doesn't need
-                _ = try reader.takeInt(Id, .big);
+                const commit = try reader.takeInt(Id, .big);
                 const removed_count = try reader.takeInt(u32, .big);
                 const text_count = try reader.takeInt(u32, .big);
                 const lo = try reader.takeInt(u64, .big);
@@ -804,7 +868,10 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 const prefix = try reader.take(prefix_len);
                 if (text_count > 0 and (hi <= lo or hi - lo - 1 < text_count)) return error.InvalidLineList;
                 if (text_count == 0 and (lo != 0 or hi != 0 or prefix.len != 0)) return error.InvalidLineList;
-                return .{ .id = id, .stored = .{ .removed_count = removed_count, .text_count = text_count, .where = .{ .prefix = prefix, .lo = lo, .hi = hi } }, .loaded = true };
+                return .{
+                    .entry = .{ .id = id, .stored = .{ .removed_count = removed_count, .text_count = text_count, .where = .{ .prefix = prefix, .lo = lo, .hi = hi } }, .loaded = true },
+                    .commit = commit,
+                };
             }
 
             fn writeEntry(writer: *std.Io.Writer, id: Id, commit: Id, stored: Stored) !void {
@@ -931,19 +998,15 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 chunk.* = .{ .first = gaps.items.len, .bytes = bytes };
                 var reader = std.Io.Reader.fixed(bytes);
                 while (reader.bufferedLen() > 0) {
-                    const dep_count = try reader.takeInt(u32, .big);
-                    if (dep_count > reader.bufferedLen() / index_size) return error.InvalidLineList;
-                    const deps = try arena.alloc(Id, dep_count);
-                    for (deps) |*dep| dep.* = (try edit_list.get(arena, try reader.takeInt(u32, .big))).id;
+                    const chunk_entry = try readChunkEntry(&reader);
+                    const deps = try arena.alloc(Id, chunk_entry.deps.len / index_size);
+                    for (deps, 0..) |*dep, i| dep.* = (try edit_list.get(arena, std.mem.readInt(u32, chunk_entry.deps[i * index_size ..][0..index_size], .big))).id;
                     try gaps.append(arena, deps);
-                    if (reader.bufferedLen() == 0) {
+                    const line = chunk_entry.line orelse {
                         ended = true;
                         break;
-                    }
-                    if (2 * index_size > reader.bufferedLen()) return error.InvalidLineList;
-                    const edit_index = try reader.takeInt(u32, .big);
-                    const line_num = try reader.takeInt(u32, .big);
-                    try ids.append(ids_allocator, @bitCast(LineId(opts.hash){ .line = line_num, .edit_id = (try edit_list.get(arena, edit_index)).id }));
+                    };
+                    try ids.append(ids_allocator, @bitCast(LineId(opts.hash){ .line = line.line, .edit_id = (try edit_list.get(arena, line.edit_index)).id }));
                 }
             }
             if (!ended) return error.InvalidLineList;
@@ -951,6 +1014,17 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             const owned_ids = try ids.toOwnedSlice(ids_allocator);
             errdefer ids_allocator.free(owned_ids);
             return .{ .ids = owned_ids, .gaps = try gaps.toOwnedSlice(arena), .chunks = chunks };
+        }
+
+        // one entry of a lines blob: its gap's deletions as raw edit indexes,
+        // then the line after it, null for the gap at the end
+        fn readChunkEntry(reader: *std.Io.Reader) !struct { deps: []const u8, line: ?struct { edit_index: u32, line: u32 } } {
+            const dep_count = try reader.takeInt(u32, .big);
+            if (dep_count > reader.bufferedLen() / index_size) return error.InvalidLineList;
+            const deps = try reader.take(dep_count * index_size);
+            if (reader.bufferedLen() == 0) return .{ .deps = deps, .line = null };
+            if (2 * index_size > reader.bufferedLen()) return error.InvalidLineList;
+            return .{ .deps = deps, .line = .{ .edit_index = try reader.takeInt(u32, .big), .line = try reader.takeInt(u32, .big) } };
         }
 
         fn validateGaps(self: *const Self, gaps: []const []const Id) !void {
