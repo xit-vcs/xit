@@ -9,9 +9,10 @@
 //!   state, so its oid differs from the commit's blob;
 //! - edit_set: the set of all applied edit ids;
 //! - edit_list: those ids again, in the order they were first applied, each with
-//!   its u32 removed and inserted line counts and its placement: u64 lo and hi
-//!   ordinals and a length-prefixed prefix, all zero for a pure deletion. 64 fit
-//!   in a blob. chunk entries name an edit by its u32 index here instead of
+//!   the commit that first applied it to the file, its u32 removed and inserted
+//!   line counts and its placement: u64 lo and hi ordinals and a
+//!   length-prefixed prefix, all zero for a pure deletion. 64 fit in a blob.
+//!   chunk entries name an edit by its u32 index here instead of
 //!   repeating the hash in every chunk that mentions it, so the list only grows,
 //!   and loading a file reads no edit records: every line's position follows
 //!   from its edit's entry;
@@ -363,7 +364,7 @@ pub fn writeAndApplyPatches(
         for (file.lines.items, expected.items) |line, id| {
             if (line.id != id) return error.InvalidLineList;
         }
-        try application.save(&snapshot, allocator, line_iter_pair.path, next_gaps.items);
+        try application.save(&snapshot, allocator, commit_id_int, line_iter_pair.path, next_gaps.items);
 
         // associate the patch hash and blob with path/commit
         const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
@@ -614,7 +615,7 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
 
         // writes the lines with the gaps between them. the file's chunks are
         // those it was loaded with, so unchanged ones stay shared.
-        pub fn save(self: *@This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, path: []const u8, gaps: []const []const hash.HashInt(opts.hash)) !void {
+        pub fn save(self: *@This(), snapshot: *const rp.Repo(.xit, opts).DB.HashMap(.read_write), allocator: std.mem.Allocator, commit: hash.HashInt(opts.hash), path: []const u8, gaps: []const []const hash.HashInt(opts.hash)) !void {
             // snapshots hold chosen text, never conflict alternatives
             if (self.file.regions.items.len > 0) return error.ConflictedPatchApplication;
             // applied ids are scoped to this file: a nonempty patch on a new path
@@ -630,7 +631,7 @@ pub fn PatchApplication(comptime opts: rp.RepoOpts(.xit)) type {
             for (self.edits.keys()) |id| try set.put(id, .{ .uint = 1 });
             // an edit applied for the first time takes the next index
             const id_list = try DB.ArrayList(.read_write).init(try fields.putCursor(@backingInt(FileField.edit_list)));
-            try self.file.edit_list.append(self.file.arena.allocator(), id_list, self.edits.keys(), self.edits.values());
+            try self.file.edit_list.append(self.file.arena.allocator(), id_list, commit, self.edits.keys(), self.edits.values());
 
             // update the chunk list in position order, keeping unchanged blobs
             const before = self.file.chunks;
@@ -749,8 +750,8 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             }
 
             // fills the last blob before starting new ones. ids already in the
-            // list are skipped, keeping the index they were given.
-            fn append(self: *EditList, arena: std.mem.Allocator, list: DB.ArrayList(.read_write), ids: []const Id, entries: []const Stored) !void {
+            // list are skipped, keeping the index and commit they were given.
+            fn append(self: *EditList, arena: std.mem.Allocator, list: DB.ArrayList(.read_write), commit: Id, ids: []const Id, entries: []const Stored) !void {
                 var buffer = std.Io.Writer.Allocating.init(arena);
                 var blob_index: u32 = @intCast(try list.count());
                 var filled: u32 = 0;
@@ -778,7 +779,7 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                         filled = 0;
                         buffer.clearRetainingCapacity();
                     }
-                    try writeEntry(&buffer.writer, id, stored);
+                    try writeEntry(&buffer.writer, id, commit, stored);
                     try self.by_id.put(arena, id, blob_index * entry_batch + filled);
                     filled += 1;
                     added = true;
@@ -792,6 +793,8 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
 
             fn readEntry(reader: *std.Io.Reader) !Entry {
                 const id = try reader.takeInt(Id, .big);
+                // the commit that first applied it, which loading doesn't need
+                _ = try reader.takeInt(Id, .big);
                 const removed_count = try reader.takeInt(u32, .big);
                 const text_count = try reader.takeInt(u32, .big);
                 const lo = try reader.takeInt(u64, .big);
@@ -804,8 +807,9 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
                 return .{ .id = id, .stored = .{ .removed_count = removed_count, .text_count = text_count, .where = .{ .prefix = prefix, .lo = lo, .hi = hi } }, .loaded = true };
             }
 
-            fn writeEntry(writer: *std.Io.Writer, id: Id, stored: Stored) !void {
+            fn writeEntry(writer: *std.Io.Writer, id: Id, commit: Id, stored: Stored) !void {
                 try writer.writeInt(Id, id, .big);
+                try writer.writeInt(Id, commit, .big);
                 try writer.writeInt(u32, stored.removed_count, .big);
                 try writer.writeInt(u32, stored.text_count, .big);
                 try writer.writeInt(u64, stored.where.lo, .big);

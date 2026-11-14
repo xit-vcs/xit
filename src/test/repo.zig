@@ -1216,7 +1216,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(size_before, try cursor.db.core.length());
                 // a one-line replacement leaves every gap as it was
-                try application.save(&snapshot, patch_allocator, paths[0], application.file.gaps);
+                try application.save(&snapshot, patch_allocator, try hash.hexToInt(opts.hash, &ctx.patch_oid), paths[0], application.file.gaps);
             }
             const membership = try snapshot.cursor.readPath(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1237,7 +1237,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
                 defer application.deinit(patch_allocator);
                 try std.testing.expectEqual(1, application.file.regions.items.len);
                 try std.testing.expectEqual(6, application.file.lines.items.len);
-                try std.testing.expectError(error.ConflictedPatchApplication, application.save(&snapshot, patch_allocator, paths[0], application.file.gaps));
+                try std.testing.expectError(error.ConflictedPatchApplication, application.save(&snapshot, patch_allocator, try hash.hexToInt(opts.hash, &oid), paths[0], application.file.gaps));
             }
             const line_list = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
@@ -1252,7 +1252,7 @@ fn testAppliedPatches(case: enum { repeat, history, later_edit, conflict, rollba
             var application = try patch.applyPatches(opts, &read_moment, snapshot.cursor.readOnly(), null, patch_allocator, paths[0], &.{patch_id});
             defer application.deinit(patch_allocator);
             try std.testing.expectEqual(0, application.edits.count());
-            try application.save(&snapshot, patch_allocator, paths[0], application.file.gaps);
+            try application.save(&snapshot, patch_allocator, try hash.hexToInt(opts.hash, &ctx.patch_oid), paths[0], application.file.gaps);
             try std.testing.expectEqual(size_before, try cursor.db.core.length());
             const line_list_after = try snapshot.cursor.readPathSlot(void, &.{
                 .{ .hash_map_get = .{ .value = path_hash } },
