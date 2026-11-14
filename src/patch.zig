@@ -3,7 +3,7 @@
 //!
 //! commit-id->snapshot maps each commit to a path map, initially shared with
 //! its first parent and copied on write. path strings are stored as readable
-//! keys. each file's value is an array of six database slots (FileField):
+//! keys. each file's value is an array of seven database slots (FileField):
 //! - patch: the last patch created for the file, inherited if unchanged;
 //! - oid: the blob the lines describe. a binary commit keeps the last text
 //!   state, so its oid differs from the commit's blob;
@@ -28,12 +28,17 @@
 //!   because a write costs far more in copied tree nodes than in bytes
 //!   written, so fewer, larger blobs win despite rewriting more per change;
 //! - commit: the last commit on the first-parent chain that changed the path.
-//!   a path that has only been binary has this slot alone.
+//!   a path that has only been binary fills only this slot and renamed_from;
+//! - renamed_from: the path's previous name if that commit moved it, else
+//!   empty. a move is a deleted path and an added path that alone share a blob
+//!   within the commit. the added path starts as a copy of the deleted path's
+//!   parent entry, so its lines keep their commits and need no patch.
 //! commit-id->stats stores nine u64s: first-parent depth, lines added/changed/removed,
 //! bytes added/removed, then files added/changed/removed. paired removals and
 //! insertions within each edit count only as changed lines. bytes sum per-file
 //! growth/shrinkage and exclude submodules. file counts include binary and
 //! mode-only changes; line counts exclude binary changes and the final empty entry.
+//! a move counts as a delete and an add.
 //!
 //! patch-id->edit-list stores ordered edit ids, without a count. the patch id
 //! hashes those ids. edit-id->edit stores each edit once, in this order:
@@ -113,6 +118,8 @@ pub fn writeAndApplyPatches(
     var snapshot_cursor = try commit_id_to_snapshot.putCursor(commit_id_int);
 
     var stats: CommitStats = .{ .first_parent_depth = 1 };
+    // the parent's snapshot, which a move copies its source entry from
+    var parent_snapshot: ?DB.HashMap(.read_only) = null;
     // if there is a parent commit, inherit its snapshot and increment its depth
     if (parent_commit_oid_maybe) |*parent_commit_oid| {
         if (try commit_id_to_snapshot.getCursor(try hash.hexToInt(repo_opts.hash, parent_commit_oid))) |parent_snapshot_cursor| {
@@ -120,6 +127,7 @@ pub fn writeAndApplyPatches(
             // this snapshot shares the parent's data, so freeze it to make changes
             // copy that data instead of mutating the parent's snapshot
             try snapshot_cursor.freeze();
+            parent_snapshot = try DB.HashMap(.read_only).init(parent_snapshot_cursor);
         } else {
             return error.ParentCommitSnapshotNotFound;
         }
@@ -139,6 +147,17 @@ pub fn writeAndApplyPatches(
         commit_oid,
         null,
     );
+    // blobs of deleted and added paths. a blob shared by several paths on one
+    // side maps to null, so only unambiguous moves are followed.
+    var deleted: std.AutoHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, ?[]const u8) = .empty;
+    defer deleted.deinit(allocator);
+    var added: std.AutoHashMapUnmanaged([hash.byteLen(repo_opts.hash)]u8, ?[]const u8) = .empty;
+    defer added.deinit(allocator);
+    for (tree_diff.changes.keys(), tree_diff.changes.values()) |path, change| {
+        const sides = if (change.old == null) &added else if (change.new == null) &deleted else continue;
+        const result = try sides.getOrPut(allocator, (change.new orelse (change.old orelse unreachable)).oid);
+        result.value_ptr.* = if (result.found_existing) null else path;
+    }
     var file_iter = try df.FileIterator(.xit, repo_opts).init(
         state.readOnly(),
         io,
@@ -162,13 +181,27 @@ pub fn writeAndApplyPatches(
             stats.files_changed += 1;
         }
 
+        // an added path whose blob alone matches a deleted path's is a move, which
+        // continues that path's parent entry. data from before binary paths had
+        // entries may lack one, which leaves a plain add.
+        const moved_maybe: ?struct { from: []const u8, entry: DB.Cursor(.read_only) } = moved: {
+            if (line_iter_pair.a.source != .nothing) break :moved null;
+            if ((added.get(line_iter_pair.b.oid) orelse unreachable) == null) break :moved null;
+            const from = (deleted.get(line_iter_pair.b.oid) orelse break :moved null) orelse break :moved null;
+            const entry = (try (parent_snapshot orelse unreachable).getCursor(hash.hashInt(repo_opts.hash, from))) orelse break :moved null;
+            break :moved .{ .from = from, .entry = entry };
+        };
+
         // every change counts as the path's last, binary and mode-only ones too
         const path_hash = hash.hashInt(repo_opts.hash, line_iter_pair.path);
         {
             try snapshot.putKey(path_hash, .{ .bytes = line_iter_pair.path });
+            // shared with the parent until written
+            if (moved_maybe) |moved| try snapshot.put(path_hash, .{ .slot = try moved.entry.slot() });
             const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
             while (try fields.count() < @typeInfo(FileField).@"enum".field_names.len) try fields.append(.{ .slot = null });
             try fields.put(@backingInt(FileField.commit), .{ .bytes = &hash.intToBytes(Id, commit_id_int) });
+            try fields.put(@backingInt(FileField.renamed_from), if (moved_maybe) |moved| .{ .bytes = moved.from } else .{ .slot = null });
         }
 
         // keep the last text state while the file is binary
@@ -184,6 +217,12 @@ pub fn writeAndApplyPatches(
                 if (count.* == 0) continue;
                 if ((try iter.get(count.* - 1)).len == 0) count.* -= 1;
             }
+        }
+
+        // a move keeps the copied lines. its statistics stay those of an add.
+        if (moved_maybe != null) {
+            stats.lines_added += line_counts[1];
+            continue;
         }
 
         var application = PatchApplication(repo_opts){
@@ -415,6 +454,25 @@ pub fn lastChange(
     var bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
     if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitId;
     return std.fmt.bytesToHex(&bytes, .lower);
+}
+
+// the path's name before its last change as of the given commit, or null if
+// that change didn't move it
+pub fn renamedFrom(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    moment: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
+    allocator: std.mem.Allocator,
+    commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    path: []const u8,
+) !?[]const u8 {
+    const cursor = (try moment.cursor.readPath(void, &.{
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "commit-id->snapshot") } },
+        .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, commit_oid) } },
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, path) } },
+        .{ .array_list_get = @backingInt(FileField.renamed_from) },
+    })) orelse return null;
+    if ((try cursor.slot()).tag == .none) return null;
+    return try cursor.readBytesAlloc(allocator, null);
 }
 
 // the commit that first applied each line in [start, start + count), clipped to
@@ -1419,7 +1477,7 @@ pub fn LineId(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const FileField = enum(u8) { patch, oid, edit_set, edit_list, lines, commit };
+pub const FileField = enum(u8) { patch, oid, edit_set, edit_list, lines, commit, renamed_from };
 
 fn writeLengthPrefixedBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeInt(u32, @intCast(bytes.len), .big);
