@@ -274,12 +274,8 @@ fn getInfoRefs(
             try pkt.writePktFlush(writer);
         }
 
-        const write_state = write_state_maybe orelse return error.Forbidden;
-        try receive_pack.run(repo_kind, repo_opts, write_state, io, allocator, reader, writer, .{
-            .protocol_version = options.protocol_version,
-            .advertise_refs = true,
-            .is_stateless = true,
-        }, null);
+        if (write_state_maybe == null) return error.Forbidden;
+        try receive_pack.advertise(repo_kind, repo_opts, state, io, allocator, writer, .{ .protocol_version = options.protocol_version });
         // no need to make a new transaction
         return error.CancelTransaction;
     }

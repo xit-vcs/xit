@@ -137,18 +137,8 @@ pub fn run(
 
     try receive_pack.readConfig(repo_kind, repo_opts, state.readOnly(), io, allocator);
 
-    switch (options.protocol_version) {
-        .v2 => {},
-        .v1 => {
-            if (options.advertise_refs or !options.is_stateless) {
-                try pkt.writePktLineFmt(writer, "version 1\n", .{});
-            }
-        },
-        .v0 => {},
-    }
-
     if (options.advertise_refs or !options.is_stateless) {
-        try receive_pack.advertiseRefs(repo_kind, repo_opts, state.readOnly(), io, allocator, writer);
+        try receive_pack.advertiseRefs(repo_kind, repo_opts, state.readOnly(), io, allocator, writer, options.protocol_version);
     }
     if (options.advertise_refs) return;
 
@@ -297,6 +287,23 @@ pub fn run(
     }
 }
 
+// advertise the refs and nothing else. it only reads, so it needs no write
+// transaction: a server can send it, wait for the client's commands, and only
+// then call `run` with `is_stateless` set.
+pub fn advertise(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    options: Options,
+) !void {
+    var receive_pack: ReceivePack = .{};
+    try receive_pack.readConfig(repo_kind, repo_opts, state, io, allocator);
+    try receive_pack.advertiseRefs(repo_kind, repo_opts, state, io, allocator, writer, options.protocol_version);
+}
+
 // advertise a repo that doesn't exist yet. the dummy line is sha1-width so
 // clients without object-format support still parse it, and listing every
 // hash kind lets a newer client name its own in its first command.
@@ -430,7 +437,12 @@ const ReceivePack = struct {
         io: std.Io,
         allocator: std.mem.Allocator,
         writer: *std.Io.Writer,
+        protocol_version: common.ProtocolVersion,
     ) !void {
+        if (protocol_version == .v1) {
+            try pkt.writePktLineFmt(writer, "version 1\n", .{});
+        }
+
         // head
         if (try rf.readHeadRecurMaybe(repo_kind, repo_opts, state, io)) |*head_oid| {
             try self.advertiseRef(repo_kind, repo_opts, writer, "HEAD", head_oid);
