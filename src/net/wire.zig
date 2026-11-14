@@ -642,7 +642,7 @@ pub fn WireTransport(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
 
                 var pack_iter = try pack.PackIterator(repo_kind, repo_opts).init(io, allocator, &pack_reader);
 
-                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, self.opts.progress_ctx);
+                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, self.opts.progress_ctx, .xit == repo_kind);
             }
         }
 

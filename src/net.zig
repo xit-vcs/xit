@@ -354,6 +354,17 @@ pub fn connect(
     }
 }
 
+// the pack check covers the objects a fetch stored, and this covers its refs
+fn requireStored(
+    comptime repo_kind: rp.RepoKind,
+    comptime repo_opts: rp.RepoOpts(repo_kind),
+    state: rp.Repo(repo_kind, repo_opts).State(.read_only),
+    oid_hex: *const [hash.hexLen(repo_opts.hash)]u8,
+) !void {
+    if (comptime repo_kind != .xit) return;
+    if (!try obj.isStored(repo_opts, state, oid_hex)) return error.MissingNecessaryObjects;
+}
+
 fn updateRef(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -375,6 +386,7 @@ fn updateRef(
         // file may have been modified after we read it.
     }
 
+    try requireStored(repo_kind, repo_opts, state.readOnly(), oid_hex);
     try rf.write(repo_kind, repo_opts, state, io, ref_path, .{ .oid = oid_hex });
 }
 
@@ -449,6 +461,7 @@ fn updateHead(
         }
     }
 
+    try requireStored(repo_kind, repo_opts, state.readOnly(), &head.oid);
     try rf.write(repo_kind, repo_opts, state, io, ref_path.items, .{ .oid = &head.oid });
 }
 

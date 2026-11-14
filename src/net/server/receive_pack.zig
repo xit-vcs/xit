@@ -205,6 +205,10 @@ pub fn run(
             }
         }
 
+        // the xit backend checks connectivity here, over what the pack stored
+        // and the new tips. anything missing cancels the whole push, so no
+        // object with a missing closure is ever stored.
+        var missing_objects = false;
         {
             const delete_only = for (ref_updates.items) |update| {
                 if (!isNullOid(&update.new_oid)) break false;
@@ -218,11 +222,31 @@ pub fn run(
 
                 var pack_iter = try pack.PackIterator(repo_kind, repo_opts).init(io, allocator, &pack_reader);
 
-                try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, progress_ctx_maybe);
+                if (.git == repo_kind or options.skip_connectivity_check) {
+                    try obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, progress_ctx_maybe, false);
+                } else {
+                    obj.copyFromPackIterator(repo_kind, repo_opts, state, io, allocator, &pack_iter, progress_ctx_maybe, true) catch |err| switch (err) {
+                        error.MissingNecessaryObjects => missing_objects = true,
+                        else => |e| return e,
+                    };
+                    if (!missing_objects) missing_objects = for (ref_updates.items) |*update| {
+                        if (isNullOid(&update.new_oid) or update.skip_update) continue;
+                        if (!try obj.isStored(repo_opts, state.readOnly(), &update.new_oid)) break true;
+                    } else false;
+                }
             }
         }
 
-        try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options, progress_ctx_maybe);
+        if (missing_objects) {
+            transaction_failure = true;
+            for (ref_updates.items) |*update| {
+                if (update.error_message == null) {
+                    update.error_message = if (isNullOid(&update.new_oid)) "atomic transaction failed" else "missing necessary objects";
+                }
+            }
+        } else {
+            try receive_pack.executeRefUpdates(writer, repo_kind, repo_opts, state, io, allocator, ref_updates.items, options, progress_ctx_maybe);
+        }
 
         // an atomic push applies every ref update or none of them, so if any
         // of them failed, the rest must be reported as failed as well
@@ -525,7 +549,8 @@ const ReceivePack = struct {
             if (!isNullOid(&update.new_oid) and !update.skip_update) break true;
         } else false;
 
-        if (!options.skip_connectivity_check and has_new_oids) {
+        // the xit backend checked connectivity as the pack was stored
+        if (.git == repo_kind and !options.skip_connectivity_check and has_new_oids) {
             // what a check walks is not known until it has walked it
             try reportProgress(repo_kind, repo_opts, io, progress_ctx_maybe, .{ .start = .{ .kind = .checking_object, .estimated_total_items = 0 } });
             const all_connected = blk: {
@@ -946,9 +971,10 @@ fn isNullOid(oid: []const u8) bool {
     return std.mem.allEqual(u8, oid, '0');
 }
 
-// every commit already reachable from a ref had its objects verified by the
-// push that brought it in, so a connectivity check can stop as soon as it
-// reaches one instead of walking the repo's whole history again. marking them
+// the git backend can hold objects with missing closures, but every commit
+// already reachable from a ref had its objects verified by the push that
+// brought it in, so a connectivity check can stop as soon as it reaches one
+// instead of walking the repo's whole history again. marking them
 // in the iterator's seen set is what makes it stop; `exclude` would descend
 // into each commit's whole subtree and cost as much as it saves. only commits
 // are walked here, which is an order of magnitude cheaper than walking every

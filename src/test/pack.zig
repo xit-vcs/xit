@@ -228,7 +228,7 @@ test "write pack file" {
             defer pack_reader.deinit();
 
             var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
-            try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &server_repo.core, .extra = .{} }, io, allocator, &pack_iter, null);
+            try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &server_repo.core, .extra = .{} }, io, allocator, &pack_iter, null, false);
         }
 
         // since the second commit only edited existing files, the pack
@@ -321,7 +321,7 @@ test "iterate pack from file" {
 
     var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
 
-    try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io, allocator, &pack_iter, null);
+    try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io, allocator, &pack_iter, null, false);
 }
 
 test "iterate pack from stream" {
@@ -359,7 +359,7 @@ test "iterate pack from stream" {
 
     var pack_iter = try pack.PackIterator(.git, repo_opts).init(io, allocator, &pack_reader);
 
-    try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io, allocator, &pack_iter, null);
+    try obj.copyFromPackIterator(.git, repo_opts, .{ .core = &r.core, .extra = .{} }, io, allocator, &pack_iter, null, false);
 }
 
 test "read packed refs" {

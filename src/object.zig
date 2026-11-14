@@ -1338,6 +1338,8 @@ pub fn copyFromObjectIterator(
     }
 }
 
+// with `check_references`, fails with error.MissingNecessaryObjects unless
+// every object the pack stored refers only to stored objects
 pub fn copyFromPackIterator(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
@@ -1346,7 +1348,10 @@ pub fn copyFromPackIterator(
     allocator: std.mem.Allocator,
     pack_iter: *pack.PackIterator(repo_kind, repo_opts),
     progress_ctx_maybe: ?repo_opts.ProgressCtx,
+    comptime check_references: bool,
 ) !void {
+    if (check_references and repo_kind != .xit) @compileError("only the xit backend keeps every stored object's closure, so only it can check references");
+
     if (repo_opts.ProgressCtx != void) {
         if (progress_ctx_maybe) |progress_ctx| {
             try progress_ctx.run(io, .{ .start = .{
@@ -1374,6 +1379,9 @@ pub fn copyFromPackIterator(
         pub fn run(ctx: @This(), cursor: *OffsetToOid.DB.Cursor(.read_write)) !void {
             var offset_to_oid = try OffsetToOid.init(cursor.*);
             try copyFromPackIteratorWithOffsets(repo_kind, repo_opts, ctx.state, ctx.io, ctx.allocator, ctx.pack_iter, &offset_to_oid, ctx.progress_ctx_maybe);
+            if (check_references) {
+                try checkPackReferences(repo_opts, ctx.state.readOnly(), ctx.io, ctx.allocator, &offset_to_oid, ctx.pack_iter.object_count, ctx.progress_ctx_maybe);
+            }
         }
     };
     try offsets_db.runContext(Ctx{
@@ -1445,4 +1453,86 @@ fn copyFromPackIteratorWithOffsets(
             }
         }
     }
+}
+
+// whether the object is in the moment's object map
+pub fn isStored(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    oid: *const [hash.hexLen(repo_opts.hash)]u8,
+) !bool {
+    const cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return false;
+    const object_map = try rp.Repo(.xit, repo_opts).DB.CountedHashMap(.read_only).init(cursor);
+    return try object_map.getSlot(try hash.hexToInt(repo_opts.hash, oid)) != null;
+}
+
+// the xit backend keeps every stored object's closure stored: local writers
+// only refer to stored objects, and a pack from a client or remote must pass
+// this check. so each object a pack stored only needs its direct references
+// checked against the moment, which holds what was stored before plus the
+// whole pack, and the cost scales with the pack instead of the history.
+fn checkPackReferences(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_only),
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    offset_to_oid: *pack.OffsetToOid(repo_opts.hash),
+    object_count: u32,
+    progress_ctx_maybe: ?repo_opts.ProgressCtx,
+) !void {
+    const DB = rp.Repo(.xit, repo_opts).DB;
+    // a pack that stored nothing has nothing to check
+    const object_map_cursor = (try state.extra.moment.getCursor(hash.hashInt(repo_opts.hash, "object-id->content"))) orelse return;
+    const object_map = try DB.CountedHashMap(.read_only).init(object_map_cursor);
+
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| {
+            try progress_ctx.run(io, .{ .start = .{
+                .kind = .checking_object,
+                .estimated_total_items = object_count,
+            } });
+        }
+    }
+
+    const all_stored = blk: {
+        var iter = try offset_to_oid.map.readOnly().iterator();
+        while (try iter.next()) |entry_cursor| {
+            const kv_pair = try entry_cursor.readKeyValuePair();
+            var oid_bytes: [hash.byteLen(repo_opts.hash)]u8 = @splat(0);
+            if ((try kv_pair.value_cursor.readBytes(&oid_bytes)).len != oid_bytes.len) return error.InvalidOffsetEntry;
+            const oid = std.fmt.bytesToHex(oid_bytes, .lower);
+
+            var object = try Object(.xit, repo_opts).init(state, io, allocator, &oid);
+            defer object.deinit();
+            switch (object.content) {
+                .blob => {},
+                .tree => |tree| for (tree.entries.values()) |entry| {
+                    if (entry.mode.content.object_type == .gitlink) continue;
+                    if (try object_map.getSlot(hash.bytesToInt(repo_opts.hash, &entry.oid)) == null) break :blk false;
+                },
+                .commit => |commit| {
+                    for (commit.metadata.parent_oids orelse &.{}) |*parent_oid| {
+                        if (try object_map.getSlot(try hash.hexToInt(repo_opts.hash, parent_oid)) == null) break :blk false;
+                    }
+                    if (try object_map.getSlot(try hash.hexToInt(repo_opts.hash, &commit.tree)) == null) break :blk false;
+                },
+                .tag => |tag| if (try object_map.getSlot(try hash.hexToInt(repo_opts.hash, &tag.target)) == null) break :blk false,
+            }
+
+            if (repo_opts.ProgressCtx != void) {
+                if (progress_ctx_maybe) |progress_ctx| {
+                    try progress_ctx.run(io, .{ .complete_one = .checking_object });
+                }
+            }
+        }
+        break :blk true;
+    };
+
+    if (repo_opts.ProgressCtx != void) {
+        if (progress_ctx_maybe) |progress_ctx| {
+            try progress_ctx.run(io, .{ .end = .checking_object });
+        }
+    }
+
+    if (!all_stored) return error.MissingNecessaryObjects;
 }
