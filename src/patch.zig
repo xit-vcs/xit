@@ -166,7 +166,7 @@ pub fn writeAndApplyPatches(
     );
 
     // iterate over each modified file and create/apply the patch
-    while (try file_iter.next()) |*line_iter_pair_ptr| {
+    while (try file_iter.nextUnlimited()) |*line_iter_pair_ptr| {
         var line_iter_pair = line_iter_pair_ptr.*;
         defer line_iter_pair.deinit();
 

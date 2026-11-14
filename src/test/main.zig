@@ -323,8 +323,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                             .{ .eql = .{ .old_line = .{ .num = 5 }, .new_line = .{ .num = 5 } } },
                             .{ .eql = .{ .old_line = .{ .num = 6 }, .new_line = .{ .num = 6 } } },
                             .{ .eql = .{ .old_line = .{ .num = 7 }, .new_line = .{ .num = 7 } } },
-                        },
-                        &[_]df.Edit{
                             .{ .del = .{ .old_line = .{ .num = 8 } } },
                             .{ .del = .{ .old_line = .{ .num = 9 } } },
                             .{ .ins = .{ .new_line = .{ .num = 8 } } },
@@ -332,8 +330,6 @@ fn testMain(comptime repo_kind: rp.RepoKind, comptime any_repo_opts: rp.AnyRepoO
                             .{ .eql = .{ .old_line = .{ .num = 10 }, .new_line = .{ .num = 10 } } },
                             .{ .eql = .{ .old_line = .{ .num = 11 }, .new_line = .{ .num = 11 } } },
                             .{ .eql = .{ .old_line = .{ .num = 12 }, .new_line = .{ .num = 12 } } },
-                        },
-                        &[_]df.Edit{
                             .{ .eql = .{ .old_line = .{ .num = 13 }, .new_line = .{ .num = 13 } } },
                             .{ .del = .{ .old_line = .{ .num = 14 } } },
                             .{ .ins = .{ .new_line = .{ .num = 14 } } },

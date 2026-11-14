@@ -80,8 +80,8 @@ fn RepoOptsInternal(comptime repo_kind: RepoKind, comptime hash_kind_known: bool
         max_line_count: usize = 1_000_000, // lines cost memory beyond their bytes, especially in the patch system
         max_text_size: u64 = 50 * 1024 * 1024, // text files are read whole, so this bounds memory per file
         max_tree_size: u64 = 1_000_000, // max size in bytes of a single tree object before reading it is aborted with error.TreeTooLarge
-        max_edit_count: usize = 1_000_000, // max edit distance before a diff is aborted with error.DiffTooLarge
-        max_total_line_count: usize = 50_000_000, // max total lines across all files in a diff before it is aborted with error.DiffTooLarge
+        max_diff_work: u64 = 100_000_000, // myers search steps per file before the rest of its diff is marked changed instead of searched
+        max_total_line_count: usize = 50_000_000, // max total lines across all files in a displayed diff before it is aborted with error.DiffTooLarge
         max_hunk_edits: ?usize = 500, // breaks large hunks into smaller ones; must be set to null to make diffs compatible with git apply and patch
         delta_window_size: usize = 10, // how many previous objects to try delta-compressing against when writing a pack
         delta_max_depth: usize = 50, // max delta chain length in packs written by us

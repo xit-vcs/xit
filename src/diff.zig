@@ -339,337 +339,289 @@ pub const Edit = union(enum) {
     }
 };
 
+/// myers diff computed eagerly in init. lines are mapped to ids, the common
+/// prefix and suffix are trimmed, and lines with no equal line on the other
+/// side are marked changed before the search, which keeps the diff minimal.
+/// past `max_diff_work` search steps, each remaining subproblem is marked all
+/// changed, so the diff stays valid but may not be minimal.
 pub fn MyersDiffIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(repo_kind)) type {
     return struct {
         allocator: std.mem.Allocator,
-        cache: std.ArrayList(Edit),
-        stack: std.ArrayList(isize),
-        action: ?Action,
-        b: []isize,
-        i: isize,
-        j: isize,
-        n: isize,
-        m: isize,
-        z: isize,
-        range_maybe: ?Range,
-        deferred_range: Range,
         line_iter_a: *LineIterator(repo_kind, repo_opts),
         line_iter_b: *LineIterator(repo_kind, repo_opts),
-        next_index: usize,
+        // the new line equal to each old line, or null for a deleted line
+        new_lines: []?usize,
         x_index: usize,
         y_index: usize,
-        edit_count: usize,
 
-        fn eq(self: *const MyersDiffIterator(repo_kind, repo_opts), i: usize, j: usize) !bool {
-            return std.mem.eql(u8, try self.line_iter_a.get(i), try self.line_iter_b.get(j));
-        }
+        const Self = @This();
 
-        pub const Action = enum {
-            push,
-            pop,
-        };
+        pub fn init(allocator: std.mem.Allocator, line_iter_a: *LineIterator(repo_kind, repo_opts), line_iter_b: *LineIterator(repo_kind, repo_opts)) !Self {
+            const line_iters = [2]*LineIterator(repo_kind, repo_opts){ line_iter_a, line_iter_b };
+            const counts = [2]usize{ line_iter_a.count(), line_iter_b.count() };
 
-        pub const Range = struct {
-            del_start: usize,
-            del_end: usize,
-            ins_start: usize,
-            ins_end: usize,
-        };
+            var changed: [2][]bool = undefined;
+            changed[0] = try allocator.alloc(bool, counts[0]);
+            defer allocator.free(changed[0]);
+            changed[1] = try allocator.alloc(bool, counts[1]);
+            defer allocator.free(changed[1]);
+            for (changed) |c| @memset(c, false);
 
-        fn diff(self: *MyersDiffIterator(repo_kind, repo_opts), action: Action) !?Action {
-            var i = self.i;
-            var j = self.j;
-            var n = self.n;
-            var m = self.m;
-            var z = self.z;
-
-            action: switch (action) {
-                .push => {
-                    z_block: while (n > 0 and m > 0) {
-                        @memset(self.b, 0);
-
-                        const w = n - m;
-                        const l = n + m;
-                        const parity = l & 1;
-                        const offsetx = i + n - 1;
-                        const offsety = j + m - 1;
-                        const hmax = @as(usize, @intCast(l + parity)) / 2;
-
-                        h_loop: for (0..hmax + 1) |h| {
-                            const hh: isize = @intCast(h);
-                            const kmin: isize = 2 * @max(0, hh - m) - hh;
-                            const kmax: isize = hh - 2 * @max(0, hh - n);
-
-                            // forwards
-                            var k: isize = kmin;
-                            while (k <= kmax) {
-                                defer k += 2;
-                                const gkm = self.b[@intCast(k - 1 - z * @divFloor(k - 1, z))];
-                                const gkp = self.b[@intCast(k + 1 - z * @divFloor(k + 1, z))];
-                                const u = if (k == -hh or (k != hh and gkm < gkp)) gkp else gkm + 1;
-                                const v = u - k;
-                                var x = u;
-                                var y = v;
-                                while (x < n and y < m and try self.eq(@intCast(i + x), @intCast(j + y))) {
-                                    x += 1;
-                                    y += 1;
-                                }
-                                self.b[@intCast(k - z * @divFloor(k, z))] = x;
-                                if (parity == 1) {
-                                    const zz = w - k;
-                                    if (zz >= 1 - hh and zz < hh and x + self.b[@intCast(z + zz - z * @divFloor(zz, z))] >= n) {
-                                        if (h > 1 or x != u) {
-                                            try self.stack.append(self.allocator, i + x);
-                                            try self.stack.append(self.allocator, n - x);
-                                            try self.stack.append(self.allocator, j + y);
-                                            try self.stack.append(self.allocator, m - y);
-                                            n = u;
-                                            m = v;
-                                            z = 2 * (@min(n, m) + 1);
-                                            continue :z_block;
-                                        } else break :h_loop;
-                                    }
-                                }
+            {
+                // equal lines get equal ids
+                var ids: [2][]u32 = undefined;
+                ids[0] = try allocator.alloc(u32, counts[0]);
+                defer allocator.free(ids[0]);
+                ids[1] = try allocator.alloc(u32, counts[1]);
+                defer allocator.free(ids[1]);
+                var id_count: u32 = 0;
+                {
+                    var id_map: std.StringHashMapUnmanaged(u32) = .empty;
+                    defer id_map.deinit(allocator);
+                    try id_map.ensureTotalCapacity(allocator, @intCast(counts[0] + counts[1]));
+                    for (line_iters, ids) |line_iter, side_ids| {
+                        for (side_ids, 0..) |*id, line_num| {
+                            const result = id_map.getOrPutAssumeCapacity(try line_iter.get(line_num));
+                            if (!result.found_existing) {
+                                result.value_ptr.* = id_count;
+                                id_count += 1;
                             }
-
-                            // backwards
-                            k = kmin;
-                            while (k <= kmax) {
-                                defer k += 2;
-                                const pkm = self.b[@intCast(z + k - 1 - z * @divFloor(k - 1, z))];
-                                const pkp = self.b[@intCast(z + k + 1 - z * @divFloor(k + 1, z))];
-                                const u = if (k == -hh or (k != hh and pkm < pkp)) pkp else pkm + 1;
-                                const v = u - k;
-                                var x = u;
-                                var y = v;
-                                while (x < n and y < m and try self.eq(@intCast(offsetx - x), @intCast(offsety - y))) {
-                                    x += 1;
-                                    y += 1;
-                                }
-                                self.b[@intCast(z + k - z * @divFloor(k, z))] = x;
-                                if (parity == 0) {
-                                    const zz = w - k;
-                                    if (zz >= -hh and zz <= hh and x + self.b[@intCast(zz - z * @divFloor(zz, z))] >= n) {
-                                        if (h > 0 or x != u) {
-                                            try self.stack.append(self.allocator, i + n - u);
-                                            try self.stack.append(self.allocator, u);
-                                            try self.stack.append(self.allocator, j + m - v);
-                                            try self.stack.append(self.allocator, v);
-                                            n = n - x;
-                                            m = m - y;
-                                            z = 2 * (@min(n, m) + 1);
-                                            continue :z_block;
-                                        } else break :h_loop;
-                                    }
-                                }
-                            }
+                            id.* = result.value_ptr.*;
                         }
+                    }
+                }
 
-                        if (n == m) {
+                // the common prefix and suffix stay unchanged
+                var start: usize = 0;
+                while (start < counts[0] and start < counts[1] and ids[0][start] == ids[1][start]) start += 1;
+                var ends = counts;
+                while (ends[0] > start and ends[1] > start and ids[0][ends[0] - 1] == ids[1][ends[1] - 1]) {
+                    ends[0] -= 1;
+                    ends[1] -= 1;
+                }
+
+                // a line with no equal line in the other middle is changed. the rest
+                // are compacted to the front of the id arrays for the search.
+                const sides = try allocator.alloc(u2, id_count);
+                defer allocator.free(sides);
+                @memset(sides, 0);
+                for (ids, ends, 0..) |side_ids, end, side| {
+                    for (side_ids[start..end]) |id| sides[id] |= @as(u2, 1) << @intCast(side);
+                }
+                var lines: [2][]usize = undefined;
+                lines[0] = try allocator.alloc(usize, ends[0] - start);
+                defer allocator.free(lines[0]);
+                lines[1] = try allocator.alloc(usize, ends[1] - start);
+                defer allocator.free(lines[1]);
+                var lens: [2]usize = .{ 0, 0 };
+                for (ids, changed, lines, &lens, ends, 0..) |side_ids, side_changed, side_lines, *len, end, side| {
+                    const other: u2 = @as(u2, 1) << @intCast(1 - side);
+                    for (start..end) |line_num| {
+                        if (sides[side_ids[line_num]] & other == 0) {
+                            side_changed[line_num] = true;
                             continue;
                         }
-                        if (m > n) {
-                            i += n;
-                            j += n;
-                            m -= n;
-                            n = 0;
-                        } else {
-                            i += m;
-                            j += m;
-                            n -= m;
-                            m = 0;
-                        }
-
-                        break;
+                        side_ids[len.*] = side_ids[line_num];
+                        side_lines[len.*] = line_num;
+                        len.* += 1;
                     }
+                }
 
-                    if (n + m != 0) {
-                        if (self.range_maybe) |*range| {
-                            if (range.del_end == i or range.ins_end == j) {
-                                range.del_end = @intCast(i + n);
-                                range.ins_end = @intCast(j + m);
-                                continue :action .pop;
-                            }
-                        }
-
-                        const range_maybe = self.range_maybe;
-                        self.range_maybe = .{
-                            .del_start = @intCast(i),
-                            .del_end = @intCast(i + n),
-                            .ins_start = @intCast(j),
-                            .ins_end = @intCast(j + m),
-                        };
-
-                        if (range_maybe) |range| {
-                            self.deferred_range = range;
-                            self.i = i;
-                            self.n = n;
-                            self.j = j;
-                            self.m = m;
-                            self.z = z;
-                            return .pop;
-                        }
-                    }
-
-                    continue :action .pop;
-                },
-                .pop => {
-                    if (self.stack.items.len == 0) return null;
-
-                    m = self.stack.pop() orelse unreachable;
-                    j = self.stack.pop() orelse unreachable;
-                    n = self.stack.pop() orelse unreachable;
-                    i = self.stack.pop() orelse unreachable;
-                    z = 2 * (@min(n, m) + 1);
-                    continue :action .push;
-                },
+                try search(allocator, ids[0][0..lens[0]], ids[1][0..lens[1]], lines[0][0..lens[0]], lines[1][0..lens[1]], changed[0], changed[1]);
             }
-        }
 
-        pub fn init(allocator: std.mem.Allocator, line_iter_a: *LineIterator(repo_kind, repo_opts), line_iter_b: *LineIterator(repo_kind, repo_opts)) !MyersDiffIterator(repo_kind, repo_opts) {
-            const i: usize = 0;
-            const n = line_iter_a.count();
-            const m = line_iter_b.count();
-            const z = (@min(n, m) + 1) * 2;
+            // pair the unchanged lines in order
+            const new_lines = try allocator.alloc(?usize, counts[0]);
+            var new_line: usize = 0;
+            for (new_lines, changed[0]) |*new_line_maybe, old_changed| {
+                if (old_changed) {
+                    new_line_maybe.* = null;
+                    continue;
+                }
+                while (changed[1][new_line]) new_line += 1;
+                new_line_maybe.* = new_line;
+                new_line += 1;
+            }
 
-            const b = try allocator.alloc(isize, 2 * z);
-            errdefer allocator.free(b);
-            @memset(b, 0);
-
-            return MyersDiffIterator(repo_kind, repo_opts){
+            return .{
                 .allocator = allocator,
-                .cache = .empty,
-                .stack = .empty,
-                .action = .push,
-                .b = b,
-                .i = @intCast(i),
-                .j = @intCast(i),
-                .n = @intCast(n),
-                .m = @intCast(m),
-                .z = @intCast(z),
-                .range_maybe = null,
-                .deferred_range = std.mem.zeroInit(Range, .{}),
                 .line_iter_a = line_iter_a,
                 .line_iter_b = line_iter_b,
-                .next_index = 0,
+                .new_lines = new_lines,
                 .x_index = 0,
                 .y_index = 0,
-                .edit_count = 0,
             };
         }
 
-        pub fn next(self: *MyersDiffIterator(repo_kind, repo_opts)) !?Edit {
-            if (self.next_index >= self.cache.items.len) {
-                const action = try self.diff(self.action orelse return null);
-                self.action = action;
+        /// linear-space myers over the remaining ids, marking changed lines
+        fn search(
+            allocator: std.mem.Allocator,
+            ids_a: []const u32,
+            ids_b: []const u32,
+            lines_a: []const usize,
+            lines_b: []const usize,
+            changed_a: []bool,
+            changed_b: []bool,
+        ) !void {
+            const furthest = try allocator.alloc(isize, 4 * (@min(ids_a.len, ids_b.len) + 1));
+            defer allocator.free(furthest);
+            var stack: std.ArrayList(isize) = .empty;
+            defer stack.deinit(allocator);
+            var steps: u64 = 0;
 
-                const range = if (.pop == action)
-                    self.deferred_range
-                else if (self.range_maybe) |range|
-                    range
-                else
-                    return null;
+            var i: isize = 0;
+            var j: isize = 0;
+            var n: isize = @intCast(ids_a.len);
+            var m: isize = @intCast(ids_b.len);
 
-                const sx: usize = @intCast(range.del_start);
-                const ex: usize = @intCast(range.del_end);
-                const sy: usize = @intCast(range.ins_start);
-                const ey: usize = @intCast(range.ins_end);
+            while (true) {
+                var z = 2 * (@min(n, m) + 1);
+                z_block: while (n > 0 and m > 0) {
+                    @memset(furthest[0..@intCast(2 * z)], 0);
 
-                // abort if the edit distance (inserted + deleted lines) exceeds
-                // the cutoff. checked before appending so we never allocate the
-                // batch that would blow the limit, bounding both the memory of
-                // the cache and the O(N*D) work spent searching for more edits.
-                self.edit_count += (ex - sx) + (ey - sy);
-                if (self.edit_count > repo_opts.max_edit_count) {
-                    return error.DiffTooLarge;
-                }
+                    const w = n - m;
+                    const l = n + m;
+                    const parity = l & 1;
+                    const offsetx = i + n - 1;
+                    const offsety = j + m - 1;
+                    const hmax = @as(usize, @intCast(l + parity)) / 2;
 
-                for (self.x_index..sx, self.y_index..sy) |old_idx, new_idx| {
-                    const old_offset = self.line_iter_a.line_offsets[old_idx];
-                    const new_offset = self.line_iter_b.line_offsets[new_idx];
-                    try self.cache.append(self.allocator, .{
-                        .eql = .{
-                            .old_line = .{ .num = old_idx, .offset = old_offset },
-                            .new_line = .{ .num = new_idx, .offset = new_offset },
-                        },
-                    });
-                }
+                    h_loop: for (0..hmax + 1) |h| {
+                        // past the budget, the subproblem is all changed
+                        if (steps > repo_opts.max_diff_work) break :z_block;
 
-                for (sx..ex) |old_idx| {
-                    const old_offset = self.line_iter_a.line_offsets[old_idx];
-                    try self.cache.append(self.allocator, .{
-                        .del = .{
-                            .old_line = .{ .num = old_idx, .offset = old_offset },
-                        },
-                    });
-                }
+                        const hh: isize = @intCast(h);
+                        const kmin: isize = 2 * @max(0, hh - m) - hh;
+                        const kmax: isize = hh - 2 * @max(0, hh - n);
 
-                for (sy..ey) |new_idx| {
-                    const new_offset = self.line_iter_b.line_offsets[new_idx];
-                    try self.cache.append(self.allocator, .{
-                        .ins = .{
-                            .new_line = .{ .num = new_idx, .offset = new_offset },
-                        },
-                    });
-                }
+                        // forwards
+                        var k: isize = kmin;
+                        while (k <= kmax) {
+                            defer k += 2;
+                            const gkm = furthest[@intCast(k - 1 - z * @divFloor(k - 1, z))];
+                            const gkp = furthest[@intCast(k + 1 - z * @divFloor(k + 1, z))];
+                            const u = if (k == -hh or (k != hh and gkm < gkp)) gkp else gkm + 1;
+                            const v = u - k;
+                            var x = u;
+                            var y = v;
+                            while (x < n and y < m and ids_a[@intCast(i + x)] == ids_b[@intCast(j + y)]) {
+                                x += 1;
+                                y += 1;
+                            }
+                            steps += @intCast(x - u + 1);
+                            furthest[@intCast(k - z * @divFloor(k, z))] = x;
+                            if (parity == 1) {
+                                const zz = w - k;
+                                if (zz >= 1 - hh and zz < hh and x + furthest[@intCast(z + zz - z * @divFloor(zz, z))] >= n) {
+                                    if (h > 1 or x != u) {
+                                        try stack.append(allocator, i + x);
+                                        try stack.append(allocator, n - x);
+                                        try stack.append(allocator, j + y);
+                                        try stack.append(allocator, m - y);
+                                        n = u;
+                                        m = v;
+                                        z = 2 * (@min(n, m) + 1);
+                                        continue :z_block;
+                                    } else break :h_loop;
+                                }
+                            }
+                        }
 
-                if (null == action) {
-                    for (ex..self.line_iter_a.count(), ey..self.line_iter_b.count()) |old_idx, new_idx| {
-                        const old_offset = self.line_iter_a.line_offsets[old_idx];
-                        const new_offset = self.line_iter_b.line_offsets[new_idx];
-                        try self.cache.append(self.allocator, .{
-                            .eql = .{
-                                .old_line = .{ .num = old_idx, .offset = old_offset },
-                                .new_line = .{ .num = new_idx, .offset = new_offset },
-                            },
-                        });
+                        // backwards
+                        k = kmin;
+                        while (k <= kmax) {
+                            defer k += 2;
+                            const pkm = furthest[@intCast(z + k - 1 - z * @divFloor(k - 1, z))];
+                            const pkp = furthest[@intCast(z + k + 1 - z * @divFloor(k + 1, z))];
+                            const u = if (k == -hh or (k != hh and pkm < pkp)) pkp else pkm + 1;
+                            const v = u - k;
+                            var x = u;
+                            var y = v;
+                            while (x < n and y < m and ids_a[@intCast(offsetx - x)] == ids_b[@intCast(offsety - y)]) {
+                                x += 1;
+                                y += 1;
+                            }
+                            steps += @intCast(x - u + 1);
+                            furthest[@intCast(z + k - z * @divFloor(k, z))] = x;
+                            if (parity == 0) {
+                                const zz = w - k;
+                                if (zz >= -hh and zz <= hh and x + furthest[@intCast(zz - z * @divFloor(zz, z))] >= n) {
+                                    if (h > 0 or x != u) {
+                                        try stack.append(allocator, i + n - u);
+                                        try stack.append(allocator, u);
+                                        try stack.append(allocator, j + m - v);
+                                        try stack.append(allocator, v);
+                                        n = n - x;
+                                        m = m - y;
+                                        z = 2 * (@min(n, m) + 1);
+                                        continue :z_block;
+                                    } else break :h_loop;
+                                }
+                            }
+                        }
                     }
-                }
 
-                self.x_index = ex;
-                self.y_index = ey;
-            }
-
-            const edit = self.cache.items[self.next_index];
-            self.next_index += 1;
-            return edit;
-        }
-
-        pub fn get(self: *MyersDiffIterator(repo_kind, repo_opts), old_line: usize) !?usize {
-            while (try self.next()) |_| {}
-
-            for (self.cache.items) |edit| {
-                if (.eql == edit) {
-                    if (edit.eql.old_line.num < old_line) {
-                        continue;
-                    } else if (edit.eql.old_line.num == old_line) {
-                        return edit.eql.new_line.num;
+                    // at most one line differs, and it is after the common part
+                    if (m > n) {
+                        i += n;
+                        j += n;
+                        m -= n;
+                        n = 0;
                     } else {
-                        break;
+                        i += m;
+                        j += m;
+                        n -= m;
+                        m = 0;
                     }
+                    break;
                 }
+
+                for (lines_a[@intCast(i)..@intCast(i + n)]) |line_num| changed_a[line_num] = true;
+                for (lines_b[@intCast(j)..@intCast(j + m)]) |line_num| changed_b[line_num] = true;
+
+                if (stack.items.len == 0) return;
+                m = stack.pop() orelse unreachable;
+                j = stack.pop() orelse unreachable;
+                n = stack.pop() orelse unreachable;
+                i = stack.pop() orelse unreachable;
             }
-            return null;
         }
 
-        pub fn contains(self: *MyersDiffIterator(repo_kind, repo_opts), old_line: usize) !bool {
-            if (try self.get(old_line)) |_| {
-                return true;
-            } else {
-                return false;
-            }
+        pub fn next(self: *Self) !?Edit {
+            const x = self.x_index;
+            const y = self.y_index;
+            if (x < self.new_lines.len) {
+                const new_line = self.new_lines[x] orelse {
+                    self.x_index += 1;
+                    return .{ .del = .{ .old_line = .{ .num = x, .offset = self.line_iter_a.line_offsets[x] } } };
+                };
+                if (y == new_line) {
+                    self.x_index += 1;
+                    self.y_index += 1;
+                    return .{ .eql = .{
+                        .old_line = .{ .num = x, .offset = self.line_iter_a.line_offsets[x] },
+                        .new_line = .{ .num = y, .offset = self.line_iter_b.line_offsets[y] },
+                    } };
+                }
+            } else if (y == self.line_iter_b.count()) return null;
+            self.y_index += 1;
+            return .{ .ins = .{ .new_line = .{ .num = y, .offset = self.line_iter_b.line_offsets[y] } } };
         }
 
-        pub fn reset(self: *MyersDiffIterator(repo_kind, repo_opts)) !void {
+        pub fn get(self: *const Self, old_line: usize) ?usize {
+            if (old_line >= self.new_lines.len) return null;
+            return self.new_lines[old_line];
+        }
+
+        pub fn reset(self: *Self) void {
             self.line_iter_a.reset();
             self.line_iter_b.reset();
-            self.next_index = 0;
+            self.x_index = 0;
+            self.y_index = 0;
         }
 
-        pub fn deinit(self: *MyersDiffIterator(repo_kind, repo_opts)) void {
-            self.allocator.free(self.b);
-            self.cache.deinit(self.allocator);
-            self.stack.deinit(self.allocator);
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.new_lines);
         }
     };
 }
@@ -790,8 +742,8 @@ pub fn Diff3Iterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             // find next mismatch
             var i: usize = 0;
             while (self.inBounds(i) and
-                try self.isMatch(&self.myers_diff_iter_a, self.line_a, i) and
-                try self.isMatch(&self.myers_diff_iter_b, self.line_b, i))
+                self.isMatch(&self.myers_diff_iter_a, self.line_a, i) and
+                self.isMatch(&self.myers_diff_iter_b, self.line_b, i))
             {
                 i += 1;
             }
@@ -800,11 +752,11 @@ pub fn Diff3Iterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 if (i == 0) {
                     // find next match
                     var o = self.line_o;
-                    while (o < self.line_count_o and (!(try self.myers_diff_iter_a.contains(o)) or !(try self.myers_diff_iter_b.contains(o)))) {
+                    while (o < self.line_count_o and (self.myers_diff_iter_a.get(o) == null or self.myers_diff_iter_b.get(o) == null)) {
                         o += 1;
                     }
-                    if (try self.myers_diff_iter_a.get(o)) |a| {
-                        if (try self.myers_diff_iter_b.get(o)) |b| {
+                    if (self.myers_diff_iter_a.get(o)) |a| {
+                        if (self.myers_diff_iter_b.get(o)) |b| {
                             // return mismatching chunk
                             const line_o = self.line_o;
                             const line_a = self.line_a;
@@ -851,8 +803,8 @@ pub fn Diff3Iterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
             self.line_o = 0;
             self.line_a = 0;
             self.line_b = 0;
-            try self.myers_diff_iter_a.reset();
-            try self.myers_diff_iter_b.reset();
+            self.myers_diff_iter_a.reset();
+            self.myers_diff_iter_b.reset();
             self.finished = false;
         }
 
@@ -867,12 +819,9 @@ pub fn Diff3Iterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Rep
                 self.line_b + i < self.line_count_b;
         }
 
-        fn isMatch(self: Diff3Iterator(repo_kind, repo_opts), myers_diff_iter: *MyersDiffIterator(repo_kind, repo_opts), offset: usize, i: usize) !bool {
-            if (try myers_diff_iter.get(self.line_o + i)) |line_num| {
-                return line_num == offset + i;
-            } else {
-                return false;
-            }
+        fn isMatch(self: Diff3Iterator(repo_kind, repo_opts), myers_diff_iter: *const MyersDiffIterator(repo_kind, repo_opts), offset: usize, i: usize) bool {
+            const line_num = myers_diff_iter.get(self.line_o + i) orelse return false;
+            return line_num == offset + i;
         }
 
         fn lineRange(begin: usize, end: usize) ?Range {
@@ -983,7 +932,10 @@ pub fn Hunk(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             ins_count: usize,
         };
 
+        // header lines count from 1, and a side with no lines starts at 0
         pub fn offsets(self: Hunk(repo_kind, repo_opts)) Offsets {
+            var del_first: ?usize = null;
+            var ins_first: ?usize = null;
             var o = Offsets{
                 .del_start = 0,
                 .del_count = 0,
@@ -993,21 +945,23 @@ pub fn Hunk(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(rep
             for (self.edits.items) |edit| {
                 switch (edit) {
                     .eql => |eql| {
-                        if (o.ins_start == 0) o.ins_start = eql.new_line.num;
+                        if (ins_first == null) ins_first = eql.new_line.num;
                         o.ins_count += 1;
-                        if (o.del_start == 0) o.del_start = eql.old_line.num;
+                        if (del_first == null) del_first = eql.old_line.num;
                         o.del_count += 1;
                     },
                     .ins => |ins| {
-                        if (o.ins_start == 0) o.ins_start = ins.new_line.num;
+                        if (ins_first == null) ins_first = ins.new_line.num;
                         o.ins_count += 1;
                     },
                     .del => |del| {
-                        if (o.del_start == 0) o.del_start = del.old_line.num;
+                        if (del_first == null) del_first = del.old_line.num;
                         o.del_count += 1;
                     },
                 }
             }
+            if (del_first) |num| o.del_start = num + 1;
+            if (ins_first) |num| o.ins_start = num + 1;
             return o;
         }
     };
@@ -1098,71 +1052,61 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn next(self: *HunkIterator(repo_kind, repo_opts), allocator: std.mem.Allocator) !?Hunk(repo_kind, repo_opts) {
-            const max_margin: usize = 3;
+            // equal lines kept around each change. as in git, changes with at
+            // most twice this many equal lines between them share a hunk.
+            const context: usize = 3;
 
-            if (!self.eof) {
-                while (true) {
-                    if (try self.myers_diff.next()) |edit| {
-                        try self.next_hunk.edits.append(allocator, edit);
-                        // a full hunk is returned, so a long change comes in pieces
-                        const full = if (repo_opts.max_hunk_edits) |max_edits| self.next_hunk.edits.items.len >= max_edits else false;
+            while (!self.eof) {
+                const edit = (try self.myers_diff.next()) orelse {
+                    self.eof = true;
+                    break;
+                };
+                try self.next_hunk.edits.append(allocator, edit);
+                // a full hunk is returned, so a long change comes in pieces
+                const full = if (repo_opts.max_hunk_edits) |max_edits| self.next_hunk.edits.items.len >= max_edits else false;
 
-                        if (edit == .eql) {
-                            self.margin += 1;
-                            if (self.found_edit) {
-                                // if the end margin isn't the max,
-                                // keep adding to the hunk
-                                if (self.margin < max_margin and !full) {
-                                    continue;
-                                }
-                            }
-                            // if the begin margin is over the max,
-                            // remove the first line (which is
-                            // guaranteed to be an eql edit)
-                            else if (self.margin > max_margin) {
-                                _ = self.next_hunk.edits.orderedRemove(0);
-                                self.margin -= 1;
-                                continue;
-                            }
-                        } else {
-                            self.found_edit = true;
-                            self.margin = 0;
-                            if (!full) continue;
+                if (edit == .eql) {
+                    self.margin += 1;
+                    if (!self.found_edit) {
+                        // before a change, only its last equal lines are kept
+                        if (self.margin > context) {
+                            _ = self.next_hunk.edits.orderedRemove(0);
+                            self.margin -= 1;
                         }
-
-                        // if the diff state contains an actual edit
-                        // (that is, non-eql line)
-                        if (self.found_edit) {
-                            const hunk = self.next_hunk;
-                            self.next_hunk = Hunk(repo_kind, repo_opts){
-                                .edits = .empty,
-                            };
-                            self.found_edit = false;
-                            self.margin = 0;
-                            return hunk;
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        self.eof = true; // ensure this method returns null in the future
-
-                        if (self.found_edit) {
-                            // return the last hunk
-                            const hunk = self.next_hunk;
-                            self.next_hunk = Hunk(repo_kind, repo_opts){
-                                .edits = .empty,
-                            };
-                            self.found_edit = false;
-                            self.margin = 0;
-                            return hunk;
-                        } else {
-                            return null;
-                        }
+                        continue;
                     }
+                    // keep adding while another change could still join this hunk
+                    if (self.margin <= 2 * context and !full) continue;
+                } else {
+                    self.found_edit = true;
+                    self.margin = 0;
+                    if (!full) continue;
                 }
-            } else {
-                return null;
+
+                var hunk = self.next_hunk;
+                self.next_hunk = .{ .edits = .empty };
+                self.found_edit = false;
+                if (self.margin > 2 * context) {
+                    // the hunk keeps its context after the last change, and the
+                    // equal lines just before the next change lead into its hunk
+                    const items = hunk.edits.items;
+                    try self.next_hunk.edits.appendSlice(allocator, items[items.len - context ..]);
+                    hunk.edits.shrinkRetainingCapacity(items.len - (self.margin - context));
+                    self.margin = context;
+                } else {
+                    self.margin = 0;
+                }
+                return hunk;
             }
+
+            if (!self.found_edit) return null;
+            // the last hunk, with only its context after the last change
+            var hunk = self.next_hunk;
+            self.next_hunk = .{ .edits = .empty };
+            if (self.margin > context) hunk.edits.shrinkRetainingCapacity(hunk.edits.items.len - (self.margin - context));
+            self.found_edit = false;
+            self.margin = 0;
+            return hunk;
         }
 
         pub fn writeHunk(self: *const HunkIterator(repo_kind, repo_opts), hunk: *const Hunk(repo_kind, repo_opts), writer: *std.Io.Writer, color: bool) !void {
@@ -1194,7 +1138,7 @@ pub fn HunkIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn reset(self: *HunkIterator(repo_kind, repo_opts), allocator: std.mem.Allocator) !void {
-            try self.myers_diff.reset();
+            self.myers_diff.reset();
             self.eof = false;
             self.line_iter_a.reset();
             self.line_iter_b.reset();
@@ -1375,7 +1319,7 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
         }
 
         pub fn next(self: *FileIterator(repo_kind, repo_opts)) !?LineIteratorPair(repo_kind, repo_opts) {
-            var pair = try self.nextInternal() orelse return null;
+            var pair = try self.nextUnlimited() orelse return null;
             errdefer pair.deinit();
 
             // enforce the cumulative line budget across all files in this diff
@@ -1387,7 +1331,8 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
             return pair;
         }
 
-        fn nextInternal(self: *FileIterator(repo_kind, repo_opts)) !?LineIteratorPair(repo_kind, repo_opts) {
+        /// patch writing needs every file, so it skips the cumulative line budget
+        pub fn nextUnlimited(self: *FileIterator(repo_kind, repo_opts)) !?LineIteratorPair(repo_kind, repo_opts) {
             const state = rp.Repo(repo_kind, repo_opts).State(.read_only){ .core = self.core, .extra = .{ .moment = &self.moment } };
             var next_index = self.next_index;
             switch (self.diff_opts) {
@@ -1417,7 +1362,7 @@ pub fn FileIterator(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.Repo
                         // there is no entry, so just skip it and call this method recursively
                         else {
                             self.next_index += 1;
-                            return try self.nextInternal();
+                            return try self.nextUnlimited();
                         }
                     } else {
                         next_index -= work_dir.status.unresolved_conflicts.count();

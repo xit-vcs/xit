@@ -96,7 +96,7 @@ fn testSimple(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp.RepoOpts(r
             \\ a                                      │                                                          │
             \\                                        │                                                          │
             \\                                        │                                                          │
-            \\                                        │ @@ -0,1 +0,0 @@                                          │
+            \\                                        │ @@ -1,1 +0,0 @@                                          │
             \\                                        │ - Goodbye, world!                                        │
             \\                                        │                                                          │
             \\                                        │                                                          │
@@ -2418,14 +2418,14 @@ fn testMergeConflictSameFileEmptyBase(comptime repo_kind: rp.RepoKind, comptime 
             \\                    │ + <<<<<<< target (master)                                 │
             \\                    │   a                                                       │
             \\                    │   x                                                       │
-            \\                    │ + c                                                       │
-            \\                    │ +                                                         │
+            \\                    │   c                                                       │
+            \\                    │                                                           │
             \\                    │ + ||||||| base (7b0a80ff255e0024621edbbb4d75b2859e8601e9) │
             \\                    │ + =======                                                 │
             \\                    │ + a                                                       │
             \\                    │ + y                                                       │
-            \\                    │   c                                                       │
-            \\                    │                                                           │
+            \\                    │ + c                                                       │
+            \\                    │ +                                                         │
             \\                    │ + >>>>>>> source (foo)                                    │
             \\                    │                                                           │
             \\                    │                                                           │
@@ -3182,7 +3182,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
                 \\                    │                                                          │
                 \\                    │                                                          │
                 \\                    │                                                          │
-                \\                    │ @@ -0,0 +0,1 @@                                          │
+                \\                    │ @@ -0,0 +1,1 @@                                          │
                 \\                    │ + hi                                                     │
                 \\                    │                                                          │
                 \\                    │                                                          │
@@ -3237,7 +3237,7 @@ fn testMergeConflictFileDir(comptime repo_kind: rp.RepoKind, comptime repo_opts:
                 \\                    │                                                          │
                 \\                    │                                                          │
                 \\                    │                                                          │
-                \\                    │ @@ -0,0 +0,1 @@                                          │
+                \\                    │ @@ -0,0 +1,1 @@                                          │
                 \\                    │ + hi                                                     │
                 \\                    │                                                          │
                 \\                    │                                                          │
@@ -3406,7 +3406,7 @@ fn testMergeConflictDirFile(comptime repo_kind: rp.RepoKind, comptime repo_opts:
                 \\                    │                                                          │
                 \\                    │                                                          │
                 \\                    │                                                          │
-                \\                    │ @@ -0,0 +0,1 @@                                          │
+                \\                    │ @@ -0,0 +1,1 @@                                          │
                 \\                    │ + hi                                                     │
                 \\                    │                                                          │
                 \\                    │                                                          │
