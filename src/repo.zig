@@ -1780,8 +1780,8 @@ pub fn Repo(comptime repo_kind: RepoKind, comptime repo_opts: RepoOpts(repo_kind
                         else => |e| return e,
                     };
                 },
-                // only a push writes, so every other request reads the latest moment without locking
-                .xit => if (!server_http_backend.isReceivePack(options)) {
+                // only a push's pack writes, so every other request reads the latest moment without locking
+                .xit => if (!server_http_backend.needsWriteState(options)) {
                     var moment = try self.core.latestMoment();
                     const state = State(.read_only){ .core = &self.core, .extra = .{ .moment = &moment } };
                     server_http_backend.run(repo_kind, repo_opts, state, null, io, allocator, reader, writer, response_kind, options, progress_ctx_maybe) catch |err| switch (err) {

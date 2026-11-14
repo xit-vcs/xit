@@ -74,13 +74,10 @@ pub fn resolveDir(
     return try std.Io.Dir.path.resolveAlloc(allocator, &.{ cwd_path, dir });
 }
 
-// whether the request is part of a push, which needs a write state. every
-// other request only reads the repo.
-pub fn isReceivePack(options: Options) bool {
-    return switch (options.handler) {
-        .get_info_refs => std.mem.startsWith(u8, options.query_string, "service=git-receive-pack"),
-        .run_service => std.mem.eql(u8, options.suffix, "/git-receive-pack"),
-    };
+// whether the request needs a write state. only a push's commands and pack
+// do. its ref advertisement and every fetch request only read the repo.
+pub fn needsWriteState(options: Options) bool {
+    return options.handler == .run_service and std.mem.eql(u8, options.suffix, "/git-receive-pack");
 }
 
 // `write_state_maybe` is the state a push writes to. without one, a push is refused.
@@ -144,7 +141,7 @@ fn runRoute(
     }
 
     switch (options.handler) {
-        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, write_state_maybe, io, allocator, reader, writer, response_kind, options, &http_config),
+        .get_info_refs => try getInfoRefs(repo_kind, repo_opts, state, io, allocator, reader, writer, response_kind, options, &http_config),
         .run_service => try runService(repo_kind, repo_opts, state, write_state_maybe, io, allocator, reader, writer, response_kind, options, &http_config, progress_ctx_maybe),
     }
 }
@@ -231,7 +228,6 @@ fn getInfoRefs(
     comptime repo_kind: rp.RepoKind,
     comptime repo_opts: rp.RepoOpts(repo_kind),
     state: rp.Repo(repo_kind, repo_opts).State(.read_only),
-    write_state_maybe: ?rp.Repo(repo_kind, repo_opts).State(.read_write),
     io: std.Io,
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -274,7 +270,6 @@ fn getInfoRefs(
             try pkt.writePktFlush(writer);
         }
 
-        if (write_state_maybe == null) return error.Forbidden;
         try receive_pack.advertise(repo_kind, repo_opts, state, io, allocator, writer, .{ .protocol_version = options.protocol_version });
         // no need to make a new transaction
         return error.CancelTransaction;
