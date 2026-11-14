@@ -818,7 +818,7 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             .timestamp = i + 1,
         }, &tree, .{ .kind = .head, .name = names[i] });
         if (repo_kind == .xit and i == 0) {
-            // a mode-only commit inherits the entire file's patch state.
+            // a mode-only commit inherits the file's patch state, recording only its commit.
             try tree.addBlobEntry(@bitCast(@as(u32, 0o100755)), "f.txt", &status.index.entries.get("f.txt").?[0].?.oid);
             const mode_oid = try repo.commitAtRef(io, allocator, .{ .message = "mode only", .parent_oids = &.{oids[0]} }, &tree, .{ .kind = .head, .name = "mode_only" });
             try repo.patchAll(io, allocator, null);
@@ -827,8 +827,13 @@ fn testMergeConflictMode(comptime repo_kind: rp.RepoKind, comptime repo_opts: rp
             try std.testing.expectEqualDeep(patch.CommitStats{ .first_parent_depth = 2, .files_changed = 1 }, (try repo.commitStats(io, allocator, .{ .oid = &mode_oid })).?);
             const before = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &oids[0]))).?;
             const after = (try snapshots.getCursor(try hash.hexToInt(repo_opts.hash, &mode_oid))).?;
-            const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{.{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } }};
-            try std.testing.expectEqualDeep(try before.readPathSlot(void, path), try after.readPathSlot(void, path));
+            for ([_]patch.FileField{ .patch, .oid, .edit_set, .edit_list, .lines }) |field| {
+                const path: []const rp.Repo(.xit, repo_opts).DB.PathPart(void) = &.{
+                    .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "f.txt") } },
+                    .{ .array_list_get = @backingInt(field) },
+                };
+                try std.testing.expectEqualDeep(try before.readPathSlot(void, path), try after.readPathSlot(void, path));
+            }
         }
     }
     for ([_]usize{ 1, 2 }) |target| {
@@ -3580,16 +3585,21 @@ fn testMergeConflictBinary(
                         })).?
                     else
                         null;
-                    const entry = try snapshot.readPath(void, &.{
-                        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
-                    });
+                    // binary commits only record the commit, keeping the text fields
                     const missing = case == .initial_binary and side == 0 and i < 3;
-                    try std.testing.expectEqual(!missing, entry != null);
-                    if (parent_snapshot_maybe) |parent_snapshot| {
-                        const parent_entry = try parent_snapshot.readPath(void, &.{
+                    for ([_]patch.FileField{ .patch, .oid, .edit_set, .edit_list, .lines }) |field| {
+                        const entry_slot = try snapshot.readPathSlot(void, &.{
                             .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
+                            .{ .array_list_get = @backingInt(field) },
                         });
-                        try std.testing.expectEqualDeep(if (parent_entry) |e| try e.slot() else null, if (entry) |e| try e.slot() else null);
+                        if (field == .patch) try std.testing.expectEqual(!missing, if (entry_slot) |slot| slot.tag != .none else false);
+                        if (parent_snapshot_maybe) |parent_snapshot| {
+                            const parent_slot = try parent_snapshot.readPathSlot(void, &.{
+                                .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "bin") } },
+                                .{ .array_list_get = @backingInt(field) },
+                            });
+                            try std.testing.expectEqualDeep(parent_slot, entry_slot);
+                        }
                     }
                 }
                 parent_oid_maybe = oid;

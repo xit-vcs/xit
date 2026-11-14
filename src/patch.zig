@@ -3,7 +3,7 @@
 //!
 //! commit-id->snapshot maps each commit to a path map, initially shared with
 //! its first parent and copied on write. path strings are stored as readable
-//! keys. each file's value is an array of five database slots (FileField):
+//! keys. each file's value is an array of six database slots (FileField):
 //! - patch: the last patch created for the file, inherited if unchanged;
 //! - oid: the blob the lines describe. a binary commit keeps the last text
 //!   state, so its oid differs from the commit's blob;
@@ -25,7 +25,9 @@
 //!   most 256), so a commit rewrites only the blobs it touches and snapshots
 //!   share the rest, along with unchanged tree nodes. the blobs are large
 //!   because a write costs far more in copied tree nodes than in bytes
-//!   written, so fewer, larger blobs win despite rewriting more per change.
+//!   written, so fewer, larger blobs win despite rewriting more per change;
+//! - commit: the last commit on the first-parent chain that changed the path.
+//!   a path that has only been binary has this slot alone.
 //! commit-id->stats stores nine u64s: first-parent depth, lines added/changed/removed,
 //! bytes added/removed, then files added/changed/removed. paired removals and
 //! insertions within each edit count only as changed lines. bytes sum per-file
@@ -159,6 +161,15 @@ pub fn writeAndApplyPatches(
             stats.files_changed += 1;
         }
 
+        // every change counts as the path's last, binary and mode-only ones too
+        const path_hash = hash.hashInt(repo_opts.hash, line_iter_pair.path);
+        {
+            try snapshot.putKey(path_hash, .{ .bytes = line_iter_pair.path });
+            const fields = try DB.ArrayList(.read_write).init(try snapshot.putCursor(path_hash));
+            while (try fields.count() < @typeInfo(FileField).@"enum".field_names.len) try fields.append(.{ .slot = null });
+            try fields.put(@backingInt(FileField.commit), .{ .bytes = &hash.intToBytes(Id, commit_id_int) });
+        }
+
         // keep the last text state while the file is binary
         if (line_iter_pair.b.source == .binary) continue;
         if (std.mem.eql(u8, &line_iter_pair.a.oid, &line_iter_pair.b.oid)) continue;
@@ -174,7 +185,6 @@ pub fn writeAndApplyPatches(
             }
         }
 
-        const path_hash = hash.hashInt(repo_opts.hash, line_iter_pair.path);
         var application = PatchApplication(repo_opts){
             .file = try File(repo_opts).load(state.readOnly().extra.moment, snapshot.cursor.readOnly(), allocator, path_hash),
             .edits = .empty,
@@ -386,6 +396,35 @@ pub const CommitStats = struct {
 
     const byte_len = @typeInfo(@This()).@"struct".field_names.len * @sizeOf(u64);
 };
+
+// the commit that last changed the path, as of the given commit
+pub fn lastChange(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    moment: *const rp.Repo(.xit, repo_opts).DB.HashMap(.read_only),
+    commit_oid: *const [hash.hexLen(repo_opts.hash)]u8,
+    path: []const u8,
+) !?[hash.hexLen(repo_opts.hash)]u8 {
+    const cursor = (try moment.cursor.readPath(void, &.{
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, "commit-id->snapshot") } },
+        .{ .hash_map_get = .{ .value = try hash.hexToInt(repo_opts.hash, commit_oid) } },
+        .{ .hash_map_get = .{ .value = hash.hashInt(repo_opts.hash, path) } },
+        .{ .array_list_get = @backingInt(FileField.commit) },
+    })) orelse return null;
+    if ((try cursor.slot()).tag == .none) return null;
+    var bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
+    if ((try cursor.readBytes(&bytes)).len != bytes.len) return error.InvalidCommitId;
+    return std.fmt.bytesToHex(&bytes, .lower);
+}
+
+// removes the moment keys patch writing owns
+pub fn removePatches(
+    comptime repo_opts: rp.RepoOpts(.xit),
+    state: rp.Repo(.xit, repo_opts).State(.read_write),
+) !void {
+    for ([_][]const u8{ "commit-id->snapshot", COMMIT_ID_TO_STATS_KEY, "patch-id->edit-list", "edit-id->edit" }) |key| {
+        _ = try state.extra.moment.remove(hash.hashInt(repo_opts.hash, key));
+    }
+}
 
 pub fn readCommitStats(
     comptime repo_opts: rp.RepoOpts(.xit),
@@ -865,10 +904,14 @@ pub fn File(comptime opts: rp.RepoOpts(.xit)) type {
             var ids: std.ArrayList(Line) = .empty;
             errdefer ids.deinit(ids_allocator);
             var gaps: std.ArrayList([]const Id) = .empty;
-            const cursor = (try snapshot.readPath(void, &.{
-                .{ .hash_map_get = .{ .value = path_hash } },
-                .{ .array_list_get = @backingInt(FileField.lines) },
-            })) orelse {
+            const cursor = blk: {
+                const found = (try snapshot.readPath(void, &.{
+                    .{ .hash_map_get = .{ .value = path_hash } },
+                    .{ .array_list_get = @backingInt(FileField.lines) },
+                })) orelse break :blk null;
+                // a path that has only been binary has no lines slot
+                break :blk if ((try found.slot()).tag == .none) null else found;
+            } orelse {
                 try gaps.append(arena, &.{});
                 return .{ .ids = &.{}, .gaps = try gaps.toOwnedSlice(arena), .chunks = &.{} };
             };
@@ -1298,7 +1341,7 @@ pub fn LineId(comptime hash_kind: hash.HashKind) type {
     };
 }
 
-pub const FileField = enum(u8) { patch, oid, edit_set, edit_list, lines };
+pub const FileField = enum(u8) { patch, oid, edit_set, edit_list, lines, commit };
 
 fn writeLengthPrefixedBytes(writer: *std.Io.Writer, bytes: []const u8) !void {
     try writer.writeInt(u32, @intCast(bytes.len), .big);

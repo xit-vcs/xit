@@ -641,6 +641,8 @@ fn writeBlobWithPatches(
                 .{ .hash_map_get = .{ .value = path_hash } },
                 .{ .array_list_get = @backingInt(patch.FileField.patch) },
             })) orelse break :blk null;
+            // a path that has only been binary has no patch
+            if ((try patch_id_cursor.slot()).tag == .none) break :blk null;
             var patch_id_bytes: [hash.byteLen(repo_opts.hash)]u8 = undefined;
             _ = try patch_id_cursor.readBytes(&patch_id_bytes);
             break :blk hash.bytesToInt(repo_opts.hash, &patch_id_bytes);
